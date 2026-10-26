@@ -47,7 +47,7 @@ class Parser {
       config.assignments.push_back({location, *key, *value});
       skip_ignored();
     }
-    return {std::move(config), std::move(diagnostics_)};
+    return {std::move(config), std::move(diagnostics_), {}};
   }
 
  private:
@@ -427,15 +427,17 @@ ParseResult parse_config_file_recursive(const std::filesystem::path& requested,
   auto path = std::filesystem::weakly_canonical(requested, error_code);
   if (error_code) path = std::filesystem::absolute(requested).lexically_normal();
   if (std::find(stack.begin(), stack.end(), path) != stack.end()) {
-    return {{}, {{DiagnosticLevel::error, location, "configuration import cycle at " + path.string()}}};
+    return {{}, {{DiagnosticLevel::error, location, "configuration import cycle at " + path.string()}}, {path.string(), std::filesystem::absolute(requested).lexically_normal().string()}};
   }
 
   std::ifstream file(path);
   if (!file) {
-    return {{}, {{DiagnosticLevel::error, location, "could not open configuration file: " + path.string()}}};
+    return {{}, {{DiagnosticLevel::error, location, "could not open configuration file: " + path.string()}}, {path.string(), std::filesystem::absolute(requested).lexically_normal().string()}};
   }
   const std::string input{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
   auto parsed = Parser(input).parse();
+  parsed.source_paths.push_back(path.string());
+  parsed.source_paths.push_back(std::filesystem::absolute(requested).lexically_normal().string());
   if (!parsed.ok()) return parsed;
 
   stack.push_back(path);
@@ -462,6 +464,7 @@ ParseResult parse_config_file_recursive(const std::filesystem::path& requested,
       std::filesystem::path child(*imported_path);
       if (child.is_relative()) child = path.parent_path() / child;
       auto imported = parse_config_file_recursive(child, stack, assignment.location);
+      parsed.source_paths.insert(parsed.source_paths.end(), imported.source_paths.begin(), imported.source_paths.end());
       parsed.diagnostics.insert(parsed.diagnostics.end(),
                                 std::make_move_iterator(imported.diagnostics.begin()),
                                 std::make_move_iterator(imported.diagnostics.end()));
@@ -494,7 +497,10 @@ ParseResult parse_config(const std::string& input) { return Parser(input).parse(
 
 ParseResult parse_config_file(const std::string& path) {
   std::vector<std::filesystem::path> stack;
-  return parse_config_file_recursive(path, stack);
+  auto result = parse_config_file_recursive(path, stack);
+  std::sort(result.source_paths.begin(),result.source_paths.end());
+  result.source_paths.erase(std::unique(result.source_paths.begin(),result.source_paths.end()),result.source_paths.end());
+  return result;
 }
 
 ValidationResult validate_config(const Config& config) { return validate_config(config, {}); }

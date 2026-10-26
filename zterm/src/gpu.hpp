@@ -2,10 +2,10 @@
 
 #include <zterm/terminal.hpp>
 #include "text.hpp"
-#include <epoxy/egl.h>
-#include <epoxy/gl.h>
 #include <gbm.h>
+#include <vulkan/vulkan.h>
 #include <zwayland/client/display.hpp>
+#include <zwwm-vlk/image.hpp>
 #include <cstdint>
 #include <array>
 #include <memory>
@@ -29,8 +29,8 @@ class Gpu {
   void resize(unsigned width, unsigned height, unsigned font_size);
   void set_padding(unsigned horizontal, unsigned vertical);
   void configure(FontFamilies fonts, unsigned weight, float rounding, float icon_scale,
-                 Color background, std::array<float, 4> selection, float background_opacity);
-  void make_current();
+                 Color background, std::array<float, 4> selection, float background_opacity,
+                 std::optional<Color> selection_foreground, std::optional<Color> cursor_color, std::optional<Color> cursor_text);
   void warm(zwayland::client::Proxy& dmabuf);
   void detach();
   bool draw(Terminal& terminal, zwayland::client::Proxy& surface,
@@ -54,11 +54,21 @@ class Gpu {
   struct AtlasCursor { int x = 1, y = 1, row = 0, layer = 0; };
   struct Instance { float x, y, width, height, u, v, uw, vh, r, g, b, a, layer = 0; };
   struct Buffer;
+  struct PendingGlyph { std::vector<std::uint8_t> pixels; zwwm::vlk::Image::Region region; };
+  enum class Pass { Opaque, Blended, Inverted, Glyphs };
   zwayland::client::Display& display_;
   int device_fd_ = -1;
   gbm_device* gbm_ = nullptr;
-  EGLDisplay egl_ = EGL_NO_DISPLAY;
-  EGLContext context_ = EGL_NO_CONTEXT;
+  std::shared_ptr<zwwm::vlk::Device> vulkan_;
+  zwwm::vlk::ImageRef atlas_, color_atlas_;
+  std::array<std::vector<PendingGlyph>, 2> pending_glyphs_;
+  VkSampler sampler_ = VK_NULL_HANDLE;
+  VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout layout_ = VK_NULL_HANDLE;
+  VkDescriptorPool pool_ = VK_NULL_HANDLE;
+  VkDescriptorSet set_ = VK_NULL_HANDLE;
+  VkShaderModule vertex_ = VK_NULL_HANDLE, fragment_ = VK_NULL_HANDLE;
+  std::array<VkPipeline, 4> pipelines_{};
   Text text_renderer_;
   FontFamilies fonts_;
   unsigned font_size_ = 0, cell_width_ = 1, cell_height_ = 1;
@@ -68,14 +78,16 @@ class Gpu {
   float background_opacity_ = 1.f;
   Color background_{16,19,25};
   std::array<float, 4> selection_color_{0.22f,0.48f,0.9f,0.45f};
+  std::optional<Color> selection_foreground_, cursor_color_, cursor_text_;
+  std::optional<Instance> cursor_glyph_;
   unsigned width_ = 0, height_ = 0;
   unsigned padding_x_ = 0, padding_y_ = 0;
   std::uint32_t format_ = 0;
   std::vector<std::uint64_t> modifiers_;
   std::vector<std::unique_ptr<Buffer>> buffers_;
   std::unordered_map<std::string, Glyph> glyphs_;
-  GLuint program_ = 0, atlas_ = 0, color_atlas_ = 0, vao_ = 0, instances_ = 0, text_instances_ = 0, cursor_instances_ = 0, selection_instances_ = 0;
   std::uint64_t cached_revision_ = 0;
+  std::uint64_t cached_selection_revision_ = 0;
   std::array<AtlasCursor, 2> atlas_cursors_{};
   unsigned atlas_generation_ = 0;
   std::vector<Instance> backgrounds_, text_, selection_rects_;
@@ -85,7 +97,9 @@ class Gpu {
   void append_glyph(const Glyph& glyph, float x, float y, Color color);
   void build_text(Terminal& terminal);
   void set_font_size(unsigned size);
-  void batch(const std::vector<Instance>& instances, bool text, bool upload, GLuint buffer = 0);
+  void reset_atlas();
+  void create_pipelines();
+  void flush_glyphs();
   std::unique_ptr<Buffer> create_buffer(zwayland::client::Proxy& dmabuf);
 };
 

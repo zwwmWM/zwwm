@@ -10,7 +10,7 @@ install -m 0644 "$root/xdg-desktop-portal-zwwm/data/zwwm.portal" "$portal_dir/zw
 install -m 0644 "$root/xdg-desktop-portal-zwwm/data/zwwm-gtk.portal" "$portal_dir/zwwm-gtk.portal"
 install -m 0644 "$root/xdg-desktop-portal-zwwm/data/zwwm-portals.conf" "$portal_root/zwwm-portals.conf"
 
-ZWWM_CONFIG="$root/zwwm/data/config.zw"
+ZWWM_CONFIG="$HOME/.config/zwwm/config.zw"
 
 session=(env -u WAYLAND_DISPLAY -u WAYLAND_DEBUG
   XDG_CURRENT_DESKTOP=zwwm

@@ -129,6 +129,10 @@ protocol_specs = [
   ['ext-zwwm-manager-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/ext-zwwm-manager-v1.xml')],
   ['zwwm-client-connection-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-client-connection-v1.xml')],
   ['xwayland-shell', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm_xwayland_shell.xml')],
+  ['wlr-output-power-management-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/wlr-output-power-management-unstable-v1.xml')],
+  ['input-method-unstable-v2', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/input-method-unstable-v2.xml')],
+  ['virtual-keyboard-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/virtual-keyboard-unstable-v1.xml')],
+  ['zwwm-edge-swipe-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-edge-swipe-v1.xml')],
 ]
 
 protocol_server_headers = []
@@ -161,13 +165,12 @@ zw_lang = static_library(
 zw_lang_dep = declare_dependency(link_with: zw_lang, include_directories: zw_lang_inc)
 
 shader_sources = files(
+  'zwwm-renderer/shaders/zwwm.glsl',
+  'zwwm-renderer/shaders/glass_physics.glsl',
   'zwwm-renderer/shaders/surface.vert',
   'zwwm-renderer/shaders/surface.frag',
-  'zwwm-renderer/shaders/kawase.vert',
-  'zwwm-renderer/shaders/kawase.frag',
   'zwwm-renderer/shaders/glass.frag',
-  'zwwm-renderer/shaders/glass_physics.glsl',
-  'zwwm-renderer/shaders/rounded_rect.glsl',
+  'zwwm-renderer/shaders/kawase.frag',
 )
 embedded_shaders = custom_target(
   'embedded-shaders',
@@ -176,44 +179,62 @@ embedded_shaders = custom_target(
   command: [python, files('build-aux/embed-shaders.py'), '@OUTPUT@', '@INPUT@'],
 )
 
-egl = dependency('egl')
-gles = dependency('glesv2')
-epoxy = dependency('epoxy')
+vulkan = dependency('vulkan', version: '>=1.3')
 libdrm = dependency('libdrm')
 libpng = dependency('libpng')
+glslang = dependency(
+  'glslang',
+  method: 'cmake',
+  modules: ['glslang::glslang', 'glslang::SPIRV', 'glslang::glslang-default-resource-limits'],
+  required: false,
+)
+if not glslang.found()
+  glslang = declare_dependency(dependencies: [
+    cpp_compiler.find_library('glslang'),
+    cpp_compiler.find_library('SPIRV'),
+    cpp_compiler.find_library('glslang-default-resource-limits'),
+  ])
+endif
+# Vulkan create-info structs are filled with partial designated initializers.
+vulkan_cpp = strict_cpp + ['-Wno-missing-designated-field-initializers']
+
+zwwm_vlk_inc = include_directories('zwwm-vlk/include')
+zwwm_vlk = static_library(
+  'zwwm-vlk',
+  [
+    'zwwm-vlk/src/device.cpp',
+    'zwwm-vlk/src/dmabuf.cpp',
+    'zwwm-vlk/src/image.cpp',
+    'zwwm-vlk/src/window.cpp',
+  ],
+  include_directories: zwwm_vlk_inc,
+  dependencies: [zwayland_client_dep, vulkan, libdrm],
+  cpp_args: vulkan_cpp,
+)
+zwwm_vlk_dep = declare_dependency(
+  link_with: zwwm_vlk,
+  include_directories: zwwm_vlk_inc,
+  dependencies: [zwayland_client_dep, vulkan],
+)
+
 renderer_inc = include_directories('zwwm-renderer/include')
 zwwm_renderer = static_library(
   'zwwm_renderer',
   [
-    'zwwm-renderer/src/dmabuf.cpp',
-    'zwwm-renderer/src/egl_dmabuf_importer.cpp',
     'zwwm-renderer/src/scene.cpp',
-    'zwwm-renderer/src/opengl.cpp',
+    'zwwm-renderer/src/shader_compiler.cpp',
+    'zwwm-renderer/src/vulkan.cpp',
     embedded_shaders,
   ],
   include_directories: [renderer_inc, root_inc],
-  dependencies: [egl, epoxy, libdrm, libpng],
-  cpp_args: strict_cpp + data_cpp,
+  dependencies: [zwwm_vlk_dep, libpng, glslang],
+  cpp_args: vulkan_cpp + data_cpp,
 )
 zwwm_renderer_dep = declare_dependency(
   link_with: zwwm_renderer,
   include_directories: [renderer_inc, root_inc],
-  dependencies: [egl, epoxy, libdrm, libpng],
+  dependencies: [zwwm_vlk_dep, libpng, glslang],
   sources: embedded_shaders,
-)
-
-zwwm_egl_inc = include_directories('zwwm-egl/include')
-zwwm_egl = static_library(
-  'zwwm-egl',
-  'zwwm-egl/src/window.cpp',
-  include_directories: zwwm_egl_inc,
-  dependencies: [zwayland_client_dep, egl, gles],
-  cpp_args: strict_cpp,
-)
-zwwm_egl_dep = declare_dependency(
-  link_with: zwwm_egl,
-  include_directories: zwwm_egl_inc,
-  dependencies: [zwayland_client_dep, egl, gles],
 )
 
 zwwm_inc = include_directories('zwwm/include')
@@ -298,6 +319,9 @@ compositor_sources = files(
   'zwwm/src/compositor_server_data_device.cpp',
   'zwwm/src/compositor_server_input.cpp',
   'zwwm/src/compositor_server_virtual_keyboard.cpp',
+  'zwwm/src/compositor_server_text_input.cpp',
+  'zwwm/src/compositor_server_edge_swipe.cpp',
+  'zwwm/src/compositor_server_output_power.cpp',
   'zwwm/src/compositor_server_touch.cpp',
   'zwwm/src/compositor_server_idle.cpp',
   'zwwm/src/compositor_server_layer_shell.cpp',
@@ -413,7 +437,6 @@ zwwm = executable(
     zwwm_master_stack_dep,
     zwwm_renderer_dep,
     zwwm_animation_dep,
-    zwwm_egl_dep,
   ],
   cpp_args: strict_cpp + version_cpp + ['-DZWWM_PORTAL_EXECUTABLE="xdg-desktop-portal-zwwm"'],
   install: true,
@@ -464,12 +487,16 @@ install_data(
   'zwwm/data/shaders/window.frag',
   'zwwm/data/shaders/border.frag',
   'zwwm/data/shaders/background.frag',
+  'zwwm/data/shaders/shadow.frag',
+  'zwwm-renderer/shaders/zwwm.glsl',
   install_dir: '/etc/xdg/zwwm/shaders',
 )
 install_data(
   'zwwm/data/shaders/window.frag',
   'zwwm/data/shaders/border.frag',
   'zwwm/data/shaders/background.frag',
+  'zwwm/data/shaders/shadow.frag',
+  'zwwm-renderer/shaders/zwwm.glsl',
   install_dir: get_option('datadir') / 'zwwm/shaders',
 )
 install_data('zwwm/data/zwwm.desktop', install_dir: get_option('datadir') / 'wayland-sessions')

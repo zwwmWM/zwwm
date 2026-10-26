@@ -44,6 +44,7 @@ class Text {
   std::unordered_set<std::string> font_warnings_;
   std::unordered_set<char32_t> missing_glyphs_;
   std::string font_family(FontRole role, bool bold, bool italic) const;
+  bool cell_graphic(std::string_view text, Bitmap& bitmap) const;
 };
 
 }  // namespace zterm

@@ -8,10 +8,12 @@
 , makeWrapper
 , wrapQtAppsHook
 , dbus
-, libepoxy
 , fontconfig
 , freetype
-, libglvnd
+, vulkan-headers
+, vulkan-loader
+, glslang
+, spirv-tools
 , libdrm
 , libgbm
 , libinput
@@ -49,7 +51,7 @@ stdenv.mkDerivation {
       ../zw-lang
       ../zwayland-scanner
       ../zwayland
-      ../zwwm-egl
+      ../zwwm-vlk
       ../zwwm-protocols
       ../zwwm-renderer
       ../zwwm
@@ -61,10 +63,12 @@ stdenv.mkDerivation {
 
   buildInputs = [
     dbus
-    libepoxy
     fontconfig
     freetype
-    libglvnd
+    vulkan-headers
+    vulkan-loader
+    glslang
+    spirv-tools
     libdrm
     libgbm
     libinput

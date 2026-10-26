@@ -6,6 +6,8 @@
 #include "session.hpp"
 #include "clipboard.hpp"
 #include "config.hpp"
+#include "config_watch.hpp"
+#include "theme.hpp"
 #include "connection.hpp"
 #include <zterm/terminal.hpp>
 
@@ -65,6 +67,7 @@ class App final : public Session {
     terminal_.set_palette(options_.palette);
     terminal_.set_cursor_style(options_.cursor);
     terminal_.set_input_options(options_.mouse_reporting, options_.alternate_scroll);
+    config_watch_.watch(options_.config_sources);
   }
   ~App() {
     try { retire(); } catch (...) {}
@@ -107,6 +110,7 @@ class App final : public Session {
             std::vector<std::string> environment) override {
     if (!display_->dispatch_pending()) throw std::runtime_error("terminal connection closed");
     options_ = std::move(options); reload_ = std::move(reload);
+    config_watch_.watch(options_.config_sources);
     directory_ = std::move(directory); environment_ = std::move(environment);
     terminal_ = Terminal(24,80,options_.history_lines);
     terminal_.set_default_colors(options_.foreground, options_.background);
@@ -158,8 +162,15 @@ class App final : public Session {
 
   void prepare_frame() override {
     if (!display_->dispatch_pending()) { running_ = false; return; }
-    if (!running_) { (void)display_->flush(); return; }
+    if (config_watch_.ready()) reload_pending_ = true;
     if (reload_pending_) reload_config();
+    if (!running_) {
+      if (resize_ && gpu_) {
+        gpu_->resize((width_ * scale_ + 119) / 120,(height_ * scale_ + 119) / 120,std::max(1U,(options_.size * scale_ + 60)/120));
+        gpu_->warm(*dmabuf_); resize_ = false;
+      }
+      (void)display_->flush(); return;
+    }
     if (resize_ && configured_) resize();
     if (grid_resize_pending_ && std::chrono::steady_clock::now() >= grid_resize_deadline_) apply_grid_resize();
     if (configured_ && terminal_.dirty && frame_ == nullptr && buffer_available_) render();
@@ -172,13 +183,15 @@ class App final : public Session {
     fds.insert(fds.end(), {
       {display_->fd(), static_cast<short>(POLLIN | (display_->wants_write() ? POLLOUT : 0)), 0},
       {pty_, static_cast<short>(POLLIN | (output_.empty() ? 0 : POLLOUT)), 0},
-      {signals_, POLLIN, 0}, {repeat_timer_, POLLIN, 0}, {blink_timer_, POLLIN, 0}, {selection_timer_, POLLIN, 0}});
+      {signals_, POLLIN, 0}, {repeat_timer_, POLLIN, 0}, {blink_timer_, POLLIN, 0}, {selection_timer_, POLLIN, 0}, {config_watch_.fd(), POLLIN, 0}});
     if (clipboard_) clipboard_->poll_descriptors(fds);
   }
 
   int timeout() const override {
-    return grid_resize_pending_ ? std::max(0, static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+    const int resize = grid_resize_pending_ ? std::max(0, static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
       grid_resize_deadline_ - std::chrono::steady_clock::now()).count()) + 1) : -1;
+    const int config = config_watch_.timeout();
+    return resize < 0 ? config : config < 0 ? resize : std::min(resize,config);
   }
 
   bool running() const override { return running_; }
@@ -215,7 +228,8 @@ class App final : public Session {
         extend_selection();
       }
     }
-    if (clipboard_) clipboard_->dispatch(fds.subspan(6));
+    if (fds[6].revents & POLLIN) config_watch_.consume();
+    if (clipboard_) clipboard_->dispatch(fds.subspan(7));
   }
 
   int run() {
@@ -235,6 +249,7 @@ class App final : public Session {
 
   void retire() override {
     running_ = false; terminal_.title = {};
+    grid_resize_pending_ = false;
     if (pty_ >= 0) { close(pty_); pty_ = -1; }
     if (child_ > 0) { kill(-child_, SIGHUP); (void)waitpid(child_, nullptr, WNOHANG); child_ = -1; }
     for (int* fd : {&signals_,&repeat_timer_,&blink_timer_,&selection_timer_}) if (*fd >= 0) { close(*fd); *fd = -1; }
@@ -255,6 +270,7 @@ class App final : public Session {
  private:
   struct Output { Proxy* proxy; unsigned scale = 1; };
   Options options_;
+  ConfigWatch config_watch_;
   Terminal terminal_;
   std::unique_ptr<zwayland::client::Display> display_;
   std::unique_ptr<Gpu> gpu_;
@@ -406,7 +422,8 @@ class App final : public Session {
 
   void configure_gpu(const Options& options) {
     gpu_->configure(options.fonts, options.weight, options.text_rounding, options.icon_scale,
-                     options.background, options.selection, options.background_opacity);
+                     options.background, options.selection, options.background_opacity,
+                     options.selection_foreground,options.cursor_color,options.cursor_text);
   }
 
   void reload_config() {
@@ -420,7 +437,11 @@ class App final : public Session {
       terminal_.set_cursor_style(next.cursor);
       terminal_.set_input_options(next.mouse_reporting, next.alternate_scroll);
       options_ = std::move(next);
+      config_watch_.watch(options_.config_sources);
       resize_ = true;
+    } catch (const ConfigError& error) {
+      auto paths = options_.config_sources; paths.insert(paths.end(),error.sources.begin(),error.sources.end());
+      config_watch_.watch(paths); std::fprintf(stderr,"zterm: config reload failed: %s\n",error.what());
     } catch (const std::exception& error) { std::fprintf(stderr, "zterm: config reload failed: %s\n", error.what()); }
   }
 
@@ -494,6 +515,7 @@ class App final : public Session {
       values["SHELL"] = command.front();
     }
     values["TERM"] = "xterm-256color"; values["COLORTERM"] = "truecolor"; values.erase("WAYLAND_SOCKET");
+    values["TERM_PROGRAM"] = "zterm"; values["TERM_PROGRAM_VERSION"] = "0.1.0-dev";
     const auto directory = directory_.empty() ? std::filesystem::current_path() : std::filesystem::path(directory_);
     values["PWD"] = directory.string();
     for (const char* name : {"WAYLAND_DISPLAY","XDG_RUNTIME_DIR"}) if (const auto* value = std::getenv(name)) values[name] = value;
@@ -835,6 +857,9 @@ int main(int argc, char** argv) {
     if (MB_CUR_MAX < 4) (void)setlocale(LC_CTYPE, "C.UTF-8");
     auto options = zterm::load_options(argc, argv);
     if (options.action == zterm::Options::Action::Help) { zterm::print_help(); return 0; }
+    if (options.action == zterm::Options::Action::ListThemes) {
+      for (const auto& theme : zterm::theme_names()) std::puts(theme.c_str()); return 0;
+    }
     if (options.action == zterm::Options::Action::Daemon) return zterm::run_daemon();
     return zterm::App(std::move(options), [argc, argv] { return zterm::load_options(argc, argv); }).run();
   } catch (const std::exception& error) { std::fprintf(stderr, "zterm: %s\n", error.what()); return 1; }

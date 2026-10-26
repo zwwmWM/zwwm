@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=@CMAKE_INSTALL_FULL_LIBDIR@
+includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+
+Name: zwwm-vlk
+Description: zwwm Vulkan device, DMA-BUF image, and presentation helpers
+Version: @ZWWM_VLK_VERSION@
+Requires: zwayland-client vulkan >= 1.3
+Requires.private: libdrm
+Libs: -L${libdir} -lzwwm-vlk
+Cflags: -I${includedir}

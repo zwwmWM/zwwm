@@ -14,12 +14,14 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace protocol = zwayland::generated;
 
 namespace zwwm::detail {
+void register_buffer(Buffer* buffer);
 namespace {
 
 struct Params {
@@ -100,6 +102,7 @@ void create_buffer(zwayland::server::Client* client, zwayland::server::Resource*
     return;
   }
   auto* buffer = new (std::nothrow) Buffer;
+  if (buffer != nullptr) register_buffer(buffer);
   if (buffer != nullptr) {
     buffer->pool = pool;
     buffer->resource = buffer_resource;
@@ -221,6 +224,7 @@ Buffer* import_params(zwayland::server::Resource* resource, std::int32_t width, 
                                         format, params->planes};
   if (!attributes.valid()) return nullptr;
   auto* buffer = new (std::nothrow) Buffer;
+  if (buffer != nullptr) register_buffer(buffer);
   if (buffer == nullptr) return nullptr;
   buffer->width = width;
   buffer->height = height;
@@ -407,12 +411,31 @@ struct ZwpLinuxDmabufV1KDmabufHandler {
 
 }  // namespace
 
+std::unordered_map<std::uint64_t, Buffer*>& buffer_registry() {
+  static std::unordered_map<std::uint64_t, Buffer*> buffers;
+  return buffers;
+}
+
+void register_buffer(Buffer* buffer) {
+  static std::uint64_t next = 1;
+  buffer->id = next++;
+  buffer_registry()[buffer->id] = buffer;
+}
+
+Buffer* buffer_by_id(std::uint64_t id) {
+  const auto found = buffer_registry().find(id);
+  return found == buffer_registry().end() ? nullptr : found->second;
+}
+
 void send_buffer_release(Buffer* buffer) {
-  if (buffer != nullptr && buffer->resource != nullptr) protocol::wl_buffer_send_release(*buffer->resource);
+  if (buffer == nullptr) return;
+  if (buffer->holds != 0) { buffer->release_deferred = true; return; }
+  if (buffer->resource != nullptr) protocol::wl_buffer_send_release(*buffer->resource);
 }
 
 void unref_buffer(Buffer* buffer) {
   if (buffer == nullptr || --buffer->references != 0) return;
+  buffer_registry().erase(buffer->id);
   Pool* pool = buffer->pool;
   if (pool != nullptr) {
     delete buffer;

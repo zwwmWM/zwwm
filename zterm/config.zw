@@ -1,6 +1,7 @@
--- ~/.config/zterm/config.zw; reload with Ctrl+Shift+R.
+-- ~/.config/zterm/config.zw; reloads on save (Ctrl+Shift+R also reloads).
 -- Imports and uppercase variables use the same parser as zwwm.
 -- import = "appearance.zw"
+-- theme = "Matugen.conf" -- Native .zw or Ghostty themes; explicit colors below override it.
 
 font = {
   mono = "monospace"
