@@ -11,6 +11,7 @@
 #include <optional>
 #include <charconv>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <unordered_set>
 
@@ -601,8 +602,9 @@ ValidationResult validate_config(const Config& config, std::span<const Validatio
     }
     if (assignment.key == "bind") {
       const auto* list = std::get_if<Value::List>(&assignment.value.data);
-      if (list == nullptr || list->values.size() != 4) {
-        validation_error(result.diagnostics, assignment.location, "bind must contain modifier, key, action, and argument");
+      if (list == nullptr || (list->values.size() != 4 && list->values.size() != 5)) {
+        validation_error(result.diagnostics, assignment.location,
+                         "bind must contain modifier, key, action, argument, and optional flags");
       }
       continue;
     }
@@ -697,6 +699,26 @@ ValidationResult validate_config(const Config& config, std::span<const Validatio
       constexpr std::array<std::string_view, 5> keyboard_fields = {
           "rules", "model", "layout", "variant", "options"};
       warn_unknown_fields(*object, keyboard_fields, result.diagnostics, assignment.location, "keyboard");
+      continue;
+    }
+    if (assignment.key == "mobile") {
+      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
+      if (object == nullptr) {
+        validation_error(result.diagnostics, assignment.location, "mobile must be an object");
+        continue;
+      }
+      if (const auto* value = lookup_field(*object, "windows"); value != nullptr && !is_bool(*value))
+        validation_error(result.diagnostics, assignment.location, "mobile.windows must be a boolean");
+      for (const auto& [name, low, high] : {std::tuple{"edge-swipe-size", 0, 256}, std::tuple{"hold-ms", 50, 5000}}) {
+        const auto* value = lookup_field(*object, name);
+        if (value == nullptr) continue;
+        const auto* integer = std::get_if<std::int64_t>(&value->data);
+        if (integer == nullptr || *integer < low || *integer > high)
+          validation_error(result.diagnostics, assignment.location,
+                           "mobile." + std::string(name) + " must be " + std::to_string(low) + ".." + std::to_string(high));
+      }
+      constexpr std::array<std::string_view, 3> fields = {"windows", "edge-swipe-size", "hold-ms"};
+      warn_unknown_fields(*object, fields, result.diagnostics, assignment.location, "mobile");
       continue;
     }
     if (assignment.key == "overview") {
