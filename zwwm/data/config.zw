@@ -90,6 +90,19 @@ shaders = {
     role = "background"
     source = "shaders/background.frag"
   }
+  -- Optional; remove this entry to disable toplevel shadows.
+  shadow = {
+    role = "shadow"
+    source = "shaders/shadow.frag"
+    values = {
+      size = 28      -- blur reach in pixels
+      offset_x = 0
+      offset_y = 8
+      strength = 100 -- percent; raise for denser shadows
+      color = "#0000005a"
+      focused_color = "#0000008c"
+    }
+  }
 }
 
 -- Window animation timing and curve controls.

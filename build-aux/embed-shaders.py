@@ -3,34 +3,22 @@
 import pathlib
 import sys
 
+# Output name, then one source per embedded constant in this order.
+NAMES = ("zwwm_library", "glass_physics", "surface_vertex", "surface_fragment", "glass_fragment",
+         "kawase_fragment")
+
 
 def main() -> int:
-    if len(sys.argv) != 9:
-        raise SystemExit("usage: embed-shaders.py OUTPUT SURFACE_VERT SURFACE_FRAG KAWASE_VERT KAWASE_FRAG GLASS_FRAG GLASS_PHYSICS ROUNDED_RECT")
+    if len(sys.argv) != len(NAMES) + 2:
+        raise SystemExit("usage: embed-shaders.py OUTPUT ZWWM_GLSL GLASS_PHYSICS SURFACE_VERT SURFACE_FRAG "
+                         "GLASS_FRAG KAWASE_FRAG")
 
     output = pathlib.Path(sys.argv[1])
-    surface_vertex = pathlib.Path(sys.argv[2]).read_text()
-    surface_fragment = pathlib.Path(sys.argv[3]).read_text()
-    kawase_vertex = pathlib.Path(sys.argv[4]).read_text()
-    kawase_fragment = pathlib.Path(sys.argv[5]).read_text()
-    glass_fragment = pathlib.Path(sys.argv[6]).read_text()
-    glass_physics = pathlib.Path(sys.argv[7]).read_text()
-    rounded_rect = pathlib.Path(sys.argv[8]).read_text()
-
-    surface_fragment = surface_fragment.replace('#include "rounded_rect.glsl"', rounded_rect)
-    glass_fragment = glass_fragment.replace('#include "rounded_rect.glsl"', rounded_rect)
-    glass_fragment = glass_fragment.replace('#include "glass_physics.glsl"', glass_physics)
-
-    values = {
-        "surface_vertex": surface_vertex,
-        "surface_fragment": surface_fragment,
-        "glass_fragment": glass_fragment,
-        "kawase_vertex": kawase_vertex,
-        "kawase_fragment": kawase_fragment,
-    }
     lines = ["#pragma once", "", "namespace zwwm::renderer::shader {", ""]
-    for name, source in values.items():
-        lines.extend((f'inline constexpr char {name}[] = R"zwwm(', source, ')zwwm";', ""))
+    for name, path in zip(NAMES, sys.argv[2:]):
+        # #version must stay on the first line of each stage source.
+        source = pathlib.Path(path).read_text()
+        lines.extend((f'inline constexpr char {name}[] = R"zwwm({source}', ')zwwm";', ""))
     lines.append("}  // namespace zwwm::renderer::shader")
     output.write_text("\n".join(lines) + "\n")
     return 0

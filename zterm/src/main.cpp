@@ -1,6 +1,13 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "gpu.hpp"
+#include "session.hpp"
 #include "clipboard.hpp"
 #include "config.hpp"
+#include "config_watch.hpp"
+#include "theme.hpp"
 #include "connection.hpp"
 #include <zterm/terminal.hpp>
 
@@ -25,6 +32,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+#include <spawn.h>
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -40,6 +48,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <filesystem>
+
+extern char** environ;
 
 namespace zterm {
 namespace p = zwayland::generated;
@@ -47,20 +58,19 @@ namespace core = zwayland::client::core;
 using Proxy = zwayland::client::Proxy;
 using Parser = zwayland::wire::MessageParser;
 
-class App {
+class App final : public Session {
  public:
-  App(Options options, std::function<Options()> reload)
-      : options_(std::move(options)), terminal_(24, 80, options_.history_lines), reload_(std::move(reload)) {
+  App(Options options, std::function<Options()> reload, bool managed = false)
+      : options_(std::move(options)), terminal_(24, 80, options_.history_lines), reload_(std::move(reload)), managed_(managed) {
     width_ = options_.width; height_ = options_.height;
     terminal_.set_default_colors(options_.foreground, options_.background);
     terminal_.set_palette(options_.palette);
     terminal_.set_cursor_style(options_.cursor);
     terminal_.set_input_options(options_.mouse_reporting, options_.alternate_scroll);
+    config_watch_.watch(options_.config_sources);
   }
   ~App() {
-    if (pty_ >= 0) close(pty_);
-    if (child_ > 0) { kill(-child_, SIGHUP); (void)waitpid(child_, nullptr, WNOHANG); }
-    for (int fd : {signals_, repeat_timer_, blink_timer_, selection_timer_}) if (fd >= 0) close(fd);
+    try { retire(); } catch (...) {}
     if (compose_) xkb_compose_state_unref(compose_);
     if (compose_table_) xkb_compose_table_unref(compose_table_);
     if (key_state_) xkb_state_unref(key_state_);
@@ -68,7 +78,7 @@ class App {
     if (xkb_) xkb_context_unref(xkb_);
   }
 
-  int run() {
+  void prepare() {
     (void)signal(SIGPIPE, SIG_IGN);
     display_ = connect_display(options_.standalone);
     if (!display_) throw std::runtime_error("cannot connect to Wayland");
@@ -84,11 +94,34 @@ class App {
     if (!display_->roundtrip() || !display_->roundtrip()) throw std::runtime_error("Wayland discovery failed");
     if (!compositor_ || !wm_ || !dmabuf_ || !feedback_done_ || formats_.empty() || !device_)
       throw std::runtime_error("zterm requires xdg-shell and linux-dmabuf v4 GPU feedback");
-    start_pty();
     gpu_ = std::make_unique<Gpu>(*display_);
-    gpu_->initialize(device_, formats_, options_.font, options_.size, options_.weight, options_.text_rounding, options_.icon_scale);
-    configure_gpu();
+    gpu_->initialize(device_, formats_, options_.fonts, options_.size, options_.weight, options_.text_rounding, options_.icon_scale);
+    configure_gpu(options_);
     gpu_->released = [this] { buffer_available_ = true; };
+    if (managed_) {
+      gpu_->resize(options_.width, options_.height, options_.size);
+      gpu_->warm(*dmabuf_);
+    }
+    (void)display_->flush();
+    running_ = false;
+  }
+
+  void open(Options options, std::function<Options()> reload, std::string directory,
+            std::vector<std::string> environment) override {
+    if (!display_->dispatch_pending()) throw std::runtime_error("terminal connection closed");
+    options_ = std::move(options); reload_ = std::move(reload);
+    config_watch_.watch(options_.config_sources);
+    directory_ = std::move(directory); environment_ = std::move(environment);
+    terminal_ = Terminal(24,80,options_.history_lines);
+    terminal_.set_default_colors(options_.foreground, options_.background);
+    terminal_.set_palette(options_.palette); terminal_.set_cursor_style(options_.cursor);
+    terminal_.set_input_options(options_.mouse_reporting, options_.alternate_scroll);
+    configure_gpu(options_);
+    width_ = options_.width; height_ = options_.height;
+    running_ = true; configured_ = false; resize_ = true; grid_initialized_ = false;
+    grid_resize_pending_ = false; buffer_available_ = true; presented_ = false;
+    cursor_on_ = true; reload_pending_ = false; click_count_ = 0;
+    start_pty();
     surface_ = display_->find_proxy(p::wl_compositor_create_surface(*display_, compositor_->id));
     surface_->set_observer([this](Proxy&, std::uint32_t opcode, Parser& parser) {
       if (opcode == 0 || opcode == 1) {
@@ -125,65 +158,127 @@ class App {
     terminal_.title = [this](const std::string& title) { p::xdg_toplevel_set_title(*display_, top_->id, title); };
     p::wl_surface_commit(*display_, surface_->id);
     timers();
+  }
+
+  void prepare_frame() override {
+    if (!display_->dispatch_pending()) { running_ = false; return; }
+    if (config_watch_.ready()) reload_pending_ = true;
+    if (reload_pending_) reload_config();
+    if (!running_) {
+      if (resize_ && gpu_) {
+        gpu_->resize((width_ * scale_ + 119) / 120,(height_ * scale_ + 119) / 120,std::max(1U,(options_.size * scale_ + 60)/120));
+        gpu_->warm(*dmabuf_); resize_ = false;
+      }
+      (void)display_->flush(); return;
+    }
+    if (resize_ && configured_) resize();
+    if (grid_resize_pending_ && std::chrono::steady_clock::now() >= grid_resize_deadline_) apply_grid_resize();
+    if (configured_ && terminal_.dirty && frame_ == nullptr && buffer_available_) render();
+    output_ += terminal_.take_output();
+    if (output_.size() > 4 * 1024 * 1024) throw std::runtime_error("PTY write queue is full");
+    if (!display_->flush()) running_ = false;
+  }
+
+  void descriptors(std::vector<pollfd>& fds) const override {
+    fds.insert(fds.end(), {
+      {display_->fd(), static_cast<short>(POLLIN | (display_->wants_write() ? POLLOUT : 0)), 0},
+      {pty_, static_cast<short>(POLLIN | (output_.empty() ? 0 : POLLOUT)), 0},
+      {signals_, POLLIN, 0}, {repeat_timer_, POLLIN, 0}, {blink_timer_, POLLIN, 0}, {selection_timer_, POLLIN, 0}, {config_watch_.fd(), POLLIN, 0}});
+    if (clipboard_) clipboard_->poll_descriptors(fds);
+  }
+
+  int timeout() const override {
+    const int resize = grid_resize_pending_ ? std::max(0, static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+      grid_resize_deadline_ - std::chrono::steady_clock::now()).count()) + 1) : -1;
+    const int config = config_watch_.timeout();
+    return resize < 0 ? config : config < 0 ? resize : std::min(resize,config);
+  }
+
+  bool running() const override { return running_; }
+  bool healthy() const override { return display_ && !display_->has_error() && display_->connection().healthy() && !display_->connection().peer_closed(); }
+  bool presented() const override { return presented_; }
+  pid_t child() const override { return child_; }
+  void reap(pid_t child) override { if (child_ == child) child_ = -1; }
+
+  void dispatch(std::span<const pollfd> fds) override {
+    if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) { running_ = false; return; }
+    if (fds[0].revents & POLLIN) if (!display_->dispatch_pending()) { running_ = false; return; }
+    if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) read_pty();
+    if (fds[1].revents & POLLOUT) write_pty();
+    if (fds[2].revents & POLLIN) {
+      signalfd_siginfo event{};
+      while (read(signals_, &event, sizeof(event)) == sizeof(event)) {
+        if (event.ssi_signo != SIGCHLD) running_ = false;
+        else if (child_ > 0 && waitpid(child_, nullptr, WNOHANG) == child_) child_ = -1;
+      }
+    }
+    if (fds[3].revents & POLLIN) {
+      std::uint64_t count = 0; (void)read(repeat_timer_, &count, sizeof(count));
+      for (std::uint64_t i = 0; i < std::min(count, std::uint64_t{16}); ++i) key(repeat_key_);
+    }
+    if (fds[4].revents & POLLIN) {
+      std::uint64_t count = 0; (void)read(blink_timer_, &count, sizeof(count));
+      if (terminal_.cursor_style().blink) { cursor_on_ = !cursor_on_; terminal_.dirty = true; }
+    }
+    if (fds[5].revents & POLLIN) {
+      std::uint64_t count = 0; (void)read(selection_timer_, &count, sizeof(count));
+      if (selecting_) {
+        const double outside = pointer_y_ < content_top() ? content_top() - pointer_y_ : pointer_y_ - content_bottom();
+        terminal_.scroll(pointer_y_ < content_top() ? std::clamp(static_cast<int>(outside / 20) + 1,1,8) : -std::clamp(static_cast<int>(outside / 20) + 1,1,8));
+        extend_selection();
+      }
+    }
+    if (fds[6].revents & POLLIN) config_watch_.consume();
+    if (clipboard_) clipboard_->dispatch(fds.subspan(7));
+  }
+
+  int run() {
+    prepare();
+    open(options_, reload_, "", {});
     while (running_) {
-      if (!display_->dispatch_pending()) break;
-      if (reload_pending_) reload_config();
-      if (resize_ && configured_) resize();
-      if (grid_resize_pending_ && std::chrono::steady_clock::now() >= grid_resize_deadline_) apply_grid_resize();
-      if (configured_ && terminal_.dirty && frame_ == nullptr && buffer_available_) render();
-      output_ += terminal_.take_output();
-      if (output_.size() > 4 * 1024 * 1024) throw std::runtime_error("PTY write queue is full");
-      if (!display_->flush()) break;
-      std::vector<pollfd> fds{
-        {display_->fd(), static_cast<short>(POLLIN | (display_->wants_write() ? POLLOUT : 0)), 0},
-        {pty_, static_cast<short>(POLLIN | (output_.empty() ? 0 : POLLOUT)), 0},
-        {signals_, POLLIN, 0}, {repeat_timer_, POLLIN, 0}, {blink_timer_, POLLIN, 0}, {selection_timer_, POLLIN, 0}};
-      if (clipboard_) clipboard_->poll_descriptors(fds);
-      const int timeout = grid_resize_pending_ ? std::max(0, static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-          grid_resize_deadline_ - std::chrono::steady_clock::now()).count()) + 1) : -1;
-      const int result = poll(fds.data(), fds.size(), timeout);
+      prepare_frame();
+      if (!running_) break;
+      std::vector<pollfd> fds; descriptors(fds);
+      const int result = poll(fds.data(), fds.size(), timeout());
       if (result < 0) { if (errno == EINTR) continue; throw std::runtime_error("poll failed"); }
-      if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
-      if (fds[0].revents & POLLIN) if (!display_->dispatch_pending()) break;
-      if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) read_pty();
-      if (fds[1].revents & POLLOUT) write_pty();
-      if (fds[2].revents & POLLIN) {
-        signalfd_siginfo signal{};
-        while (read(signals_, &signal, sizeof(signal)) == sizeof(signal)) {
-          if (signal.ssi_signo != SIGCHLD) running_ = false;
-          else if (child_ > 0 && waitpid(child_, nullptr, WNOHANG) == child_) child_ = -1;
-        }
-      }
-      if (fds[3].revents & POLLIN) {
-        std::uint64_t count = 0; (void)read(repeat_timer_, &count, sizeof(count));
-        for (std::uint64_t i = 0; i < std::min(count, std::uint64_t{16}); ++i) key(repeat_key_);
-      }
-      if (fds[4].revents & POLLIN) {
-        std::uint64_t count = 0; (void)read(blink_timer_, &count, sizeof(count));
-        if (terminal_.cursor_style().blink) { cursor_on_ = !cursor_on_; terminal_.dirty = true; }
-      }
-      if (fds[5].revents & POLLIN) {
-        std::uint64_t count = 0; (void)read(selection_timer_, &count, sizeof(count));
-        if (selecting_) {
-          const double outside = pointer_y_ < 0 ? -pointer_y_ : pointer_y_ - height_;
-          const int lines = std::clamp(static_cast<int>(outside / 20) + 1, 1, 8);
-          terminal_.scroll(pointer_y_ < 0 ? lines : -lines); extend_selection();
-        }
-      }
-      if (clipboard_) clipboard_->dispatch(std::span<const pollfd>(fds).subspan(6));
+      dispatch(fds);
     }
     if (display_->has_error()) throw std::runtime_error(display_->error_message());
     return 0;
   }
 
+  void retire() override {
+    running_ = false; terminal_.title = {};
+    grid_resize_pending_ = false;
+    if (pty_ >= 0) { close(pty_); pty_ = -1; }
+    if (child_ > 0) { kill(-child_, SIGHUP); (void)waitpid(child_, nullptr, WNOHANG); child_ = -1; }
+    for (int* fd : {&signals_,&repeat_timer_,&blink_timer_,&selection_timer_}) if (*fd >= 0) { close(*fd); *fd = -1; }
+    if (!display_) return;
+    if (frame_) { display_->destroy_proxy(frame_->id); frame_ = nullptr; }
+    if (top_) { p::xdg_toplevel_destroy(*display_, top_->id); top_ = nullptr; }
+    if (xdg_) { p::xdg_surface_destroy(*display_, xdg_->id); xdg_ = nullptr; }
+    if (fractional_) { p::wp_fractional_scale_v1_destroy(*display_, fractional_->id); fractional_ = nullptr; }
+    if (viewport_) { p::wp_viewport_destroy(*display_, viewport_->id); viewport_ = nullptr; }
+    if (surface_) { p::wl_surface_destroy(*display_, surface_->id); surface_ = nullptr; }
+    if (gpu_) gpu_->detach();
+    (void)display_->flush();
+    entered_.clear(); output_.clear(); selecting_ = false; reported_buttons_.fill(false);
+    axis_.fill(0); wheel_remainder_.fill(0); line_remainder_.fill(0); discrete_.fill(0); value120_.fill(0);
+    if (compose_) xkb_compose_state_reset(compose_);
+  }
+
  private:
   struct Output { Proxy* proxy; unsigned scale = 1; };
   Options options_;
+  ConfigWatch config_watch_;
   Terminal terminal_;
   std::unique_ptr<zwayland::client::Display> display_;
   std::unique_ptr<Gpu> gpu_;
   std::unique_ptr<Clipboard> clipboard_;
   std::function<Options()> reload_;
+  bool managed_ = false, presented_ = false;
+  std::string directory_;
+  std::vector<std::string> environment_;
   bool reload_pending_ = false;
   Proxy *registry_ = nullptr, *compositor_ = nullptr, *wm_ = nullptr, *seat_ = nullptr,
         *keyboard_ = nullptr, *pointer_ = nullptr, *dmabuf_ = nullptr, *surface_ = nullptr,
@@ -325,22 +420,28 @@ class App {
     if (scale_ != integer * 120) { scale_ = integer * 120; resize_ = true; }
   }
 
-  void configure_gpu() {
-    gpu_->configure(options_.font, options_.weight, options_.text_rounding, options_.icon_scale,
-                    options_.background, options_.selection);
+  void configure_gpu(const Options& options) {
+    gpu_->configure(options.fonts, options.weight, options.text_rounding, options.icon_scale,
+                     options.background, options.selection, options.background_opacity,
+                     options.selection_foreground,options.cursor_color,options.cursor_text);
   }
 
   void reload_config() {
     reload_pending_ = false;
     try {
       auto next = reload_();
+      configure_gpu(next);
       terminal_.set_palette(next.palette);
       terminal_.set_default_colors(next.foreground, next.background);
       terminal_.set_history_limit(next.history_lines);
       terminal_.set_cursor_style(next.cursor);
       terminal_.set_input_options(next.mouse_reporting, next.alternate_scroll);
       options_ = std::move(next);
-      configure_gpu(); resize_ = true;
+      config_watch_.watch(options_.config_sources);
+      resize_ = true;
+    } catch (const ConfigError& error) {
+      auto paths = options_.config_sources; paths.insert(paths.end(),error.sources.begin(),error.sources.end());
+      config_watch_.watch(paths); std::fprintf(stderr,"zterm: config reload failed: %s\n",error.what());
     } catch (const std::exception& error) { std::fprintf(stderr, "zterm: config reload failed: %s\n", error.what()); }
   }
 
@@ -348,11 +449,12 @@ class App {
     const unsigned width = (static_cast<unsigned>(width_) * scale_ + 119) / 120;
     const unsigned height = (static_cast<unsigned>(height_) * scale_ + 119) / 120;
     gpu_->resize(width, height, std::max(1U, (options_.size * scale_ + 60) / 120));
+    gpu_->set_padding((options_.padding_x * scale_ + 60) / 120,(options_.padding_y * scale_ + 60) / 120);
     terminal_.set_cell_size(gpu_->cell_width(), gpu_->cell_height());
     if (viewport_) p::wp_viewport_set_destination(*display_, viewport_->id, width_, height_);
     else p::wl_surface_set_buffer_scale(*display_, surface_->id, scale_ / 120);
-    const int rows = std::clamp(height / gpu_->cell_height(), 1U, 512U);
-    const int columns = std::clamp(width / gpu_->cell_width(), 1U, 1024U);
+    const int rows = std::clamp(gpu_->content_height() / gpu_->cell_height(), 1U, 512U);
+    const int columns = std::clamp(gpu_->content_width() / gpu_->cell_width(), 1U, 1024U);
     if (!grid_initialized_) {
       pending_rows_ = rows; pending_columns_ = columns; apply_grid_resize();
     } else if (rows != terminal_.rows() || columns != terminal_.columns()) {
@@ -383,12 +485,20 @@ class App {
     terminal_.dirty = false;
     frame_ = display_->find_proxy(p::wl_surface_frame(*display_, surface_->id));
     frame_->set_observer([this](Proxy& proxy, std::uint32_t, Parser& parser) {
-      (void)parser.read_uint(); const auto id = proxy.id; frame_ = nullptr; display_->destroy_proxy(id);
+      (void)parser.read_uint(); const auto id = proxy.id; frame_ = nullptr; presented_ = true; display_->destroy_proxy(id);
     });
     p::wl_surface_commit(*display_, surface_->id);
   }
 
   void start_pty() {
+    std::unordered_map<std::string, std::string> values;
+    const auto insert = [&](const std::string& entry) {
+      const auto separator = entry.find('=');
+      if (separator == std::string::npos || separator == 0) throw std::runtime_error("invalid shell environment");
+      values[entry.substr(0,separator)] = entry.substr(separator+1);
+    };
+    if (environment_.empty()) for (char** entry = environ; *entry; ++entry) insert(*entry);
+    else for (const auto& entry : environment_) insert(entry);
     std::vector<std::string> command = options_.command.empty() ? options_.shell : options_.command;
     if (command.empty()) {
       std::vector<char> storage(16384);
@@ -397,31 +507,72 @@ class App {
       while ((error = getpwuid_r(getuid(), &entry, storage.data(), storage.size(), &result)) == ERANGE && storage.size() < 1024 * 1024)
         storage.resize(storage.size() * 2);
       if (error == 0 && result && result->pw_shell && *result->pw_shell) shell_ = result->pw_shell;
-      else if (const char* shell = std::getenv("SHELL"); shell && *shell) shell_ = shell;
+      else if (values.contains("SHELL") && !values["SHELL"].empty()) shell_ = values["SHELL"];
       else shell_ = "/bin/sh";
-      setenv("SHELL", shell_.c_str(), 1);
+      values["SHELL"] = shell_;
       command.push_back(shell_);
     } else if (options_.command.empty()) {
-      setenv("SHELL", command.front().c_str(), 1);
+      values["SHELL"] = command.front();
     }
-    setenv("TERM", "xterm-256color", 1); setenv("COLORTERM", "truecolor", 1);
+    values["TERM"] = "xterm-256color"; values["COLORTERM"] = "truecolor"; values.erase("WAYLAND_SOCKET");
+    values["TERM_PROGRAM"] = "zterm"; values["TERM_PROGRAM_VERSION"] = "0.1.0-dev";
+    const auto directory = directory_.empty() ? std::filesystem::current_path() : std::filesystem::path(directory_);
+    values["PWD"] = directory.string();
+    for (const char* name : {"WAYLAND_DISPLAY","XDG_RUNTIME_DIR"}) if (const auto* value = std::getenv(name)) values[name] = value;
     std::vector<char*> arguments;
     for (auto& argument : command) arguments.push_back(argument.data());
     arguments.push_back(nullptr);
-    sigset_t mask; sigemptyset(&mask);
-    for (int signal : {SIGCHLD, SIGTERM, SIGINT, SIGHUP}) sigaddset(&mask, signal);
-    if (sigprocmask(SIG_BLOCK, &mask, &original_mask_) != 0) throw std::runtime_error("cannot block signals");
-    signals_ = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
-    if (signals_ < 0) throw std::runtime_error("cannot create signal descriptor");
+    if (!managed_) {
+      sigset_t mask; sigemptyset(&mask);
+      for (int signal : {SIGCHLD, SIGTERM, SIGINT, SIGHUP}) sigaddset(&mask, signal);
+      if (sigprocmask(SIG_BLOCK, &mask, &original_mask_) != 0) throw std::runtime_error("cannot block signals");
+      signals_ = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+      if (signals_ < 0) throw std::runtime_error("cannot create signal descriptor");
+    }
+    pty_ = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    char slave[256]{};
+    if (pty_ < 0 || grantpt(pty_) != 0 || unlockpt(pty_) != 0 || ptsname_r(pty_, slave, sizeof(slave)) != 0)
+      throw std::runtime_error("cannot create PTY");
     struct winsize size{}; size.ws_row = 24; size.ws_col = 80;
     last_pty_size_ = size;
-    child_ = forkpty(&pty_, nullptr, nullptr, &size);
-    if (child_ < 0) throw std::runtime_error("cannot create PTY");
-    if (child_ == 0) {
-      (void)sigprocmask(SIG_SETMASK, &original_mask_, nullptr);
-      (void)signal(SIGPIPE, SIG_DFL);
-      execvp(arguments.front(), arguments.data());
-      std::perror("zterm: exec"); _exit(127);
+    (void)ioctl(pty_, TIOCSWINSZ, &size);
+    struct Spawn {
+      posix_spawn_file_actions_t files{};
+      posix_spawnattr_t attributes{};
+      Spawn() {
+        if (posix_spawn_file_actions_init(&files) != 0) throw std::runtime_error("cannot initialize shell launch");
+        if (posix_spawnattr_init(&attributes) != 0) { posix_spawn_file_actions_destroy(&files); throw std::runtime_error("cannot initialize shell attributes"); }
+      }
+      ~Spawn() { posix_spawn_file_actions_destroy(&files); posix_spawnattr_destroy(&attributes); }
+    } spawn;
+    int error = posix_spawn_file_actions_addchdir_np(&spawn.files, directory.c_str());
+    if (!error) error = posix_spawn_file_actions_addopen(&spawn.files, 0, slave, O_RDWR, 0);
+    if (!error) error = posix_spawn_file_actions_adddup2(&spawn.files, 0, 1);
+    if (!error) error = posix_spawn_file_actions_adddup2(&spawn.files, 0, 2);
+    sigset_t mask, defaults; sigemptyset(&mask); sigemptyset(&defaults);
+    for (int signal : {SIGINT,SIGTERM,SIGHUP,SIGCHLD,SIGPIPE}) sigaddset(&defaults, signal);
+    if (!error) error = posix_spawnattr_setsigmask(&spawn.attributes, &mask);
+    if (!error) error = posix_spawnattr_setsigdefault(&spawn.attributes, &defaults);
+    if (!error) error = posix_spawnattr_setflags(&spawn.attributes, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSID);
+    std::vector<std::string> environment;
+    for (const auto& [name,value] : values) environment.push_back(name + "=" + value);
+    std::vector<char*> env; for (auto& entry : environment) env.push_back(entry.data()); env.push_back(nullptr);
+    std::filesystem::path executable(command.front());
+    if (!executable.has_parent_path()) {
+      const std::string path = values.contains("PATH") ? values["PATH"] : "/usr/bin:/bin";
+      for (size_t start = 0; start <= path.size();) {
+        const auto end = path.find(':', start);
+        const auto folder = path.substr(start, end == std::string::npos ? end : end-start);
+        auto candidate = std::filesystem::path(folder.empty() ? "." : folder) / command.front();
+        if (candidate.is_relative()) candidate = directory / candidate;
+        if (access(candidate.c_str(), X_OK) == 0) { executable = candidate; break; }
+        if (end == std::string::npos) break;
+        start = end + 1;
+      }
+    } else if (executable.is_relative()) executable = directory / executable;
+    if (!error) error = posix_spawn(&child_, executable.c_str(), &spawn.files, &spawn.attributes, arguments.data(), env.data());
+    if (error) {
+      child_ = -1; throw std::runtime_error("cannot launch shell: " + std::string(std::strerror(error)));
     }
     const int flags = fcntl(pty_, F_GETFL);
     if (flags < 0 || fcntl(pty_, F_SETFL, flags | O_NONBLOCK) < 0 || fcntl(pty_, F_SETFD, FD_CLOEXEC) < 0)
@@ -577,8 +728,8 @@ class App {
 
   Position pointer_cell() const {
     if (!gpu_) return {};
-    return {std::clamp(static_cast<int>(std::floor(pointer_y_ * scale_ / 120.0 / gpu_->cell_height())), 0, terminal_.rows() - 1),
-            std::clamp(static_cast<int>(std::floor(pointer_x_ * scale_ / 120.0 / gpu_->cell_width())), 0, terminal_.columns() - 1)};
+    return {std::clamp(static_cast<int>(std::floor((pointer_y_ * scale_ / 120.0 - gpu_->padding_y()) / gpu_->cell_height())), 0, terminal_.rows() - 1),
+            std::clamp(static_cast<int>(std::floor((pointer_x_ * scale_ / 120.0 - gpu_->padding_x()) / gpu_->cell_width())), 0, terminal_.columns() - 1)};
   }
 
   void extend_selection() {
@@ -587,13 +738,17 @@ class App {
 
   MousePosition mouse_position() const {
     const auto cell = pointer_cell();
-    return {cell.row, cell.col, static_cast<int>(pointer_x_ * scale_ / 120.0), static_cast<int>(pointer_y_ * scale_ / 120.0)};
+    return {cell.row, cell.col, static_cast<int>(pointer_x_ * scale_ / 120.0 - gpu_->padding_x()),
+            static_cast<int>(pointer_y_ * scale_ / 120.0 - gpu_->padding_y())};
   }
+
+  double content_top() const { return gpu_ ? gpu_->padding_y() * 120.0 / scale_ : 0; }
+  double content_bottom() const { return gpu_ ? (gpu_->padding_y() + gpu_->content_height()) * 120.0 / scale_ : height_; }
 
   void selection_timer() {
     if (selection_timer_ < 0) return;
     itimerspec timer{};
-    if (selecting_ && (pointer_y_ < 0 || pointer_y_ >= height_)) timer.it_value.tv_nsec = timer.it_interval.tv_nsec = 40000000;
+    if (selecting_ && (pointer_y_ < content_top() || pointer_y_ >= content_bottom())) timer.it_value.tv_nsec = timer.it_interval.tv_nsec = 40000000;
     (void)timerfd_settime(selection_timer_, 0, &timer, nullptr);
   }
 
@@ -639,8 +794,8 @@ class App {
       if (gpu_ && !selecting_ && (!(current_modifiers() & ModShift) || std::any_of(reported_buttons_.begin(), reported_buttons_.end(), [](bool pressed) { return pressed; })))
         (void)terminal_.mouse_motion(mouse_position(), current_modifiers());
       if (selecting_ && gpu_) {
-        if (pointer_y_ < 0) terminal_.scroll(1);
-        else if (pointer_y_ >= height_) terminal_.scroll(-1);
+        if (pointer_y_ < content_top()) terminal_.scroll(1);
+        else if (pointer_y_ >= content_bottom()) terminal_.scroll(-1);
         extend_selection();
         selection_timer();
       }
@@ -687,6 +842,13 @@ class App {
   }
 };
 
+std::unique_ptr<Session> prepare_session(Options options) {
+  auto session = std::make_unique<App>(std::move(options), [] {
+    char name[] = "zterm"; char* args[]{name}; return load_options(1,args);
+  }, true);
+  session->prepare(); return session;
+}
+
 }  // namespace zterm
 
 int main(int argc, char** argv) {
@@ -695,6 +857,9 @@ int main(int argc, char** argv) {
     if (MB_CUR_MAX < 4) (void)setlocale(LC_CTYPE, "C.UTF-8");
     auto options = zterm::load_options(argc, argv);
     if (options.action == zterm::Options::Action::Help) { zterm::print_help(); return 0; }
+    if (options.action == zterm::Options::Action::ListThemes) {
+      for (const auto& theme : zterm::theme_names()) std::puts(theme.c_str()); return 0;
+    }
     if (options.action == zterm::Options::Action::Daemon) return zterm::run_daemon();
     return zterm::App(std::move(options), [argc, argv] { return zterm::load_options(argc, argv); }).run();
   } catch (const std::exception& error) { std::fprintf(stderr, "zterm: %s\n", error.what()); return 1; }

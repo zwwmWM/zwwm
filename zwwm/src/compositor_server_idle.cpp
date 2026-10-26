@@ -1,6 +1,7 @@
 #include "compositor_server_internal.hpp"
 
 #include <ext-idle-notify-zwayland-server.h>
+#include <idle-inhibit-zwayland-server.h>
 
 #include <algorithm>
 #include <new>
@@ -8,6 +9,12 @@
 namespace zwwm::detail {
 
 namespace protocol = zwayland::generated;
+
+bool idle_inhibited(const SeatState* seat) {
+  return std::any_of(seat->idle_inhibitors.begin(), seat->idle_inhibitors.end(), [](const IdleInhibitor* inhibitor) {
+    return inhibitor->surface_alive && *inhibitor->surface_alive && inhibitor->surface->current_buffer != nullptr;
+  });
+}
 
 void arm_idle_notification(IdleNotification* notification) {
   notification->seat->display->event_loop().update_timer(notification->timer,
@@ -28,7 +35,7 @@ struct ExtIdleNotificationV1Handler {
 
 void create_idle_notification(zwayland::server::Client* client, zwayland::server::Resource* manager,
                               std::uint32_t id, std::uint32_t timeout,
-                              zwayland::server::Resource* seat_resource) {
+                              zwayland::server::Resource* seat_resource, bool obey_inhibitors) {
   auto* seat = manager->data<SeatState>();
   if (seat_resource == nullptr || seat_resource->data<SeatState>() != seat) {
     client->post_error(0, "idle notification requested for an unknown seat");
@@ -45,8 +52,13 @@ void create_idle_notification(zwayland::server::Client* client, zwayland::server
   notification->seat = seat;
   notification->resource = resource;
   notification->timeout = timeout;
+  notification->obey_inhibitors = obey_inhibitors;
   notification->timer = seat->display->event_loop().add_timer([notification] {
     if (notification->idle) return;
+    if (notification->obey_inhibitors && idle_inhibited(notification->seat)) {
+      arm_idle_notification(notification);
+      return;
+    }
     notification->idle = true;
     protocol::ext_idle_notification_v1_send_idled(*notification->resource);
   });
@@ -64,12 +76,12 @@ struct ExtIdleNotifierV1Handler {
   void get_idle_notification(zwayland::server::Client& client, zwayland::server::Resource& resource,
                              std::uint32_t id, std::uint32_t timeout,
                              zwayland::server::Resource* seat) {
-    create_idle_notification(&client, &resource, id, timeout, seat);
+    create_idle_notification(&client, &resource, id, timeout, seat, true);
   }
   void get_input_idle_notification(zwayland::server::Client& client,
                                    zwayland::server::Resource& resource, std::uint32_t id,
                                    std::uint32_t timeout, zwayland::server::Resource* seat) {
-    create_idle_notification(&client, &resource, id, timeout, seat);
+    create_idle_notification(&client, &resource, id, timeout, seat, false);
   }
 };
 
@@ -93,6 +105,48 @@ void idle_activity(SeatState* seat) {
     }
     arm_idle_notification(notification);
   }
+}
+
+struct IdleInhibitorHandler {
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) { resource.destroy(); }
+};
+
+struct IdleInhibitManagerHandler {
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) { resource.destroy(); }
+  void create_inhibitor(zwayland::server::Client& client, zwayland::server::Resource& manager, std::uint32_t id,
+                        zwayland::server::Resource* surface_resource) {
+    auto* surface = compositor_surface_from_resource(&client, surface_resource);
+    if (surface == nullptr) {
+      manager.post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "not a zwwm wl_surface for this client");
+      return;
+    }
+    auto* seat = manager.data<SeatState>();
+    auto* resource = client.create_resource(&protocol::zwp_idle_inhibitor_v1_interface, id, 1);
+    auto* inhibitor = resource == nullptr ? nullptr : new (std::nothrow) IdleInhibitor{seat, resource, surface, surface->alive};
+    if (inhibitor == nullptr) {
+      if (resource != nullptr) resource->destroy();
+      client.post_no_memory();
+      return;
+    }
+    seat->idle_inhibitors.push_back(inhibitor);
+    resource->set_data(inhibitor);
+    resource->set_handler(protocol::zwp_idle_inhibitor_v1_handler(IdleInhibitorHandler{}));
+    resource->set_destroy_handler([](zwayland::server::Resource& destroyed) {
+      auto* inhibitor = destroyed.data<IdleInhibitor>();
+      auto* seat = inhibitor->seat;
+      std::erase(seat->idle_inhibitors, inhibitor);
+      delete inhibitor;
+      // Idle time restarts once the inhibitor is gone.
+      for (auto* notification : seat->idle_notifications) if (!notification->idle) arm_idle_notification(notification);
+    });
+  }
+};
+
+void bind_idle_inhibit_manager(zwayland::server::Client* client, void* data, std::uint32_t, std::uint32_t id) {
+  auto* resource = client->create_resource(&protocol::zwp_idle_inhibit_manager_v1_interface, id, 1);
+  if (resource == nullptr) { client->post_no_memory(); return; }
+  resource->set_data(static_cast<SeatState*>(data));
+  resource->set_handler(protocol::zwp_idle_inhibit_manager_v1_handler(IdleInhibitManagerHandler{}));
 }
 
 }  // namespace zwwm::detail

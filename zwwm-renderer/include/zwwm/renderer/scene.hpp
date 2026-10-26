@@ -62,8 +62,7 @@ struct SceneNode {
   float corner_radius = 0.0F;
 };
 
-// Scene owns presentation order only. Buffer import and GL texture ownership
-// belong to the OpenGL backend added after the Wayland buffer lifecycle exists.
+// Presentation order only; textures belong to the renderer and the backends.
 class Scene {
  public:
   [[nodiscard]] bool upsert(SceneNode node);

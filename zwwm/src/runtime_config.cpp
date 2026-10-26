@@ -1,5 +1,5 @@
 #include "zwwm/runtime_config.hpp"
-#include "zwwm/renderer/opengl.hpp"
+#include "zwwm/renderer/frame.hpp"
 
 #include <zwayland/server/display.hpp>
 #include <xkbcommon/xkbcommon.h>
@@ -16,6 +16,7 @@
 #include <sys/inotify.h>
 #include <unistd.h>
 #include <limits>
+#include <ranges>
 #include <stdexcept>
 #include <string_view>
 #include <tuple>
@@ -44,11 +45,12 @@ bool install_default_file(const std::filesystem::path& source,
 bool bootstrap_user_config(const std::filesystem::path& config) {
   if (config.empty()) return false;
   const std::filesystem::path shader_dir = config.parent_path() / "shaders";
-  for (const char* name : {"window.frag", "border.frag", "background.frag"}) {
+  for (const char* name : {"window.frag", "border.frag", "background.frag", "shadow.frag"}) {
     if (!install_default_file(std::filesystem::path(ZWWM_DATA_DIR) / "shaders" / name,
                                shader_dir / name) && !std::filesystem::exists(shader_dir / name))
       return false;
   }
+  (void)install_default_file(std::filesystem::path(ZWWM_DATA_DIR) / "shaders/zwwm.glsl", shader_dir / "zwwm.glsl");
   return install_default_file(std::filesystem::path(ZWWM_DATA_DIR) / "config.zw", config) ||
       install_default_file("/etc/xdg/zwwm/config.zw", config) || std::filesystem::exists(config);
 }
@@ -197,6 +199,7 @@ std::optional<CustomShaderRole> shader_role(std::string_view value) {
   if (value == "window") return CustomShaderRole::window;
   if (value == "border") return CustomShaderRole::border;
   if (value == "background") return CustomShaderRole::background;
+  if (value == "shadow") return CustomShaderRole::shadow;
   return std::nullopt;
 }
 
@@ -537,7 +540,7 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
   for (const auto& item : parsed.assignments) {
     if (item.key != "bind") continue;
     const auto* list = lang::as_list(item.value);
-    if (list == nullptr || list->values.size() != 4) continue;
+    if (list == nullptr || (list->values.size() != 4 && list->values.size() != 5)) continue;
     const auto* modifiers = resolved_string(list->values[0], variables);
     const auto* key = resolved_string(list->values[1], variables);
     const auto* action = resolved_string(list->values[2], variables);
@@ -558,7 +561,26 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
       error(result.diagnostics, item.location, "tag action argument must be 1..9");
       continue;
     }
-    mutable_config->keybindings.push_back({*modifiers, *key, *typed_action, *argument});
+    Keybinding binding{*modifiers, *key, *typed_action, *argument};
+    if (list->values.size() == 5) {
+      const auto* flags = resolved_string(list->values[4], variables);
+      bool valid = flags != nullptr;
+      for (const auto part : std::views::split(valid ? std::string_view(*flags) : std::string_view(), ',')) {
+        const std::string_view flag(part.begin(), part.end());
+        if (flag == "press") binding.trigger = KeyTrigger::press;
+        else if (flag == "release") binding.trigger = KeyTrigger::release;
+        else if (flag == "tap") binding.trigger = KeyTrigger::tap;
+        else if (flag == "hold") binding.trigger = KeyTrigger::hold;
+        else if (flag == "repeat") binding.trigger = KeyTrigger::repeat;
+        else if (flag == "locked") binding.locked = true;
+        else if (!flag.empty()) valid = false;
+      }
+      if (!valid) {
+        error(result.diagnostics, item.location, "bind flags must be press, release, tap, hold, repeat and/or locked");
+        continue;
+      }
+    }
+    mutable_config->keybindings.push_back(std::move(binding));
   }
 
   for (const auto& item : parsed.assignments) if (item.key == "rule") {
@@ -636,7 +658,7 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
             const auto role = role_text == nullptr ? std::nullopt : shader_role(*role_text);
             if (name.empty() || definition == nullptr || source == nullptr || source->empty() || !role) {
               error(result.diagnostics, item->location,
-                    "each shader requires a name, source, and window, border, or background role");
+                    "each shader requires a name, source, and window, border, background, or shadow role");
               continue;
             }
             CustomShaderConfig shader{.name = name, .role = *role, .source = *source, .values = {}};
@@ -668,7 +690,7 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
         const auto shader = std::find_if(mutable_config->shaders.begin(), mutable_config->shaders.end(),
                                          [&](const auto& candidate) { return candidate.role == role; });
         if (shader == mutable_config->shaders.end()) {
-          if (role == CustomShaderRole::background) target.clear();
+          if (role == CustomShaderRole::background || role == CustomShaderRole::shadow) target.clear();
           else error(result.diagnostics, item->location, "shaders must define window and border roles");
         }
         else
@@ -677,6 +699,7 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
       select_default(CustomShaderRole::window, mutable_config->window_shader);
       select_default(CustomShaderRole::border, mutable_config->border_shader);
       select_default(CustomShaderRole::background, mutable_config->background_shader);
+      select_default(CustomShaderRole::shadow, mutable_config->shadow_shader);
       }
   }
 
@@ -846,6 +869,27 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
       if (keymap == nullptr) error(result.diagnostics, item->location, "keyboard XKB configuration is invalid");
       if (keymap != nullptr) xkb_keymap_unref(keymap);
       if (context != nullptr) xkb_context_unref(context);
+    }
+  }
+
+  if (const auto* item = assignment(parsed, "mobile"); item != nullptr) {
+    const auto* object = lang::as_object(item->value);
+    if (object == nullptr) error(result.diagnostics, item->location, "mobile must be an object");
+    else {
+      if (const auto* value = lang::find_field(*object, "windows")) {
+        const auto* enabled = lang::as_boolean(*value);
+        if (enabled == nullptr) error(result.diagnostics, item->location, "mobile.windows must be boolean");
+        else mutable_config->mobile.windows = *enabled;
+      }
+      for (const auto& [name, target, low, high] : {std::tuple{"edge-swipe-size", &mutable_config->mobile.edge_swipe_size, 0, 256},
+                                                     std::tuple{"hold-ms", &mutable_config->mobile.hold_ms, 50, 5000}}) {
+        const auto* value = lang::find_field(*object, name);
+        if (value == nullptr) continue;
+        const auto* integer = lang::as_integer(*value);
+        if (integer == nullptr || *integer < low || *integer > high)
+          error(result.diagnostics, item->location, "mobile." + std::string(name) + " must be " + std::to_string(low) + ".." + std::to_string(high));
+        else *target = static_cast<std::uint32_t>(*integer);
+      }
     }
   }
 
@@ -1025,6 +1069,8 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
   validate_shader(mutable_config->border_shader, CustomShaderRole::border, shaders_location, "border shader");
   if (!mutable_config->background_shader.empty())
     validate_shader(mutable_config->background_shader, CustomShaderRole::background, shaders_location, "background shader");
+  if (!mutable_config->shadow_shader.empty())
+    validate_shader(mutable_config->shadow_shader, CustomShaderRole::shadow, shaders_location, "shadow shader");
   for (const auto& rule : mutable_config->window_rules) {
     if (!rule.window_shader.empty()) validate_shader(rule.window_shader, CustomShaderRole::window, {}, "rule window-shader");
     if (!rule.border_shader.empty()) validate_shader(rule.border_shader, CustomShaderRole::border, {}, "rule border-shader");
@@ -1064,6 +1110,7 @@ bool load_shader_sources(const RuntimeConfig& config, renderer::ShaderSources* s
   loaded.window = config.window_shader;
   loaded.border = config.border_shader;
   loaded.background = config.background_shader;
+  loaded.shadow = config.shadow_shader;
   loaded.overview_backdrop_image = config.overview_backdrop_image;
   for (const auto& shader : config.shaders) {
     std::ifstream input(shader.source, std::ios::binary | std::ios::ate);
@@ -1080,6 +1127,7 @@ bool load_shader_sources(const RuntimeConfig& config, renderer::ShaderSources* s
     loaded_shader.name = shader.name;
     loaded_shader.role = shader.role == CustomShaderRole::window ? renderer::ShaderRole::window :
                          shader.role == CustomShaderRole::border ? renderer::ShaderRole::border :
+                         shader.role == CustomShaderRole::shadow ? renderer::ShaderRole::shadow :
                                                                    renderer::ShaderRole::background;
     loaded_shader.source.resize(static_cast<std::size_t>(size));
     input.seekg(0);
