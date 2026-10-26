@@ -376,6 +376,9 @@ int main(int argc, char** argv) {
     compositor_server.set_pointer_position_observer(
         [](void* data, std::int32_t x, std::int32_t y) { static_cast<zwwm::RuntimeBackend*>(data)->set_cursor_position(x, y); },
         &drm_backend);
+    compositor_server.set_output_power_observer(
+        [](void* data, zwwm::OutputId output, bool on) { return static_cast<zwwm::RuntimeBackend*>(data)->set_output_power(output, on); },
+        &drm_backend);
     if (setenv("WAYLAND_DISPLAY", socket.c_str(), 1) != 0) {
       std::fprintf(stderr, "zwwm: could not export WAYLAND_DISPLAY: %d\n", errno);
       drm_backend.stop();
@@ -421,6 +424,7 @@ int main(int argc, char** argv) {
     compositor_server.set_surface_commit_observer(nullptr, nullptr);
     compositor_server.set_cursor_shape_observer(nullptr, nullptr);
     compositor_server.set_pointer_position_observer(nullptr, nullptr);
+    compositor_server.set_output_power_observer(nullptr, nullptr);
     compositor_server.set_dmabuf_feedback({}, std::nullopt);
     drm_backend.stop();
     config_targets.runtime = nullptr;

@@ -76,6 +76,7 @@ struct Config {
 struct ParseResult {
   Config config;
   std::vector<Diagnostic> diagnostics;
+  std::vector<std::string> source_paths;
 
   [[nodiscard]] bool ok() const;
 };

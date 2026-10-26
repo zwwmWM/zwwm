@@ -1,4 +1,6 @@
 #include "gpu.hpp"
+#include "terminal-frag.spv.h"
+#include "terminal-vert.spv.h"
 
 #include <linux-dmabuf-zwayland-client.h>
 #include <wayland-zwayland-client.h>
@@ -7,6 +9,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <zwwm-vlk/device.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -19,83 +22,12 @@ namespace p = zwayland::generated;
 namespace {
 
 constexpr int atlas_size = 2048;
-constexpr const char* vertex_shader = R"(#version 300 es
-precision highp float;
-layout(location=0) in vec4 rect;
-layout(location=1) in vec4 texrect;
-layout(location=2) in vec4 color;
-layout(location=3) in float layer;
-uniform vec2 viewport;
-out vec3 uv;
-out vec4 tint;
-flat out float colored;
-flat out float pixel_snap;
-flat out vec4 uv_bounds;
-void main() {
-  vec2 corners[6] = vec2[](vec2(0,0),vec2(1,0),vec2(0,1),vec2(0,1),vec2(1,0),vec2(1,1));
-  vec2 q = corners[gl_VertexID];
-  vec2 pixel = rect.xy + q * rect.zw;
-  gl_Position = vec4(pixel.x / viewport.x * 2.0 - 1.0, pixel.y / viewport.y * 2.0 - 1.0, 0, 1);
-  pixel_snap = layer >= 16.0 ? 1.0 : 0.0;
-  uv = vec3(texrect.xy + q * abs(texrect.zw), layer - pixel_snap * 16.0);
-  uv_bounds = vec4(texrect.xy, texrect.xy + abs(texrect.zw));
-  tint = color;
-  colored = texrect.z < 0.0 ? 1.0 : 0.0;
-})";
-constexpr const char* fragment_shader = R"(#version 300 es
-precision highp float;
-in vec3 uv;
-in vec4 tint;
-flat in float colored;
-flat in float pixel_snap;
-flat in vec4 uv_bounds;
-uniform highp sampler2DArray atlas;
-uniform highp sampler2DArray color_atlas;
-uniform bool glyphs;
-uniform float text_rounding;
-out vec4 output_color;
-vec3 coordinates(vec2 point) {
-  vec2 inset = vec2(0.5 / 2048.0);
-  vec2 first = uv_bounds.xy + inset, last = uv_bounds.zw - inset;
-  return vec3(clamp(point, min(first, last), max(first, last)), uv.z);
-}
-float mask(vec2 point) { return texture(atlas, coordinates(point)).r; }
-void main() {
-  if (!glyphs) { output_color = vec4(tint.rgb * tint.a, tint.a); return; }
-  if (colored > 0.5) { output_color = texture(color_atlas, coordinates(uv.xy)) * tint.a; return; }
-  vec2 dx = dFdx(uv.xy), dy = dFdy(uv.xy);
-  float coverage;
-  if (pixel_snap > 0.5) {
-    dx *= 0.25; dy *= 0.25;
-    coverage = max(max(mask(uv.xy - dx - dy), mask(uv.xy + dx - dy)),
-                   max(mask(uv.xy - dx + dy), mask(uv.xy + dx + dy)));
-  } else if (text_rounding > 0.0) {
-    vec2 x = dx * text_rounding * 0.8;
-    vec2 y = dy * text_rounding * 0.8;
-    vec2 d1 = (x + y) * 0.70710678;
-    vec2 d2 = (x - y) * 0.70710678;
-    coverage = mask(uv.xy) * 0.25 +
-      (mask(uv.xy + x) + mask(uv.xy - x) + mask(uv.xy + y) + mask(uv.xy - y)) * 0.125 +
-      (mask(uv.xy + d1) + mask(uv.xy - d1) + mask(uv.xy + d2) + mask(uv.xy - d2)) * 0.0625;
-  } else {
-    dx *= 0.25; dy *= 0.25;
-    coverage = (mask(uv.xy - dx - dy) + mask(uv.xy + dx - dy) + mask(uv.xy - dx + dy) + mask(uv.xy + dx + dy)) * 0.25;
-  }
-  coverage = pow(clamp((coverage - 0.5) * 1.04 + 0.5, 0.0, 1.0), 0.95);
-  float alpha = tint.a * coverage;
-  output_color = vec4(tint.rgb * alpha, alpha);
-})";
+constexpr unsigned atlas_layers = 8;
 
-GLuint compile(GLenum type, const char* source) {
-  const GLuint shader = glCreateShader(type);
-  glShaderSource(shader, 1, &source, nullptr); glCompileShader(shader);
-  GLint ok = 0; glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-  if (!ok) {
-    std::array<char, 2048> log{}; glGetShaderInfoLog(shader, log.size(), nullptr, log.data());
-    glDeleteShader(shader); throw std::runtime_error(log.data());
-  }
-  return shader;
-}
+struct Push {
+  float viewport[2];
+  float text_rounding;
+};
 
 int render_node(dev_t device) {
   std::array<drmDevicePtr, 64> devices{};
@@ -116,20 +48,21 @@ int render_node(dev_t device) {
   return result;
 }
 
+void check(VkResult result, const char* what) {
+  if (result != VK_SUCCESS) throw std::runtime_error(std::string(what) + " failed");
+}
+
 }  // namespace
 
 struct Gpu::Buffer {
   Gpu* owner = nullptr;
   gbm_bo* bo = nullptr;
-  EGLImageKHR image = EGL_NO_IMAGE_KHR;
-  GLuint texture = 0, framebuffer = 0;
+  zwwm::vlk::ImageRef image;
   zwayland::client::Proxy* proxy = nullptr;
   bool busy = false, retired = false;
   ~Buffer() {
     if (proxy != nullptr) p::wl_buffer_destroy(owner->display_, proxy->id);
-    if (framebuffer) glDeleteFramebuffers(1, &framebuffer);
-    if (texture) glDeleteTextures(1, &texture);
-    if (image != EGL_NO_IMAGE_KHR) eglDestroyImageKHR(owner->egl_, image);
+    image.reset();
     if (bo != nullptr) gbm_bo_destroy(bo);
   }
 };
@@ -137,21 +70,22 @@ struct Gpu::Buffer {
 Gpu::Gpu(zwayland::client::Display& display) : display_(display) {}
 
 Gpu::~Gpu() {
-  if (context_ != EGL_NO_CONTEXT) {
-    (void)eglMakeCurrent(egl_, EGL_NO_SURFACE, EGL_NO_SURFACE, context_);
+  if (vulkan_ != nullptr) {
+    vulkan_->wait_idle();
     buffers_.clear();
-    if (program_) glDeleteProgram(program_);
-    if (atlas_) glDeleteTextures(1, &atlas_);
-    if (color_atlas_) glDeleteTextures(1, &color_atlas_);
-    if (vao_) glDeleteVertexArrays(1, &vao_);
-    if (instances_) glDeleteBuffers(1, &instances_);
-    if (text_instances_) glDeleteBuffers(1, &text_instances_);
-    if (cursor_instances_) glDeleteBuffers(1, &cursor_instances_);
-    if (selection_instances_) glDeleteBuffers(1, &selection_instances_);
-    (void)eglMakeCurrent(egl_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    eglDestroyContext(egl_, context_);
+    atlas_.reset();
+    color_atlas_.reset();
+    const VkDevice device = vulkan_->handle();
+    for (const auto pipeline : pipelines_) if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, pipeline, nullptr);
+    if (fragment_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragment_, nullptr);
+    if (vertex_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertex_, nullptr);
+    if (pool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, pool_, nullptr);
+    if (layout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, layout_, nullptr);
+    if (set_layout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, set_layout_, nullptr);
+    if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device, sampler_, nullptr);
+    vulkan_.reset();
   }
-  if (egl_ != EGL_NO_DISPLAY) eglTerminate(egl_);
+  buffers_.clear();
   if (gbm_ != nullptr) gbm_device_destroy(gbm_);
   if (device_fd_ >= 0) close(device_fd_);
 }
@@ -165,60 +99,201 @@ void Gpu::initialize(dev_t device, const std::vector<Format>& formats, FontFamil
   device_fd_ = render_node(device);
   gbm_ = gbm_create_device(device_fd_);
   if (gbm_ == nullptr) throw std::runtime_error("cannot initialize GBM");
-  egl_ = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbm_, nullptr);
-  if (egl_ == EGL_NO_DISPLAY || !eglInitialize(egl_, nullptr, nullptr) || !eglBindAPI(EGL_OPENGL_ES_API))
-    throw std::runtime_error("cannot initialize GPU EGL");
-  if (!epoxy_has_egl_extension(egl_, "EGL_KHR_surfaceless_context") ||
-      !epoxy_has_egl_extension(egl_, "EGL_EXT_image_dma_buf_import_modifiers"))
-    throw std::runtime_error("GPU requires surfaceless EGL and DMA-BUF modifiers");
-  const EGLint attributes[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_NONE};
-  EGLConfig config{}; EGLint count = 0;
-  if (!eglChooseConfig(egl_, attributes, &config, 1, &count) || count == 0)
-    throw std::runtime_error("no GLES3 configuration");
-  const EGLint context_attributes[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-  context_ = eglCreateContext(egl_, config, EGL_NO_CONTEXT, context_attributes);
-  if (context_ == EGL_NO_CONTEXT || !eglMakeCurrent(egl_, EGL_NO_SURFACE, EGL_NO_SURFACE, context_))
-    throw std::runtime_error("cannot create GLES3 context");
-  const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
-  if (renderer == nullptr || std::string_view(renderer).find("llvmpipe") != std::string_view::npos ||
-      std::string_view(renderer).find("softpipe") != std::string_view::npos)
-    throw std::runtime_error("a hardware GPU renderer is required");
-  if (!epoxy_has_gl_extension("GL_OES_EGL_image")) throw std::runtime_error("EGLImage rendering is unavailable");
+  // Matching the compositor's DRM node also rules out software rasterizers.
+  std::string error;
+  vulkan_ = zwwm::vlk::Device::create({.drm_device = device, .require_dmabuf = true}, &error);
+  if (vulkan_ == nullptr) throw std::runtime_error("cannot initialize Vulkan: " + error);
   for (const auto preferred : {DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888}) {
-    for (const auto& entry : formats) if (entry.format == preferred && entry.modifier != DRM_FORMAT_MOD_INVALID)
-      modifiers_.push_back(entry.modifier);
+    const auto renderable = vulkan_->render_modifiers(preferred);
+    for (const auto& entry : formats)
+      if (entry.format == preferred && entry.modifier != DRM_FORMAT_MOD_INVALID &&
+          std::find(renderable.begin(), renderable.end(), entry.modifier) != renderable.end())
+        modifiers_.push_back(entry.modifier);
     if (!modifiers_.empty()) { format_ = preferred; break; }
   }
   if (!format_) throw std::runtime_error("no shared GPU buffer format");
-  const GLuint vertex = compile(GL_VERTEX_SHADER, vertex_shader);
-  const GLuint fragment = compile(GL_FRAGMENT_SHADER, fragment_shader);
-  program_ = glCreateProgram(); glAttachShader(program_, vertex); glAttachShader(program_, fragment);
-  glLinkProgram(program_); glDeleteShader(vertex); glDeleteShader(fragment);
-  GLint linked = 0; glGetProgramiv(program_, GL_LINK_STATUS, &linked);
-  if (!linked) throw std::runtime_error("cannot link terminal shaders");
-  glGenVertexArrays(1, &vao_); glBindVertexArray(vao_);
-  glGenBuffers(1, &instances_); glBindBuffer(GL_ARRAY_BUFFER, instances_);
-  glGenBuffers(1, &text_instances_); glGenBuffers(1, &cursor_instances_);
-  glGenBuffers(1, &selection_instances_);
-  for (unsigned i = 0; i < 3; ++i) {
-    glEnableVertexAttribArray(i);
-    glVertexAttribPointer(i, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), reinterpret_cast<void*>(i * 4 * sizeof(float)));
-    glVertexAttribDivisor(i, 1);
+
+  atlas_ = zwwm::vlk::Image::create_array(vulkan_, atlas_size, atlas_size, atlas_layers, VK_FORMAT_R8_UNORM, 0, &error);
+  color_atlas_ = atlas_ == nullptr ? nullptr :
+      zwwm::vlk::Image::create_array(vulkan_, atlas_size, atlas_size, 1, VK_FORMAT_R8G8B8A8_UNORM, 0, &error);
+  if (color_atlas_ == nullptr) throw std::runtime_error("cannot allocate glyph atlases: " + error);
+  {
+    // Atlases start readable so unused layers sample as empty.
+    auto commands = vulkan_->begin(&error);
+    if (!commands) throw std::runtime_error("cannot record atlas setup: " + error);
+    atlas_->transition(commands.get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true);
+    color_atlas_->transition(commands.get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true);
+    if (!vulkan_->submit(commands, nullptr, false, &error)) throw std::runtime_error("cannot submit atlas setup: " + error);
   }
-  glEnableVertexAttribArray(3);
-  glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Instance), reinterpret_cast<void*>(12 * sizeof(float)));
-  glVertexAttribDivisor(3, 1);
-  glGenTextures(1, &atlas_); glGenTextures(1, &color_atlas_);
-  for (unsigned color = 0; color < 2; ++color) {
-    glBindTexture(GL_TEXTURE_2D_ARRAY, color ? color_atlas_ : atlas_);
-    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, color ? GL_RGBA8 : GL_R8, atlas_size, atlas_size, color ? 1 : 8);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  }
-  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  const VkDevice handle = vulkan_->handle();
+  const VkSamplerCreateInfo sampler{
+      .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter = VK_FILTER_LINEAR,
+      .minFilter = VK_FILTER_LINEAR,
+      .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+  };
+  check(vkCreateSampler(handle, &sampler, nullptr, &sampler_), "vkCreateSampler");
+  const std::array<VkSampler, 2> immutable{sampler_, sampler_};
+  const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{
+      {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, &immutable[0]},
+      {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, &immutable[1]},
+  }};
+  const VkDescriptorSetLayoutCreateInfo set_info{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<std::uint32_t>(bindings.size()),
+      .pBindings = bindings.data(),
+  };
+  check(vkCreateDescriptorSetLayout(handle, &set_info, nullptr, &set_layout_), "vkCreateDescriptorSetLayout");
+  const VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push)};
+  const VkPipelineLayoutCreateInfo layout_info{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &set_layout_,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &push,
+  };
+  check(vkCreatePipelineLayout(handle, &layout_info, nullptr, &layout_), "vkCreatePipelineLayout");
+  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
+  const VkDescriptorPoolCreateInfo pool_info{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = 1,
+      .poolSizeCount = 1,
+      .pPoolSizes = &pool_size,
+  };
+  check(vkCreateDescriptorPool(handle, &pool_info, nullptr, &pool_), "vkCreateDescriptorPool");
+  const VkDescriptorSetAllocateInfo allocate{
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = pool_,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &set_layout_,
+  };
+  check(vkAllocateDescriptorSets(handle, &allocate, &set_), "vkAllocateDescriptorSets");
+  const std::array<VkDescriptorImageInfo, 2> images{{
+      {VK_NULL_HANDLE, atlas_->view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+      {VK_NULL_HANDLE, color_atlas_->view(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+  }};
+  const std::array<VkWriteDescriptorSet, 2> writes{{
+      {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set_, .dstBinding = 0, .descriptorCount = 1,
+       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &images[0]},
+      {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set_, .dstBinding = 1, .descriptorCount = 1,
+       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &images[1]},
+  }};
+  vkUpdateDescriptorSets(handle, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  create_pipelines();
   set_font_size(size);
+}
+
+void Gpu::create_pipelines() {
+  const VkDevice handle = vulkan_->handle();
+  const VkShaderModuleCreateInfo vertex{
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(terminal_vertex_spirv),
+      .pCode = terminal_vertex_spirv,
+  };
+  const VkShaderModuleCreateInfo fragment{
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(terminal_fragment_spirv),
+      .pCode = terminal_fragment_spirv,
+  };
+  check(vkCreateShaderModule(handle, &vertex, nullptr, &vertex_), "vkCreateShaderModule");
+  check(vkCreateShaderModule(handle, &fragment, nullptr, &fragment_), "vkCreateShaderModule");
+  const VkVertexInputBindingDescription binding{0, sizeof(Instance), VK_VERTEX_INPUT_RATE_INSTANCE};
+  const std::array<VkVertexInputAttributeDescription, 4> attributes{{
+      {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Instance, x)},
+      {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Instance, u)},
+      {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Instance, r)},
+      {3, 0, VK_FORMAT_R32_SFLOAT, offsetof(Instance, layer)},
+  }};
+  const VkPipelineVertexInputStateCreateInfo vertex_input{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &binding,
+      .vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size()),
+      .pVertexAttributeDescriptions = attributes.data(),
+  };
+  const VkPipelineInputAssemblyStateCreateInfo assembly{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+  };
+  const VkPipelineViewportStateCreateInfo viewport{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+  const VkPipelineRasterizationStateCreateInfo raster{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_NONE,
+      .lineWidth = 1.0f,
+  };
+  const VkPipelineMultisampleStateCreateInfo multisample{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+  constexpr std::array<VkDynamicState, 2> dynamic{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+  const VkPipelineDynamicStateCreateInfo dynamic_state{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = static_cast<std::uint32_t>(dynamic.size()),
+      .pDynamicStates = dynamic.data(),
+  };
+  const VkFormat format = VK_FORMAT_B8G8R8A8_UNORM;
+  const VkPipelineRenderingCreateInfo rendering{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+      .colorAttachmentCount = 1,
+      .pColorAttachmentFormats = &format,
+  };
+  constexpr auto all = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  for (const auto pass : {Pass::Opaque, Pass::Blended, Pass::Inverted, Pass::Glyphs}) {
+    const VkBool32 glyphs = pass == Pass::Glyphs ? VK_TRUE : VK_FALSE;
+    const VkSpecializationMapEntry entry{0, 0, sizeof(VkBool32)};
+    const VkSpecializationInfo specialization{1, &entry, sizeof(glyphs), &glyphs};
+    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = vertex_, .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = fragment_, .pName = "main", .pSpecializationInfo = &specialization},
+    }};
+    VkPipelineColorBlendAttachmentState attachment{
+        .blendEnable = pass == Pass::Opaque ? VK_FALSE : VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = all,
+    };
+    if (pass == Pass::Inverted) {
+      attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+      attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+      attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    }
+    const VkPipelineColorBlendStateCreateInfo blend{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &attachment,
+    };
+    const VkGraphicsPipelineCreateInfo info{
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &rendering,
+        .stageCount = static_cast<std::uint32_t>(stages.size()),
+        .pStages = stages.data(),
+        .pVertexInputState = &vertex_input,
+        .pInputAssemblyState = &assembly,
+        .pViewportState = &viewport,
+        .pRasterizationState = &raster,
+        .pMultisampleState = &multisample,
+        .pColorBlendState = &blend,
+        .pDynamicState = &dynamic_state,
+        .layout = layout_,
+    };
+    check(vkCreateGraphicsPipelines(handle, VK_NULL_HANDLE, 1, &info, nullptr,
+                                    &pipelines_[static_cast<std::size_t>(pass)]),
+          "vkCreateGraphicsPipelines");
+  }
 }
 
 void Gpu::set_font_size(unsigned size) {
@@ -226,12 +301,16 @@ void Gpu::set_font_size(unsigned size) {
   font_size_ = size;
   text_renderer_.configure(fonts_, size, font_weight_);
   cell_width_ = text_renderer_.width(); cell_height_ = text_renderer_.height();
+  reset_atlas();
+}
+
+void Gpu::reset_atlas() {
   glyphs_.clear(); atlas_cursors_.fill({}); ++atlas_generation_;
+  for (auto& pending : pending_glyphs_) pending.clear();
   cached_revision_ = 0;
 }
 
 void Gpu::resize(unsigned width, unsigned height, unsigned font_size) {
-  make_current();
   set_font_size(font_size);
   if (width == width_ && height == height_) return;
   width_ = width; height_ = height;
@@ -245,13 +324,7 @@ void Gpu::set_padding(unsigned horizontal, unsigned vertical) {
   padding_x_ = horizontal; padding_y_ = vertical; cached_revision_ = 0;
 }
 
-void Gpu::make_current() {
-  if (!eglMakeCurrent(egl_, EGL_NO_SURFACE, EGL_NO_SURFACE, context_))
-    throw std::runtime_error("cannot activate terminal GPU context");
-}
-
 void Gpu::warm(zwayland::client::Proxy& dmabuf) {
-  make_current();
   for (const auto style : {0,1,2,3}) for (char character = 33; character < 127; ++character)
     (void)glyph(std::string(1, character), style & 1, style & 2, 0xffffff);
   for (const auto role : {FontRole::Symbols, FontRole::Emoji}) {
@@ -259,24 +332,24 @@ void Gpu::warm(zwayland::client::Proxy& dmabuf) {
     std::string text; Text::append_utf8(text, role == FontRole::Symbols ? U'\ue0a0' : U'😀');
     (void)glyph(text, false, false, 0xffffff, false, false, role);
   }
+  flush_glyphs();
   if (width_ && height_ && buffers_.empty())
     for (unsigned count = 0; count < 3; ++count) buffers_.push_back(create_buffer(dmabuf));
-  glFlush();
 }
 
 void Gpu::detach() {
-  if (context_ == EGL_NO_CONTEXT) return;
-  make_current();
   cached_revision_ = 0;
 }
 
 void Gpu::configure(FontFamilies fonts, unsigned weight, float rounding, float icon_scale,
-                     Color background, std::array<float, 4> selection, float background_opacity) {
+                     Color background, std::array<float, 4> selection, float background_opacity,
+                     std::optional<Color> selection_foreground, std::optional<Color> cursor_color, std::optional<Color> cursor_text) {
   if (background_opacity < 1 && format_ != DRM_FORMAT_ARGB8888)
     throw std::runtime_error("background opacity requires ARGB8888 DMA-BUF support");
   if (fonts != fonts_ || weight != font_weight_) font_size_ = 0;
   fonts_ = std::move(fonts); font_weight_ = weight; text_rounding_ = rounding; icon_scale_ = icon_scale;
   background_ = background; selection_color_ = selection; background_opacity_ = background_opacity; cached_revision_ = 0;
+  selection_foreground_ = selection_foreground; cursor_color_ = cursor_color; cursor_text_ = cursor_text;
 }
 
 Gpu::Glyph Gpu::glyph(const std::string& text, bool bold, bool italic, std::uint32_t rgb, bool grid, bool separator, FontRole role) {
@@ -297,13 +370,11 @@ Gpu::Glyph Gpu::glyph(const std::string& text, bool bold, bool italic, std::uint
     if (atlas.y + bitmap.height + 1 >= atlas_size) {
       ++atlas.layer; atlas.x = atlas.y = 1; atlas.row = 0;
     }
-    if (atlas.layer >= (color ? 1 : 8) || glyphs_.size() >= 32768) {
-      glyphs_.clear(); atlas_cursors_.fill({}); ++atlas_generation_;
-    }
-    glActiveTexture(color ? GL_TEXTURE1 : GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, color ? color_atlas_ : atlas_);
-    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, atlas.x, atlas.y, atlas.layer, bitmap.width, bitmap.height, 1,
-                    color ? GL_RGBA : GL_RED, GL_UNSIGNED_BYTE, bitmap.pixels.data());
+    if (atlas.layer >= (color ? 1 : static_cast<int>(atlas_layers)) || glyphs_.size() >= 32768) reset_atlas();
+    const auto bytes = static_cast<std::uint32_t>(bitmap.width) * (color ? 4U : 1U);
+    pending_glyphs_[color ? 1 : 0].push_back({bitmap.pixels, {nullptr, bytes,
+        static_cast<std::uint32_t>(atlas.x), static_cast<std::uint32_t>(atlas.y), static_cast<std::uint32_t>(bitmap.width),
+        static_cast<std::uint32_t>(bitmap.height), static_cast<std::uint32_t>(atlas.layer)}});
     result = {float(atlas.x), float(atlas.y), float(bitmap.width) / bitmap.scale, float(bitmap.height) / bitmap.scale,
               float(bitmap.x), float(bitmap.y), float(atlas.layer), float(bitmap.width), float(bitmap.height), color};
     atlas.x += bitmap.width + 1; atlas.row = std::max(atlas.row, bitmap.height);
@@ -313,42 +384,53 @@ Gpu::Glyph Gpu::glyph(const std::string& text, bool bold, bool italic, std::uint
   return result;
 }
 
+void Gpu::flush_glyphs() {
+  for (std::size_t color = 0; color < pending_glyphs_.size(); ++color) {
+    auto& pending = pending_glyphs_[color];
+    if (pending.empty()) continue;
+    std::vector<zwwm::vlk::Image::Region> regions;
+    regions.reserve(pending.size());
+    for (auto& glyph : pending) {
+      glyph.region.data = glyph.pixels.data();
+      regions.push_back(glyph.region);
+    }
+    std::string error;
+    if (!(color ? color_atlas_ : atlas_)->upload(regions, &error))
+      throw std::runtime_error("cannot upload glyphs: " + error);
+    pending.clear();
+  }
+}
+
 std::unique_ptr<Gpu::Buffer> Gpu::create_buffer(zwayland::client::Proxy& dmabuf) {
   auto buffer = std::make_unique<Buffer>(); buffer->owner = this;
   buffer->bo = gbm_bo_create_with_modifiers2(gbm_, width_, height_, format_, modifiers_.data(), modifiers_.size(), GBM_BO_USE_RENDERING);
   if (buffer->bo == nullptr) throw std::runtime_error("cannot allocate a shared GPU framebuffer");
   const int planes = gbm_bo_get_plane_count(buffer->bo);
   if (planes < 1 || planes > 4) throw std::runtime_error("unsupported GPU plane count");
-  constexpr std::array<EGLint, 4> fd_attr{EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE1_FD_EXT, EGL_DMA_BUF_PLANE2_FD_EXT, EGL_DMA_BUF_PLANE3_FD_EXT};
-  constexpr std::array<EGLint, 4> offset_attr{EGL_DMA_BUF_PLANE0_OFFSET_EXT, EGL_DMA_BUF_PLANE1_OFFSET_EXT, EGL_DMA_BUF_PLANE2_OFFSET_EXT, EGL_DMA_BUF_PLANE3_OFFSET_EXT};
-  constexpr std::array<EGLint, 4> stride_attr{EGL_DMA_BUF_PLANE0_PITCH_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT, EGL_DMA_BUF_PLANE2_PITCH_EXT, EGL_DMA_BUF_PLANE3_PITCH_EXT};
-  constexpr std::array<EGLint, 4> lo_attr{EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT};
-  constexpr std::array<EGLint, 4> hi_attr{EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT};
-  std::vector<EGLint> attributes{EGL_WIDTH, static_cast<EGLint>(width_), EGL_HEIGHT, static_cast<EGLint>(height_), EGL_LINUX_DRM_FOURCC_EXT, static_cast<EGLint>(format_)};
   const auto modifier = gbm_bo_get_modifier(buffer->bo);
   std::array<int, 4> fds{-1, -1, -1, -1};
+  const auto close_fds = [&fds] { for (int& fd : fds) if (fd >= 0) { close(fd); fd = -1; } };
+  zwwm::vlk::DmabufAttributes attributes{width_, height_, format_, {}};
   for (int plane = 0; plane < planes; ++plane) {
     fds[plane] = gbm_bo_get_fd_for_plane(buffer->bo, plane);
     if (fds[plane] < 0) {
-      for (int fd : fds) if (fd >= 0) close(fd);
+      close_fds();
       throw std::runtime_error("cannot export a GPU buffer plane");
     }
-    attributes.insert(attributes.end(), {fd_attr[plane], fds[plane], offset_attr[plane], static_cast<EGLint>(gbm_bo_get_offset(buffer->bo, plane)),
-      stride_attr[plane], static_cast<EGLint>(gbm_bo_get_stride_for_plane(buffer->bo, plane)),
-      lo_attr[plane], static_cast<EGLint>(modifier), hi_attr[plane], static_cast<EGLint>(modifier >> 32U)});
+    attributes.planes.push_back({fds[plane], gbm_bo_get_stride_for_plane(buffer->bo, plane),
+                                 gbm_bo_get_offset(buffer->bo, plane), modifier});
   }
-  attributes.push_back(EGL_NONE);
-  buffer->image = eglCreateImageKHR(egl_, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attributes.data());
-  if (buffer->image == EGL_NO_IMAGE_KHR) {
-    for (int fd : fds) if (fd >= 0) close(fd);
-    throw std::runtime_error("cannot import the GPU framebuffer as an EGLImage");
+  std::string error;
+  buffer->image = zwwm::vlk::Image::import_dmabuf(vulkan_, attributes, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &error);
+  if (buffer->image == nullptr) {
+    close_fds();
+    throw std::runtime_error("cannot import the GPU framebuffer into Vulkan: " + error);
   }
   const auto params = p::zwp_linux_dmabuf_v1_create_params(display_, dmabuf.id);
-  for (int plane = 0; plane < planes; ++plane) {
+  for (int plane = 0; plane < planes; ++plane)
     p::zwp_linux_buffer_params_v1_add(display_, params, fds[plane], plane,
       gbm_bo_get_offset(buffer->bo, plane), gbm_bo_get_stride_for_plane(buffer->bo, plane), modifier >> 32U, modifier);
-    close(fds[plane]);
-  }
+  close_fds();
   const auto id = p::zwp_linux_buffer_params_v1_create_immed(display_, params, width_, height_, format_, 0);
   p::zwp_linux_buffer_params_v1_destroy(display_, params);
   buffer->proxy = display_.find_proxy(id);
@@ -360,24 +442,7 @@ std::unique_ptr<Gpu::Buffer> Gpu::create_buffer(zwayland::client::Proxy& dmabuf)
     }
   };
   buffer->proxy->set_observer(p::wl_buffer_observer(Release{buffer.get()}));
-  glGenTextures(1, &buffer->texture); glBindTexture(GL_TEXTURE_2D, buffer->texture);
-  glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, buffer->image);
-  glGenFramebuffers(1, &buffer->framebuffer); glBindFramebuffer(GL_FRAMEBUFFER, buffer->framebuffer);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, buffer->texture, 0);
-  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-    throw std::runtime_error("GPU buffer is not renderable");
   return buffer;
-}
-
-void Gpu::batch(const std::vector<Instance>& instances, bool text, bool upload, GLuint buffer) {
-  if (instances.empty()) return;
-  glUniform1i(glGetUniformLocation(program_, "glyphs"), text);
-  glBindBuffer(GL_ARRAY_BUFFER, buffer ? buffer : text ? text_instances_ : instances_);
-  for (unsigned i = 0; i < 3; ++i)
-    glVertexAttribPointer(i, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), reinterpret_cast<void*>(i * 4 * sizeof(float)));
-  glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Instance), reinterpret_cast<void*>(12 * sizeof(float)));
-  if (upload) glBufferData(GL_ARRAY_BUFFER, instances.size() * sizeof(Instance), instances.data(), GL_DYNAMIC_DRAW);
-  glDrawArraysInstanced(GL_TRIANGLES, 0, 6, instances.size());
 }
 
 Gpu::Glyph Gpu::fit_glyph(Glyph glyph, GlyphFit fit, unsigned cells, unsigned available) const {
@@ -418,14 +483,30 @@ void Gpu::append_glyph(const Glyph& glyph, float x, float y, Color color) {
 }
 
 void Gpu::build_text(Terminal& terminal) {
-  backgrounds_.clear(); text_.clear();
+  backgrounds_.clear(); text_.clear(); cursor_glyph_.reset();
+  const auto cursor = terminal.cursor_position();
   for (int row = 0; row < terminal.rows(); ++row) {
+    const auto selection = terminal.selection_range(row);
     for (int col = 0; col < terminal.columns(); ++col) {
       auto cell = terminal.cell(row, col);
       if (cell.width == 0 || cell.chars[0] == UINT32_MAX) continue;
       if (cell.attrs.reverse) std::swap(cell.fg, cell.bg);
       if (cell.attrs.hidden) cell.fg = cell.bg;
       if (cell.attrs.dim) { cell.fg.red /= 2; cell.fg.green /= 2; cell.fg.blue /= 2; }
+      if (col >= selection.first && col < selection.second) {
+        if (selection_foreground_) cell.fg = *selection_foreground_;
+        else if (selection_color_[3] >= 0.999f) {
+          const auto foreground = terminal.foreground_color();
+          const auto luminance = [](Color color) { return color.red*0.2126f+color.green*0.7152f+color.blue*0.0722f; };
+          const float selected = 255*(selection_color_[0]*0.2126f+selection_color_[1]*0.7152f+selection_color_[2]*0.0722f);
+          cell.fg = std::abs(luminance(foreground)-selected) >= std::abs(luminance(background_)-selected) ? foreground : background_;
+        } else {
+          const float alpha = selection_color_[3];
+          cell.fg = {static_cast<std::uint8_t>(std::lround(cell.fg.red*(1-alpha)+selection_color_[0]*255*alpha)),
+                     static_cast<std::uint8_t>(std::lround(cell.fg.green*(1-alpha)+selection_color_[1]*255*alpha)),
+                     static_cast<std::uint8_t>(std::lround(cell.fg.blue*(1-alpha)+selection_color_[2]*255*alpha))};
+        }
+      }
       const float x = col * cell_width_, y = row * cell_height_;
       const float width = std::max(1, int(cell.width)) * cell_width_;
       const float alpha = cell.bg_index == -1 && !cell.attrs.reverse ? background_opacity_ : 1.f;
@@ -457,13 +538,15 @@ void Gpu::build_text(Terminal& terminal) {
       }
       const auto fit = grid ? GlyphFit::Grid : separator ? GlyphFit::Separator : icon ? GlyphFit::Icon : emoji ? GlyphFit::Emoji : GlyphFit::Text;
       const auto role = grid || separator || icon ? FontRole::Symbols : emoji ? FontRole::Emoji : FontRole::Mono;
+      const auto before = text_.size();
       append_glyph(fit_glyph(glyph(cluster,cell.attrs.bold,grid ? false : cell.attrs.italic,foreground,grid,separator,role),fit,cell.width,available),x,y,cell.fg);
+      if (row == cursor.row && col == cursor.col && text_.size() > before) cursor_glyph_ = text_.back();
     }
   }
 }
 
 bool Gpu::draw(Terminal& terminal, zwayland::client::Proxy& surface, zwayland::client::Proxy& dmabuf, bool cursor) {
-  make_current();
+  vulkan_->collect();
   std::erase_if(buffers_, [](const auto& buffer) { return buffer->retired && !buffer->busy; });
   Buffer* target = nullptr;
   unsigned current = 0;
@@ -474,8 +557,7 @@ bool Gpu::draw(Terminal& terminal, zwayland::client::Proxy& surface, zwayland::c
     buffers_.push_back(create_buffer(dmabuf)); target = buffers_.back().get();
   }
   if (target == nullptr) return false;
-  const bool rebuild = cached_revision_ != terminal.revision();
-  if (rebuild) {
+  if (cached_revision_ != terminal.revision() || cached_selection_revision_ != terminal.selection_revision()) {
     for (int attempt = 0; ; ++attempt) {
       const auto generation = atlas_generation_;
       build_text(terminal);
@@ -483,22 +565,10 @@ bool Gpu::draw(Terminal& terminal, zwayland::client::Proxy& surface, zwayland::c
       if (attempt >= 2) throw std::runtime_error("visible text exceeds the GPU cache");
     }
     cached_revision_ = terminal.revision();
+    cached_selection_revision_ = terminal.selection_revision();
   }
-  glBindFramebuffer(GL_FRAMEBUFFER, target->framebuffer); glDisable(GL_SCISSOR_TEST);
-  glClearColor(background_.red / 255.f * background_opacity_,background_.green / 255.f * background_opacity_,
-               background_.blue / 255.f * background_opacity_,background_opacity_); glClear(GL_COLOR_BUFFER_BIT);
-  glViewport(padding_x_,padding_y_,content_width(),content_height());
-  glEnable(GL_SCISSOR_TEST); glScissor(padding_x_,padding_y_,content_width(),content_height());
-  glUseProgram(program_); glUniform2f(glGetUniformLocation(program_, "viewport"), content_width(), content_height());
-  glUniform1f(glGetUniformLocation(program_, "text_rounding"), text_rounding_);
-  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D_ARRAY, atlas_);
-  glUniform1i(glGetUniformLocation(program_, "atlas"), 0);
-  glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D_ARRAY, color_atlas_);
-  glUniform1i(glGetUniformLocation(program_, "color_atlas"), 1);
-  glBindVertexArray(vao_); glBindBuffer(GL_ARRAY_BUFFER, instances_);
-  glDisable(GL_BLEND);
-  batch(backgrounds_, false, rebuild);
-  glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+  flush_glyphs();
+
   selection_rects_.clear();
   if (terminal.has_selection()) for (int row = 0; row < terminal.rows(); ++row) {
     const auto [first, last] = terminal.selection_range(row);
@@ -506,25 +576,114 @@ bool Gpu::draw(Terminal& terminal, zwayland::client::Proxy& surface, zwayland::c
       (last - first) * float(cell_width_), float(cell_height_),0,0,0,0,
       selection_color_[0],selection_color_[1],selection_color_[2],selection_color_[3]});
   }
-  batch(text_, true, rebuild);
-  batch(selection_rects_, false, true, selection_instances_);
+  std::vector<Instance> cursor_quad, cursor_text;
+  Pass cursor_pass = Pass::Blended;
+  VkRect2D cursor_cell{};
   const auto position = terminal.cursor_position();
   const auto style = terminal.cursor_style();
   if ((cursor || !style.blink) && !terminal.has_selection() && terminal.cursor_at(position.row, position.col)) {
     const float width = std::max(1, int(terminal.cell(position.row, position.col).width)) * cell_width_;
     const float thickness = std::max(1.f, std::round(cell_height_ * 0.09f));
-    const auto color = terminal.foreground_color();
+    const auto color = cursor_color_.value_or(terminal.foreground_color());
     Instance cursor_instance{position.col * float(cell_width_), position.row * float(cell_height_), width, float(cell_height_),
                              0,0,0,0,color.red / 255.f,color.green / 255.f,color.blue / 255.f,1};
     if (style.shape == CursorShape::Block) {
-      glBlendFuncSeparate(GL_ONE_MINUS_DST_COLOR, GL_ZERO, GL_ONE, GL_ZERO);
-      cursor_instance.r = cursor_instance.g = cursor_instance.b = 1;
+      if (!cursor_color_ && !cursor_text_) {
+        cursor_pass = Pass::Inverted;
+        cursor_instance.r = cursor_instance.g = cursor_instance.b = 1;
+      }
     } else if (style.shape == CursorShape::Beam) cursor_instance.width = thickness;
     else { cursor_instance.y += cell_height_ - thickness; cursor_instance.height = thickness; }
-    batch({cursor_instance}, false, true, cursor_instances_);
+    cursor_quad.push_back(cursor_instance);
+    if (style.shape == CursorShape::Block && (cursor_color_ || cursor_text_) && cursor_glyph_) {
+      auto glyph = *cursor_glyph_; const auto foreground = cursor_text_.value_or(background_);
+      glyph.r = foreground.red/255.f; glyph.g = foreground.green/255.f; glyph.b = foreground.blue/255.f;
+      cursor_text.push_back(glyph);
+      cursor_cell = {{static_cast<std::int32_t>(padding_x_ + position.col * cell_width_),
+                      static_cast<std::int32_t>(padding_y_ + position.row * cell_height_)},
+                     {static_cast<std::uint32_t>(width), cell_height_}};
+    }
   }
-  glFlush();
-  glDisable(GL_SCISSOR_TEST);
+
+  struct Range { std::uint32_t first = 0, count = 0; };
+  std::vector<Instance> instances;
+  const auto append = [&instances](const std::vector<Instance>& batch) {
+    const Range range{static_cast<std::uint32_t>(instances.size()), static_cast<std::uint32_t>(batch.size())};
+    instances.insert(instances.end(), batch.begin(), batch.end());
+    return range;
+  };
+  const Range backgrounds = append(backgrounds_), selections = append(selection_rects_), text = append(text_),
+              cursor_range = append(cursor_quad), cursor_glyph = append(cursor_text);
+  std::string error;
+  std::shared_ptr<zwwm::vlk::StagingBuffer> vertices;
+  if (!instances.empty()) {
+    vertices = vulkan_->staging(instances.size() * sizeof(Instance), &error);
+    if (vertices == nullptr) throw std::runtime_error("cannot allocate terminal vertices: " + error);
+    std::memcpy(vertices->mapping, instances.data(), instances.size() * sizeof(Instance));
+  }
+
+  auto commands = vulkan_->begin(&error);
+  if (!commands) throw std::runtime_error("cannot record a terminal frame: " + error);
+  const VkCommandBuffer cb = commands.get();
+  auto& image = *target->image;
+  // Wait for the compositor to finish reading this buffer's previous frame.
+  (void)commands.wait_sync_file(image.export_sync_file(true), VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+  image.transition(cb, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true);
+  VkRenderingAttachmentInfo attachment{
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .imageView = image.view(),
+      .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+  };
+  attachment.clearValue.color = {{background_.red / 255.f * background_opacity_, background_.green / 255.f * background_opacity_,
+                                  background_.blue / 255.f * background_opacity_, background_opacity_}};
+  const VkRenderingInfo rendering{
+      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .renderArea = {{0, 0}, {width_, height_}},
+      .layerCount = 1,
+      .colorAttachmentCount = 1,
+      .pColorAttachments = &attachment,
+  };
+  vkCmdBeginRendering(cb, &rendering);
+  const VkViewport viewport{float(padding_x_), float(padding_y_), float(content_width()), float(content_height()), 0, 1};
+  const VkRect2D content{{static_cast<std::int32_t>(padding_x_), static_cast<std::int32_t>(padding_y_)},
+                         {content_width(), content_height()}};
+  vkCmdSetViewport(cb, 0, 1, &viewport);
+  vkCmdSetScissor(cb, 0, 1, &content);
+  const Push push{{float(content_width()), float(content_height())}, text_rounding_};
+  vkCmdPushConstants(cb, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+  vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0, nullptr);
+  if (vertices != nullptr) {
+    const VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cb, 0, 1, &vertices->buffer, &offset);
+  }
+  const auto run = [&](Pass pass, Range range) {
+    if (range.count == 0) return;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_[static_cast<std::size_t>(pass)]);
+    vkCmdDraw(cb, 6, range.count, 0, range.first);
+  };
+  run(Pass::Opaque, backgrounds);
+  run(Pass::Blended, selections);
+  run(Pass::Glyphs, text);
+  run(cursor_pass, cursor_range);
+  if (cursor_glyph.count != 0) {
+    vkCmdSetScissor(cb, 0, 1, &cursor_cell);
+    run(Pass::Glyphs, cursor_glyph);
+  }
+  vkCmdEndRendering(cb);
+  image.release(cb);
+  commands.keep(target->image);
+  commands.keep(atlas_);
+  commands.keep(color_atlas_);
+  commands.keep(vertices);
+  int sync_file = -1;
+  if (!vulkan_->submit(commands, &sync_file, false, &error)) throw std::runtime_error("cannot submit a terminal frame: " + error);
+  // The compositor waits on this fence implicitly through the DMA-BUF.
+  if (sync_file >= 0) {
+    if (!image.import_sync_file(sync_file, true)) vulkan_->wait_idle();
+    close(sync_file);
+  }
   p::wl_surface_attach(display_, surface.id, target->proxy, 0, 0);
   p::wl_surface_damage_buffer(display_, surface.id, 0, 0, width_, height_);
   target->busy = true;

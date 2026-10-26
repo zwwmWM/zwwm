@@ -22,6 +22,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -42,6 +43,10 @@ struct DataOfferState;
 struct PointerConstraint;
 struct RelativePointer;
 struct IdleNotification;
+struct IdleInhibitor;
+struct TextInputState;
+struct InputMethodState;
+struct EdgeSwipeState;
 struct XdgSurfaceState;
 struct DialogState;
 struct PopupState;
@@ -70,6 +75,7 @@ struct OutputState {
   std::array<std::vector<layout::FibonacciLeaf>, 9> fibonacci_leaves;
   std::array<CanvasViewport, 9> canvas_viewports;
   bool retired = false;
+  bool powered = true;
 };
 
 struct Observer {
@@ -85,6 +91,9 @@ struct Observer {
   void* presentation_data = nullptr;
   CompositorServer::EventObserver event_callback = nullptr;
   void* event_data = nullptr;
+  CompositorServer::OutputPowerObserver output_power_callback = nullptr;
+  void* output_power_data = nullptr;
+  std::vector<struct OutputPowerState*> output_powers;
   std::vector<SurfaceState*>* surfaces = nullptr;
   std::vector<std::unique_ptr<OutputState>>* outputs = nullptr;
   SeatState* seat = nullptr;
@@ -117,7 +126,14 @@ struct Observer {
 };
 
 struct Pool { void* mapping = nullptr; std::size_t size = 0; UniqueFd fd; std::size_t buffers = 0; bool destroyed = false; };
-struct Buffer { Pool* pool = nullptr; zwayland::server::Resource* resource = nullptr; std::size_t references = 1; std::int32_t offset = 0, width = 0, height = 0, stride = 0; std::uint32_t format = 0; std::optional<renderer::DmabufAttributes> dmabuf; };
+struct Buffer {
+  Pool* pool = nullptr; zwayland::server::Resource* resource = nullptr; std::size_t references = 1; std::int32_t offset = 0, width = 0, height = 0, stride = 0; std::uint32_t format = 0; std::optional<renderer::DmabufAttributes> dmabuf;
+  std::uint64_t id = 0;
+  // Scanout holds delay wl_buffer.release until the display stops reading the buffer.
+  std::uint32_t holds = 0;
+  bool release_deferred = false;
+};
+Buffer* buffer_by_id(std::uint64_t id);
 struct DmabufState { std::vector<std::pair<std::uint32_t, std::uint64_t>> formats; std::optional<dev_t> main_device; };
 using Rect = layout::CanvasRect;
 struct RegionState { std::vector<Rect> rects; };
@@ -163,7 +179,7 @@ struct LayerSurfaceState { zwayland::server::Resource* resource = nullptr; Surfa
 struct LockSurfaceState { SessionLockState* lock = nullptr; zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; OutputId output; std::vector<std::uint32_t> serials; std::uint32_t acked = 0; std::uint32_t width = 0, height = 0; bool mapped = false, presented = false; };
 struct SessionLockState { Observer* observer = nullptr; zwayland::server::Client* client = nullptr; zwayland::server::Resource* resource = nullptr; std::vector<LockSurfaceState*> surfaces; bool accepted = false, locked_sent = false, unlocked = false; };
 struct ViewportState { zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; std::shared_ptr<bool> surface_alive; };
-struct FractionalScaleState { zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; std::shared_ptr<bool> surface_alive; };
+struct FractionalScaleState { zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; std::shared_ptr<bool> surface_alive; std::uint32_t sent_scale_120 = 0; };
 
 struct ProtocolGlobals {
   zwayland::server::Display* display = nullptr;
@@ -178,6 +194,8 @@ struct ProtocolGlobals {
   std::uint32_t xwlr_layer_shell = 0;
   std::uint32_t relative_pointer_manager = 0;
   std::uint32_t idle_notifier = 0;
+  std::uint32_t idle_inhibit_manager = 0, text_input_manager = 0, input_method_manager = 0;
+  std::uint32_t virtual_keyboard_v1_manager = 0, edge_swipe_manager = 0, output_power_manager = 0;
   Observer* observer = nullptr;
   ProtocolGlobals& operator=(zwayland::server::Display* next);
   operator zwayland::server::Display*() const { return display; }
@@ -185,6 +203,8 @@ struct ProtocolGlobals {
   ~ProtocolGlobals();
 };
 
+struct EdgeSwipeTouch { EdgeSwipeState* target = nullptr; std::int32_t id = 0; std::uint32_t edge = 0; double x = 0, y = 0, distance = 0, lateral = 0; std::uint32_t time = 0, last_time = 0; double velocity = 0; };
+struct HeldKey { std::optional<Keybinding> tap, hold, release, repeat; int timer = -1; bool held = false; };
 struct FocusGrabState;
 struct SeatState {
   CompositorServer* compositor = nullptr;
@@ -264,6 +284,15 @@ struct SeatState {
   std::vector<PointerConstraint*> constraints;
   std::vector<RelativePointer*> relative_pointers;
   std::vector<IdleNotification*> idle_notifications;
+  std::vector<IdleInhibitor*> idle_inhibitors;
+  std::unordered_map<std::uint32_t, HeldKey> held_keys;
+  std::vector<TextInputState*> text_inputs;
+  InputMethodState* input_method = nullptr;
+  // Keymap each wl_keyboard last received when it differs from the seat's; keyed by owner.
+  std::unordered_map<zwayland::server::Resource*, const void*> keyboard_keymaps;
+  std::unordered_map<std::uint64_t, zwayland::server::Client*> keyboard_source_clients;
+  std::vector<EdgeSwipeState*> edge_swipes;
+  std::optional<EdgeSwipeTouch> edge_swipe;
   std::string cursor_shape = "left_ptr";
   std::string cursor_override_shape;
   bool cursor_hidden_for_lock = false;
@@ -273,7 +302,28 @@ struct SeatState {
 };
 struct PointerConstraint { SeatState* seat = nullptr; SurfaceState* surface = nullptr; zwayland::server::Resource* pointer = nullptr; zwayland::server::Resource* resource = nullptr; std::vector<Rect> region; std::vector<Rect> pending_region; std::uint32_t lifetime = protocol::ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT; std::int32_t x = 0, y = 0; double pending_hint_x = 0, pending_hint_y = 0; double hint_x = 0, hint_y = 0; bool locked = false, active = false, defunct = false; bool has_region = false, pending_has_region = false, region_pending = false; bool hint_pending = false, has_hint = false; };
 struct RelativePointer { SeatState* seat = nullptr; zwayland::server::Resource* pointer = nullptr; zwayland::server::Resource* resource = nullptr; };
-struct IdleNotification { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; std::uint32_t timeout = 0; int timer = -1; bool idle = false; };
+struct IdleNotification { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; std::uint32_t timeout = 0; int timer = -1; bool idle = false; bool obey_inhibitors = true; };
+struct IdleInhibitor { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; std::shared_ptr<bool> surface_alive; };
+struct TextInputContent {
+  bool enabled = false;
+  std::optional<std::string> surrounding_text;
+  std::uint32_t cursor = 0, anchor = 0, cause = 0, hint = 0, purpose = 0;
+  Rect cursor_rectangle{0, 0, 0, 0};
+};
+struct TextInputState { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; SurfaceState* focus = nullptr; std::shared_ptr<bool> focus_alive; TextInputContent pending, current; std::uint32_t commits = 0; };
+struct InputMethodState {
+  SeatState* seat = nullptr;
+  zwayland::server::Resource* resource = nullptr;
+  zwayland::server::Resource* keyboard_grab = nullptr;
+  std::vector<zwayland::server::Resource*> popups;
+  TextInputState* active = nullptr;
+  std::optional<std::string> commit_string;
+  std::optional<std::string> preedit;
+  std::int32_t preedit_begin = 0, preedit_end = 0;
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> delete_surrounding;
+};
+struct OutputPowerState { Observer* observer = nullptr; zwayland::server::Resource* resource = nullptr; OutputId output; };
+struct EdgeSwipeState { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; std::uint32_t edges = 0; };
 
 enum class DataSourceRole { unused, selection, drag };
 enum class DataProtocol { standard, zwwm, zwlr };
@@ -326,6 +376,21 @@ void bind_cursor_shape_manager(zwayland::server::Client*, void*, std::uint32_t, 
 void bind_relative_pointer_manager(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
 void bind_idle_notifier(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
 void idle_activity(SeatState* seat);
+void bind_idle_inhibit_manager(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
+void bind_text_input_manager(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
+void bind_input_method_manager(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
+void bind_virtual_keyboard_v1_manager(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
+void bind_edge_swipe_manager(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
+void bind_output_power_manager(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
+void text_input_focus_changed(SeatState* seat, SurfaceState* next);
+bool input_method_grab_key(SeatState& seat, std::uint64_t source, std::uint32_t time, std::uint32_t key, std::uint32_t state);
+void input_method_grab_modifiers(SeatState& seat);
+void use_keyboard_keymap(SeatState& seat, zwayland::server::Client* client, const void* owner, std::string_view keymap);
+bool edge_swipe_touch_down(SeatState* seat, std::uint32_t time, std::int32_t id, std::int32_t x, std::int32_t y);
+bool edge_swipe_touch_motion(SeatState* seat, std::uint32_t time, std::int32_t id, std::int32_t x, std::int32_t y);
+bool edge_swipe_touch_up(SeatState* seat, std::uint32_t time, std::int32_t id);
+void edge_swipe_cancel(SeatState* seat, std::uint32_t time);
+void publish_output_power(Observer* observer, OutputId output);
 void bind_pointer_constraints(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
 void bind_seat(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
 void notify_surface(SurfaceState* surface);
@@ -343,6 +408,7 @@ void refresh_focus_grab(SeatState* seat);
 void dismiss_focus_grab(SeatState* seat, std::uint32_t reason);
 void destroy_focus_grabs(SeatState* seat);
 OutputId surface_output(const SurfaceState* surface);
+void send_preferred_scale(SurfaceState* surface);
 OutputState* output_state(Observer* observer, OutputId id);
 void reorder_layer_roots(Observer* observer, OutputId output, std::uint32_t bucket);
 void refresh_layer_keyboard_focus(Observer* observer);
@@ -355,6 +421,7 @@ void bind_virtual_keyboard_manager(zwayland::server::Client*, void*, std::uint32
 void publish_virtual_keymap(SeatState* seat);
 void publish_virtual_modifiers(SeatState* seat);
 void reset_virtual_keyboards(SeatState* seat);
+UniqueFd keymap_fd(std::string_view keymap);
 UniqueFd keymap_fd(const SeatState& seat);
 SurfaceState* surface_at_global(const Observer* observer, std::int32_t x, std::int32_t y);
 bool managed_surface(const SurfaceState* surface);

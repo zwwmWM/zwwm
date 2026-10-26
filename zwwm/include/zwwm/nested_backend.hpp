@@ -9,13 +9,14 @@
 
 #include "zwwm/compositor_server.hpp"
 #include "zwwm/animation.hpp"
+#include "zwwm/renderer/frame.hpp"
 #include "zwwm/output_capture.hpp"
 #include "zwwm/error_popup.hpp"
 #include "zwwm/unique_fd.hpp"
 
 namespace zwayland::client { class Display; struct Proxy; }
 namespace zwayland::server { class EventLoop; }
-namespace zwwm::egl { class Window; }
+namespace zwwm::vlk { class Window; }
 
 namespace zwwm {
 
@@ -77,8 +78,8 @@ class NestedBackend {
 
   [[nodiscard]] bool create_surface();
   [[nodiscard]] bool create_buffer();
-  [[nodiscard]] bool create_egl_surface();
-  void release_egl_surface();
+  [[nodiscard]] bool create_gpu_surface();
+  void release_gpu_surface();
   [[nodiscard]] bool arm_parent_display();
   void disarm_parent_display();
   void release_buffer();
@@ -125,7 +126,7 @@ class NestedBackend {
   double overview_progress_ = 0, overview_scroll_ = 0;
   bool capture_ready_ = false;
   bool capture_pending_ = false;
-  bool egl_initialization_attempted_ = false;
+  bool gpu_initialization_attempted_ = false;
   PresentationObserver presentation_observer_ = nullptr;
   void* presentation_observer_data_ = nullptr;
   CompositorServer* input_target_ = nullptr;
@@ -138,7 +139,7 @@ class NestedBackend {
   std::string cursor_theme_ = "default";
   std::string cursor_shape_ = "left_ptr";
   std::uint32_t cursor_size_ = 24;
-  std::unique_ptr<zwwm::egl::Window> egl_window_;
+  std::unique_ptr<zwwm::vlk::Window> vk_window_;
   zwayland::client::Proxy* frame_callback_ = nullptr;
   std::unique_ptr<class renderer_holder> renderer_;
   CompositorServer* dmabuf_target_ = nullptr;
@@ -148,7 +149,7 @@ class NestedBackend {
   std::vector<std::uint32_t> software_logical_;
   std::vector<std::uint32_t> capture_pixels_;
   ErrorPopupImage error_popup_;
-  std::uint32_t error_popup_texture_ = 0;
+  renderer::TextureRef error_popup_texture_;
   std::uint64_t error_popup_generation_ = 0;
   std::uint64_t uploaded_error_popup_generation_ = 0;
   bool error_popup_visible_ = false;

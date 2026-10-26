@@ -1,7 +1,7 @@
 #pragma once
 
 #include "zwwm/renderer/scene.hpp"
-#include "zwwm/renderer/opengl.hpp"
+#include "zwwm/renderer/frame.hpp"
 #include "zwwm/runtime_config.hpp"
 #include "zwwm/overview.hpp"
 
@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 
 namespace zwwm::backend_scene {
 
@@ -27,10 +28,10 @@ inline void overview_scenes(renderer::FramePlan& frame, renderer::Rect area, dou
       auto& shadow = frame.draws.emplace_back(0,
           renderer::Rect{{card.origin.x - spread, card.origin.y - spread + offset},
                          {card.size.width + 2 * spread, card.size.height + 2 * spread}},
-          amount * 0.035F, std::array<float, 4>{0, 0, 0, 1}, std::nullopt);
+          amount * 0.035F, std::array<float, 4>{0, 0, 0, 1}, nullptr);
       shadow.corner_radius = radius * amount + spread;
     }
-    auto& background = frame.draws.emplace_back(0, card, 1.0F, std::array<float, 4>{0.125F, 0.141F, 0.169F, 1.0F}, std::nullopt);
+    auto& background = frame.draws.emplace_back(0, card, 1.0F, std::array<float, 4>{0.125F, 0.141F, 0.169F, 1.0F}, nullptr);
     background.shader_role = renderer::ShaderRole::background;
     background.shader_name = background_shader;
     background.shader_time = frame.shader_time;
@@ -204,6 +205,64 @@ std::array<float, 4> source_uv(const WindowGeometry& geometry, const Surface& su
           surface.source_top + height * (geometry.y + geometry.height) / surface.height};
 }
 
+// The scaled shadow size travels in DrawCall::border_width.
+inline std::optional<renderer::DrawCall> shadow_draw(const RuntimeConfig& config, renderer::NodeId id,
+                                                     renderer::Rect window, float corner_radius, float scale,
+                                                     float opacity, std::uint32_t state, float time) {
+  if (config.shadow_shader.empty() || opacity <= 0.0F) return std::nullopt;
+  const float size = static_cast<float>(std::max(0, config.shader_integer(config.shadow_shader, "size", 24))) * scale;
+  const auto offset_x = static_cast<std::int32_t>(std::lround(config.shader_integer(config.shadow_shader, "offset_x", 0) * scale));
+  const auto offset_y = static_cast<std::int32_t>(std::lround(config.shader_integer(config.shadow_shader, "offset_y", 0) * scale));
+  const auto extent = static_cast<std::int32_t>(std::ceil(size));
+  if (extent <= 0) return std::nullopt;
+  renderer::DrawCall draw(id,
+      renderer::Rect{{window.origin.x - extent + offset_x, window.origin.y - extent + offset_y},
+                     {window.size.width + 2U * static_cast<std::uint32_t>(extent),
+                      window.size.height + 2U * static_cast<std::uint32_t>(extent)}},
+      opacity, std::array<float, 4>{0.0F, 0.0F, 0.0F, 1.0F}, nullptr, corner_radius, size);
+  draw.shader_role = renderer::ShaderRole::shadow;
+  draw.shader_name = config.shadow_shader;
+  draw.toplevel_id = id;
+  draw.toplevel_bounds = window;
+  draw.toplevel_state = state;
+  draw.shader_time = time;
+  return draw;
+}
+
+// Whole-pixel ring around the window edge, which travels in texture_bounds.
+inline std::optional<renderer::DrawCall> border_draw(renderer::NodeId id, renderer::Rect content, renderer::Rect window,
+                                                     float width, float inner_radius, float opacity,
+                                                     std::uint32_t state, float time) {
+  const auto ring = static_cast<std::int32_t>(std::lround(width));
+  if (ring <= 0 || content.empty()) return std::nullopt;
+  const auto grow = 2U * static_cast<std::uint32_t>(ring);
+  renderer::DrawCall draw(id,
+      renderer::Rect{{content.origin.x - ring, content.origin.y - ring},
+                     {content.size.width + grow, content.size.height + grow}},
+      opacity, std::array<float, 4>{1.0F, 1.0F, 1.0F, 1.0F}, nullptr, inner_radius + static_cast<float>(ring),
+      static_cast<float>(ring));
+  draw.shader_role = renderer::ShaderRole::border;
+  draw.texture_bounds = content;
+  draw.texture_corner_radius = inner_radius;
+  draw.toplevel_bounds = window;
+  draw.toplevel_state = state;
+  draw.shader_time = time;
+  return draw;
+}
+
+// Reaches under the ring so its antialiased edge never shows the backdrop.
+inline void extend_under_border(renderer::DrawCall& draw) {
+  if (draw.clip_bounds) {
+    auto& clip = *draw.clip_bounds;
+    clip = {{clip.origin.x - 1, clip.origin.y - 1}, {clip.size.width + 2U, clip.size.height + 2U}};
+  }
+  if (draw.geometry && draw.geometry->clip) {
+    auto& clip = *draw.geometry->clip;
+    clip = {{clip.origin.x - 1.0, clip.origin.y - 1.0}, {clip.size.width + 2.0, clip.size.height + 2.0}};
+  }
+  if (draw.clip_radius > 0.0F) draw.clip_radius += 1.0F;
+}
+
 template <typename Surface>
 void camera_geometry(renderer::DrawCall& draw, const Surface& root, const Surface& surface,
                      renderer::Rect sampled) {
@@ -231,7 +290,16 @@ void camera_geometry(renderer::DrawCall& draw, const Surface& root, const Surfac
   const auto content = project(root.assigned_content_x, root.assigned_content_y,
                                root.assigned_content_width, root.assigned_content_height);
   precise.bounds = precise.toplevel;
-  if (draw.shader_role != renderer::ShaderRole::border) {
+  if (draw.shader_role == renderer::ShaderRole::shadow) {
+    const double correction = rounded_scale > 0.0F ? scale / rounded_scale : 1.0;
+    const double left = (sampled.origin.x - draw.bounds.origin.x) * correction;
+    const double top = (sampled.origin.y - draw.bounds.origin.y) * correction;
+    precise.bounds = {{precise.toplevel.origin.x - left, precise.toplevel.origin.y - top},
+                      {precise.toplevel.size.width + (static_cast<double>(draw.bounds.size.width) - sampled.size.width) * correction,
+                       precise.toplevel.size.height + (static_cast<double>(draw.bounds.size.height) - sampled.size.height) * correction}};
+  } else if (draw.shader_role == renderer::ShaderRole::border) {
+    precise.texture = content;
+  } else {
     const auto geometry = window_geometry(root);
     const double sx = content.size.width / std::max(1, root.assigned_content_width);
     const double sy = content.size.height / std::max(1, root.assigned_content_height);

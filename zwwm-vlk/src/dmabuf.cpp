@@ -1,8 +1,8 @@
-#include "zwwm/renderer/dmabuf.hpp"
+#include "zwwm-vlk/dmabuf.hpp"
 
 #include <libdrm/drm_fourcc.h>
 
-namespace zwwm::renderer {
+namespace zwwm::vlk {
 
 std::size_t expected_plane_count(std::uint32_t format) {
   switch (format) {
@@ -58,4 +58,4 @@ bool DmabufAttributes::valid(std::string* error) const {
   return true;
 }
 
-}  // namespace zwwm::renderer
+}  // namespace zwwm::vlk

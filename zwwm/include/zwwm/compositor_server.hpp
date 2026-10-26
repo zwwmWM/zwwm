@@ -18,6 +18,7 @@
 #include <sys/types.h>
 
 namespace zwwm {
+struct Keybinding;
 
 class RuntimeConfig;
 
@@ -32,6 +33,8 @@ struct ShmBufferView {
   // Surface-local dimensions after buffer scale and viewport destination.
   std::int32_t logical_width = 0;
   std::int32_t logical_height = 0;
+  // Identifies the wl_buffer for hold_buffer() while it is scanned out directly.
+  std::uint64_t buffer_id = 0;
   // Normalized buffer-pixel crop used by GPU and software presentation.
   float source_left = 0.0F;
   float source_top = 0.0F;
@@ -184,6 +187,8 @@ class CompositorServer {
   using ToplevelObserver = void (*)(void*);
   using PresentationObserver = void (*)(void*);
   using EventObserver = void (*)(void*, const char* event);
+  // Returns whether the backend applied the requested output power state.
+  using OutputPowerObserver = bool (*)(void*, OutputId output, bool on);
   using ExternalActionHandler = bool (*)(void*, const std::string& action,
                                          const std::string& argument, std::string* error);
   using LayoutProvider = std::function<std::vector<layout::Placement>(
@@ -200,6 +205,11 @@ class CompositorServer {
 
   void set_surface_commit_observer(SurfaceCommitObserver observer, void* data);
   void set_cursor_shape_observer(CursorShapeObserver observer, void* data);
+  void set_output_power_observer(OutputPowerObserver observer, void* data);
+  // Keeps a buffer from being released to its client until release_buffer_hold().
+  [[nodiscard]] bool hold_buffer(std::uint64_t buffer_id);
+  void release_buffer_hold(std::uint64_t buffer_id);
+  [[nodiscard]] bool output_powered(OutputId output) const;
   void set_pointer_position_observer(PointerPositionObserver observer, void* data);
   void set_toplevel_observer(ToplevelObserver observer, void* data);
   void set_presentation_observer(PresentationObserver observer, void* data);
@@ -276,6 +286,8 @@ class CompositorServer {
   void input_reset(bool preserve_keyboard_focus = false);
 
  private:
+  void run_key_binding(const Keybinding& binding);
+  void schedule_held_key(std::uint32_t key, std::uint32_t delay);
   struct Impl;
   Impl* impl_;
 };

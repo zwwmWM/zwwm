@@ -4,8 +4,11 @@
 #include "zwwm/runtime_config.hpp"
 #include "zwwm/animation.hpp"
 #include "zwwm/output_capture.hpp"
-#include "zwwm/renderer/egl_dmabuf_importer.hpp"
-#include "zwwm/renderer/opengl.hpp"
+#include "zwwm/unique_fd.hpp"
+#include "zwwm/renderer/vulkan.hpp"
+
+#include <zwwm-vlk/device.hpp>
+#include <zwwm-vlk/image.hpp>
 
 #include <zwayland/server/display.hpp>
 #include <wayland-zwayland-server.h>
@@ -25,15 +28,18 @@ extern "C" {
 #include <array>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <chrono>
 #include <fcntl.h>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <linux/input-event-codes.h>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string_view>
 #include <sys/epoll.h>
 #include <sys/stat.h>
@@ -51,46 +57,27 @@ std::uint64_t monotonic_ms() {
       std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-void clear_gl_errors() {
-  // Bound capture checks so they cannot stall rendering.
-  for (int count = 0; count < 8; ++count)
-    if (glGetError() == GL_NO_ERROR) break;
-}
-
-GLuint snapshot_texture(GLuint source, int width, int height) {
-  if (source == 0 || width <= 0 || height <= 0) return 0;
-  GLint previous_texture = 0, previous_framebuffer = 0;
-  glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
-  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_framebuffer);
-  GLuint copy = 0, framebuffer = 0;
-  glGenTextures(1, &copy);
-  glBindTexture(GL_TEXTURE_2D, copy);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-  glGenFramebuffers(1, &framebuffer);
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
-  glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source, 0);
-  const bool framebuffer_complete = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-  if (framebuffer_complete) {
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glBindTexture(GL_TEXTURE_2D, copy);
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
-  } else {
-    glDeleteTextures(1, &copy);
-    copy = 0;
-  }
-  glDeleteFramebuffers(1, &framebuffer);
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_framebuffer));
-  glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous_texture));
-  return copy;
-}
-
 using backend_scene::animated_content;
 using backend_scene::animated_decoration_scale;
 using backend_scene::assigned_tile;
 using backend_scene::source_uv;
 using backend_scene::window_geometry;
+
+// ZWWM_DRM_DEVICES is a colon-separated allow-list of cards; symlinks such as /dev/dri/by-path/* resolve.
+bool drm_device_allowed(const char* path) {
+  const char* list = std::getenv("ZWWM_DRM_DEVICES");
+  if (list == nullptr || *list == '\0') return true;
+  std::error_code error;
+  const auto target = std::filesystem::weakly_canonical(path, error);
+  for (const auto entry : std::views::split(std::string_view(list), ':')) {
+    const std::string allowed(entry.begin(), entry.end());
+    if (allowed.empty()) continue;
+    if (allowed == path) return true;
+    const auto resolved = std::filesystem::weakly_canonical(allowed, error);
+    if (!error && resolved == target) return true;
+  }
+  return false;
+}
 
 bool is_drm_card(const char* path) {
   if (path == nullptr) {
@@ -187,6 +174,11 @@ void transform_frame(renderer::FramePlan& frame, const OutputConfig& output, ren
     const renderer::Rect output_clip{{0, 0}, output.logical_size(physical)};
     draw.clip_bounds = draw.clip_bounds ? draw.clip_bounds : std::optional<renderer::Rect>{output_clip};
     draw.bounds = output.physical_bounds(draw.bounds, physical);
+    if (!draw.toplevel_bounds.empty()) {
+      draw.toplevel_bounds.origin.x -= logical_origin.x;
+      draw.toplevel_bounds.origin.y -= logical_origin.y;
+      draw.toplevel_bounds = output.physical_bounds(draw.toplevel_bounds, physical);
+    }
     if (draw.clip_bounds) draw.clip_bounds = output.physical_bounds(*draw.clip_bounds, physical);
     if (draw.texture_bounds) draw.texture_bounds = output.physical_bounds(*draw.texture_bounds, physical);
     draw.corner_radius *= scale;
@@ -245,7 +237,7 @@ struct RuntimeBackend::DrmOutput {
     double camera_offset_x = 0.0, camera_offset_y = 0.0;
     std::int64_t camera_world_x = 0, camera_world_y = 0;
     bool canvas_camera = false;
-    GLuint texture = 0;
+    renderer::TextureRef texture;
     bool owns_texture = false;
     std::uint32_t overview_tag = 0;
     std::uint64_t shm_generation = 0;
@@ -254,12 +246,19 @@ struct RuntimeBackend::DrmOutput {
     std::string window_shader;
     std::string border_shader;
     std::vector<std::uint32_t> pixels;
+    std::optional<renderer::DmabufAttributes> dmabuf;
+    std::uint64_t buffer_id = 0;
+  };
+
+  struct ScanoutBuffer {
+    gbm_bo* bo = nullptr;
+    std::uint32_t framebuffer = 0;
+    renderer::TextureRef image;
   };
 
   DrmDevice* device = nullptr;
   std::string connector_key;
-  gbm_surface* scanout_surface = nullptr;
-  EGLSurface egl_surface = EGL_NO_SURFACE;
+  std::vector<ScanoutBuffer> scanout;
   std::vector<ShmTexture> shm_textures;
   bool tag_transition_preparing = false;
   bool camera_frame_preparing = false;
@@ -282,21 +281,23 @@ struct RuntimeBackend::DrmOutput {
   std::uint64_t max_bpc_value = 0;
   bool needs_modeset = true;
   drmModeModeInfo mode{};
-  gbm_bo* front_bo = nullptr;
-  gbm_bo* pending_bo = nullptr;
-  std::uint32_t front_fb = 0;
-  std::uint32_t pending_fb = 0;
-    bool flip_pending = false;
-    bool needs_repaint = false;
-    std::uint32_t scanout_bit_depth = 8;
+  int front_buffer = -1;
+  int pending_buffer = -1;
+  bool flip_pending = false;
+  bool needs_repaint = false;
+  std::uint32_t scanout_bit_depth = 8;
   AnimationSystem animations;
-  GLuint cursor_texture = 0;
-  GLuint capture_texture = 0;
-  GLuint capture_cursor_texture = 0;
-  GLuint capture_framebuffer = 0;
+  renderer::TextureRef cursor_texture;
+  renderer::TextureRef capture_texture;
+  renderer::TextureRef capture_cursor_texture;
   std::int32_t cursor_width = 0, cursor_height = 0, cursor_hotspot_x = 0, cursor_hotspot_y = 0;
   bool capture_ready = false;
   bool retired = false;
+  bool powered_off = false;
+  // A client buffer shown on the primary plane without composition.
+  struct DirectFrame { std::uint32_t framebuffer = 0; std::uint64_t buffer_id = 0; };
+  std::optional<DirectFrame> direct_front, direct_pending;
+  std::uint64_t direct_failed_buffer = 0;
 
   explicit DrmOutput(AnimationConfig config) : animations(config) {}
 };
@@ -304,7 +305,7 @@ struct RuntimeBackend::DrmOutput {
 struct RuntimeBackend::DrmDevice {
   struct DmabufTexture {
     std::uint64_t generation = 0;
-    GLuint texture = 0;
+    renderer::TextureRef texture;
     bool failed = false;
   };
   RuntimeBackend* backend = nullptr;
@@ -312,14 +313,11 @@ struct RuntimeBackend::DrmDevice {
   int fd = -1;
   int seat_device_id = -1;
   gbm_device* gbm = nullptr;
-  EGLDisplay egl_display = EGL_NO_DISPLAY;
-  EGLContext egl_context = EGL_NO_CONTEXT;
-  EGLConfig egl_config = nullptr;
+  std::shared_ptr<vlk::Device> vulkan;
   std::uint32_t scanout_format = DRM_FORMAT_XRGB8888;
   std::uint32_t scanout_bit_depth = 8;
-  std::unique_ptr<renderer::OpenGlRenderer> renderer;
-  std::unique_ptr<renderer::EglDmabufImporter> dmabuf_importer;
-  GLuint error_popup_texture = 0;
+  std::unique_ptr<renderer::VulkanRenderer> renderer;
+  renderer::TextureRef error_popup_texture;
   std::uint64_t error_popup_generation = 0;
   std::unordered_map<std::uint64_t, DmabufTexture> dmabuf_textures;
   std::vector<std::unique_ptr<DrmOutput>> outputs;
@@ -405,8 +403,7 @@ bool RuntimeBackend::start() {
     stop();
     return false;
   }
-  // libseat's logind/elogind backend delivers the initial enable (or disable)
-  // callback on the first dispatch, even if its fd is not readable yet.
+  // libseat's logind backend sends the initial enable on the first dispatch, readable fd or not.
   if (libseat_dispatch(seat_, 0) < 0) {
     last_error_ = std::string("initial libseat dispatch failed: ") + std::strerror(errno);
     stop();
@@ -415,6 +412,7 @@ bool RuntimeBackend::start() {
   if (!active_)
     std::fprintf(stderr, "zwwm: seat is inactive; waiting for the login session to become active\n");
   discover_drm_devices();
+  schedule_output_probe();
   return true;
 }
 
@@ -422,6 +420,10 @@ void RuntimeBackend::stop() {
   if (error_timer_ >= 0) {
     event_loop_->remove(error_timer_);
     error_timer_ = -1;
+  }
+  if (probe_timer_ >= 0) {
+    event_loop_->remove(probe_timer_);
+    probe_timer_ = -1;
   }
   for (auto& device : devices_) {
     close_drm_device(*device);
@@ -492,25 +494,15 @@ bool RuntimeBackend::prepare_config_shaders(const RuntimeConfig& config, std::st
   std::vector<DrmDevice*> prepared;
   for (auto& device : devices_) {
     if (device->renderer == nullptr || device->outputs.empty()) continue;
-    auto* output = device->outputs.front().get();
-    if (output->egl_surface == EGL_NO_SURFACE ||
-        eglMakeCurrent(device->egl_display, output->egl_surface, output->egl_surface,
-                       device->egl_context) != EGL_TRUE ||
-        !device->renderer->prepare_shaders(sources)) {
-      if (error != nullptr && error->empty())
-        *error = device->renderer == nullptr ? "renderer is unavailable" : device->renderer->last_error();
-      for (auto* ready : prepared) {
-        auto* ready_output = ready->outputs.front().get();
-        if (eglMakeCurrent(ready->egl_display, ready_output->egl_surface, ready_output->egl_surface,
-                           ready->egl_context) == EGL_TRUE)
-          ready->renderer->discard_shaders();
-      }
+    if (!device->renderer->prepare_shaders(sources)) {
+      if (error != nullptr && error->empty()) *error = device->renderer->last_error();
+      for (auto* ready : prepared) ready->renderer->discard_shaders();
       return false;
     }
     prepared.push_back(device.get());
   }
   if (prepared.empty()) {
-    if (error != nullptr) *error = "no active OpenGL renderer";
+    if (error != nullptr) *error = "no active Vulkan renderer";
     return false;
   }
   return true;
@@ -518,19 +510,13 @@ bool RuntimeBackend::prepare_config_shaders(const RuntimeConfig& config, std::st
 void RuntimeBackend::commit_config_shaders() {
   for (auto& device : devices_) {
     if (device->renderer == nullptr || device->outputs.empty()) continue;
-    auto* output = device->outputs.front().get();
-    if (eglMakeCurrent(device->egl_display, output->egl_surface, output->egl_surface,
-                       device->egl_context) == EGL_TRUE) device->renderer->commit_shaders();
+    device->renderer->commit_shaders();
     for (auto& item : device->outputs) repaint(*item);
   }
 }
 void RuntimeBackend::discard_config_shaders() {
-  for (auto& device : devices_) {
-    if (device->renderer == nullptr || device->outputs.empty()) continue;
-    auto* output = device->outputs.front().get();
-    if (eglMakeCurrent(device->egl_display, output->egl_surface, output->egl_surface,
-                       device->egl_context) == EGL_TRUE) device->renderer->discard_shaders();
-  }
+  for (auto& device : devices_)
+    if (device->renderer != nullptr) device->renderer->discard_shaders();
 }
 void RuntimeBackend::show_error(std::string message) {
   auto popup = render_error_popup(message);
@@ -569,25 +555,21 @@ void RuntimeBackend::set_cursor_shape(const char* xcursor_name) {
   cursor_visible_ = true;
   cursor_shape_ = xcursor_name;
   for (auto& device : devices_) for (auto& output : device->outputs) {
-    if (output->egl_surface == EGL_NO_SURFACE ||
-        eglMakeCurrent(device->egl_display, output->egl_surface, output->egl_surface, device->egl_context) != EGL_TRUE) continue;
+    if (device->renderer == nullptr) continue;
     XcursorImages* cursor = XcursorLibraryLoadImages(xcursor_name, cursor_theme_.c_str(), cursor_size_);
     if (cursor == nullptr || cursor->nimage == 0 || cursor->images[0] == nullptr) {
       if (cursor != nullptr) XcursorImagesDestroy(cursor);
       continue;
     }
     const XcursorImage* image = cursor->images[0];
-    if (output->cursor_texture == 0) glGenTextures(1, &output->cursor_texture);
-    output->cursor_width = static_cast<std::int32_t>(image->width);
-    output->cursor_height = static_cast<std::int32_t>(image->height);
-    output->cursor_hotspot_x = static_cast<std::int32_t>(image->xhot);
-    output->cursor_hotspot_y = static_cast<std::int32_t>(image->yhot);
-    glBindTexture(GL_TEXTURE_2D, output->cursor_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, output->cursor_width, output->cursor_height, 0, GL_BGRA,
-                 GL_UNSIGNED_BYTE, image->pixels);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    auto texture = device->renderer->upload(nullptr, image->pixels, image->width, image->height, image->width);
+    if (texture != nullptr) {
+      output->cursor_texture = std::move(texture);
+      output->cursor_width = static_cast<std::int32_t>(image->width);
+      output->cursor_height = static_cast<std::int32_t>(image->height);
+      output->cursor_hotspot_x = static_cast<std::int32_t>(image->xhot);
+      output->cursor_hotspot_y = static_cast<std::int32_t>(image->yhot);
+    }
     XcursorImagesDestroy(cursor);
     repaint(*output);
   }
@@ -621,106 +603,49 @@ void RuntimeBackend::set_cursor_position(std::int32_t x, std::int32_t y) {
 }
 
 bool RuntimeBackend::capture_output(OutputCapture& capture, bool overlay_cursor) {
+  // Direct scanout bypasses the capture texture, so capturing switches back to composition.
+  last_capture_ms_ = monotonic_ms();
+  for (auto& device : devices_) for (auto& output : device->outputs)
+    if (output->direct_front || output->direct_pending) repaint(*output);
   const auto requested = capture.output;
   DrmOutput* selected = nullptr;
   for (const auto& device : devices_) for (const auto& output : device->outputs)
     if ((!requested || output->output.id == requested) && output->capture_ready &&
-        output->egl_surface != EGL_NO_SURFACE && output->mode.hdisplay > 0 && output->mode.vdisplay > 0) {
+        output->capture_texture != nullptr && output->mode.hdisplay > 0 && output->mode.vdisplay > 0) {
       if (selected == nullptr || output->output.connector < selected->output.connector) selected = output.get();
     }
-  if (selected == nullptr || eglMakeCurrent(selected->device->egl_display, selected->egl_surface,
-      selected->egl_surface, selected->device->egl_context) != EGL_TRUE) return false;
+  if (selected == nullptr || selected->device->renderer == nullptr) return false;
+  auto& renderer = *selected->device->renderer;
   capture.output = selected->output.id;
   capture.width = static_cast<std::uint32_t>(selected->mode.hdisplay);
   capture.height = static_cast<std::uint32_t>(selected->mode.vdisplay);
-  capture.pixels.resize(static_cast<std::size_t>(capture.width) * capture.height);
-  GLuint capture_texture = selected->capture_texture;
+  renderer::TextureRef capture_texture = selected->capture_texture;
   if (overlay_cursor && cursor_visible_) {
-    if (selected->cursor_texture == 0 || selected->device->renderer == nullptr) return false;
-    clear_gl_errors();
-    if (selected->capture_cursor_texture == 0) glGenTextures(1, &selected->capture_cursor_texture);
-    glBindTexture(GL_TEXTURE_2D, selected->capture_cursor_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, selected->mode.hdisplay, selected->mode.vdisplay,
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    GLint previous_read = 0, previous_draw = 0, previous_viewport[4]{};
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw);
-    glGetIntegerv(GL_VIEWPORT, previous_viewport);
-    GLuint read_framebuffer = 0, draw_framebuffer = 0;
-    glGenFramebuffers(1, &read_framebuffer);
-    glGenFramebuffers(1, &draw_framebuffer);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, read_framebuffer);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           selected->capture_texture, 0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_framebuffer);
-    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           selected->capture_cursor_texture, 0);
-    const bool complete = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE &&
-                          glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-    if (complete) {
-      glBlitFramebuffer(0, 0, selected->mode.hdisplay, selected->mode.vdisplay,
-                        0, 0, selected->mode.hdisplay, selected->mode.vdisplay,
-                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
-      renderer::FramePlan cursor_frame;
-      cursor_frame.draws.push_back({std::numeric_limits<std::uint64_t>::max(),
-                                    {{static_cast<std::int32_t>(std::lround(cursor_x_)) - selected->cursor_hotspot_x,
-                                      static_cast<std::int32_t>(std::lround(cursor_y_)) - selected->cursor_hotspot_y},
-                                     {static_cast<std::uint32_t>(selected->cursor_width),
-                                      static_cast<std::uint32_t>(selected->cursor_height)}},
-                                    1.0F, {1.0F, 1.0F, 1.0F, 1.0F}, selected->cursor_texture});
-      transform_frame(cursor_frame, config_->output_for(selected->output.connector),
-                      {capture.width, capture.height},
-                      {selected->output.logical_x, selected->output.logical_y});
-      glViewport(0, 0, selected->mode.hdisplay, selected->mode.vdisplay);
-      if (!selected->device->renderer->render(cursor_frame, {capture.width, capture.height})) {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previous_draw));
-        glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);
-        glDeleteFramebuffers(1, &read_framebuffer);
-        glDeleteFramebuffers(1, &draw_framebuffer);
-        return false;
-      }
+    if (selected->cursor_texture == nullptr) return false;
+    auto& composed = selected->capture_cursor_texture;
+    if (composed == nullptr || composed->width() != capture.width || composed->height() != capture.height)
+      composed = renderer.create_target({capture.width, capture.height});
+    if (composed == nullptr) return false;
+    renderer::FramePlan cursor_frame;
+    cursor_frame.draws.push_back({std::numeric_limits<std::uint64_t>::max(),
+                                  {{static_cast<std::int32_t>(std::lround(cursor_x_)) - selected->cursor_hotspot_x,
+                                    static_cast<std::int32_t>(std::lround(cursor_y_)) - selected->cursor_hotspot_y},
+                                   {static_cast<std::uint32_t>(selected->cursor_width),
+                                    static_cast<std::uint32_t>(selected->cursor_height)}},
+                                  1.0F, {1.0F, 1.0F, 1.0F, 1.0F}, selected->cursor_texture});
+    transform_frame(cursor_frame, config_->output_for(selected->output.connector),
+                    {capture.width, capture.height},
+                    {selected->output.logical_x, selected->output.logical_y});
+    if (!renderer.begin() || !renderer.copy(selected->capture_texture, composed) ||
+        !renderer.render(cursor_frame, composed) || !renderer.submit()) {
+      if (renderer.recording()) (void)renderer.submit();
+      return false;
     }
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read));
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previous_draw));
-    glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);
-    glDeleteFramebuffers(1, &read_framebuffer);
-    glDeleteFramebuffers(1, &draw_framebuffer);
-    const auto cursor_error = glGetError();
-    if (!complete || cursor_error != GL_NO_ERROR) return false;
-    capture_texture = selected->capture_cursor_texture;
+    capture_texture = composed;
   }
-  if (capture_texture == 0) return false;
-  clear_gl_errors();
-  bool framebuffer_complete = true;
-  GLint previous_framebuffer = 0;
-  GLuint framebuffer = 0;
-  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_framebuffer);
-  glGenFramebuffers(1, &framebuffer);
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
-  glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                         capture_texture, 0);
-  framebuffer_complete = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-  if (framebuffer_complete) {
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glReadPixels(0, 0, static_cast<GLsizei>(capture.width), static_cast<GLsizei>(capture.height),
-                 GL_BGRA, GL_UNSIGNED_BYTE, capture.pixels.data());
-  }
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_framebuffer));
-  glDeleteFramebuffers(1, &framebuffer);
-  const auto read_error = glGetError();
-  if (!framebuffer_complete || read_error != GL_NO_ERROR) {
+  if (!renderer.read_pixels(capture_texture, &capture.pixels)) {
     capture = {};
     return false;
-  }
-  for (std::uint32_t y = 0; y < capture.height / 2; ++y) {
-    auto top = capture.pixels.begin() + static_cast<std::ptrdiff_t>(y * capture.width);
-    auto bottom = capture.pixels.begin() + static_cast<std::ptrdiff_t>((capture.height - y - 1) * capture.width);
-    std::swap_ranges(top, top + capture.width, bottom);
   }
   for (auto& pixel : capture.pixels) pixel |= 0xff000000U;
   return true;
@@ -731,21 +656,18 @@ bool RuntimeBackend::capture_toplevel(std::uint64_t id, OutputCapture& capture, 
   for (const auto& device : devices_) for (const auto& output : device->outputs) {
     const auto root = std::find_if(output->shm_textures.begin(), output->shm_textures.end(), [id](auto& surface) {
       return surface.id == id && surface.root_id == id && surface.toplevel && !surface.removed &&
-             surface.content_ready && surface.texture != 0 && surface.width > 0 && surface.height > 0;
+             surface.content_ready && surface.texture != nullptr && surface.width > 0 && surface.height > 0;
     });
     if (root != output->shm_textures.end()) { selected = output.get(); root_surface = &*root; break; }
   }
-  if (selected == nullptr || root_surface == nullptr || selected->device->renderer == nullptr ||
-      selected->egl_surface == EGL_NO_SURFACE ||
-      eglMakeCurrent(selected->device->egl_display, selected->egl_surface, selected->egl_surface,
-                     selected->device->egl_context) != EGL_TRUE) return false;
+  if (selected == nullptr || root_surface == nullptr || selected->device->renderer == nullptr) return false;
 
   capture.output = selected->output.id;
   capture.width = static_cast<std::uint32_t>(root_surface->width);
   capture.height = static_cast<std::uint32_t>(root_surface->height);
   renderer::FramePlan frame;
   for (const auto& surface : selected->shm_textures) {
-    if (surface.root_id != id || surface.removed || surface.popup || surface.texture == 0 ||
+    if (surface.root_id != id || surface.removed || surface.popup || surface.texture == nullptr ||
         surface.width <= 0 || surface.height <= 0) continue;
     renderer::DrawCall draw{surface.id,
         {{surface.x - root_surface->x, surface.y - root_surface->y},
@@ -755,7 +677,7 @@ bool RuntimeBackend::capture_toplevel(std::uint64_t id, OutputCapture& capture, 
     draw.opaque = surface.opaque;
     frame.draws.push_back(draw);
   }
-  if (overlay_cursor && cursor_visible_ && selected->cursor_texture != 0 &&
+  if (overlay_cursor && cursor_visible_ && selected->cursor_texture != nullptr &&
       root_surface->assigned_content_width > 0 && root_surface->assigned_content_height > 0) {
     const double scale_x = static_cast<double>(root_surface->width) / root_surface->assigned_content_width;
     const double scale_y = static_cast<double>(root_surface->height) / root_surface->assigned_content_height;
@@ -784,8 +706,8 @@ bool RuntimeBackend::supports_embedded_cursor() const {
 void RuntimeBackend::publish_dmabuf_importer() {
   if (dmabuf_target_ == nullptr) return;
   std::vector<DrmDevice*> candidates;
-  for (const auto& device : devices_) if (device->dmabuf_importer != nullptr && device->dmabuf_importer->supported())
-    candidates.push_back(device.get());
+  for (const auto& device : devices_)
+    if (device->renderer != nullptr && !device->renderer->dmabuf_formats().empty()) candidates.push_back(device.get());
   std::sort(candidates.begin(), candidates.end(), [](const auto* left, const auto* right) { return left->path < right->path; });
   for (auto* device : candidates) {
     std::optional<dev_t> main_device;
@@ -800,7 +722,7 @@ void RuntimeBackend::publish_dmabuf_importer() {
       main_device = status.st_rdev;
     }
     if (drm_device != nullptr) drmFreeDevice(&drm_device);
-    dmabuf_target_->set_dmabuf_feedback(device->dmabuf_importer->supported_formats(), main_device);
+    dmabuf_target_->set_dmabuf_feedback(device->renderer->dmabuf_formats(), main_device);
     return;
   }
   dmabuf_target_->set_dmabuf_feedback({}, std::nullopt);
@@ -833,10 +755,7 @@ void RuntimeBackend::present(const ShmBufferView& buffer) {
   for (auto& device : devices_) for (auto& output_ptr : device->outputs) {
     auto* card = output_ptr.get();
     if (buffer.output && buffer.output != card->output.id) continue;
-    if (device->renderer == nullptr || card->egl_surface == EGL_NO_SURFACE ||
-        eglMakeCurrent(device->egl_display, card->egl_surface, card->egl_surface, device->egl_context) != EGL_TRUE) {
-      continue;
-    }
+    if (device->renderer == nullptr || card->scanout.empty()) continue;
     if (buffer.overview_changed) {
       card->overview = buffer.overview;
       card->overview_first_tag = buffer.overview_first_tag;
@@ -881,7 +800,7 @@ void RuntimeBackend::present(const ShmBufferView& buffer) {
       if (surface != card->shm_textures.end() && surface->removed) continue;
       if (buffer.toplevel && buffer.assigned_content_width > 0 && buffer.assigned_content_height > 0) {
         DrmOutput::ShmTexture updated = surface == card->shm_textures.end() ? DrmOutput::ShmTexture{} : std::move(*surface);
-        const bool retain_content = surface != card->shm_textures.end() && updated.texture != 0;
+        const bool retain_content = surface != card->shm_textures.end() && updated.texture != nullptr;
         const bool closing = retain_content && buffer.unmapped;
         updated.id = buffer.surface_id;
         updated.root_id = buffer.root_surface_id;
@@ -928,23 +847,17 @@ void RuntimeBackend::present(const ShmBufferView& buffer) {
         updated.camera_world_y = buffer.camera_world_y;
         updated.canvas_camera = buffer.canvas_camera;
         if (!retain_content) {
-          updated.texture = 0;
+          updated.texture.reset();
           updated.owns_texture = false;
           updated.pixels.clear();
         }
         if (surface == card->shm_textures.end()) card->shm_textures.push_back(std::move(updated)); else *surface = std::move(updated);
         if (closing) {
           for (auto& item : card->shm_textures) if (item.root_id == buffer.surface_id) {
-            if (item.texture != 0 && !item.owns_texture) {
-              const GLuint copy = snapshot_texture(item.texture, item.buffer_width, item.buffer_height);
-              if (copy != 0) { item.texture = copy; item.owns_texture = true; }
-              else item.texture = 0;
-              const auto imported = device->dmabuf_textures.find(item.id);
-              if (imported != device->dmabuf_textures.end()) {
-                if (imported->second.texture != 0 && device->dmabuf_importer != nullptr)
-                  (void)device->dmabuf_importer->release(imported->second.texture);
-                device->dmabuf_textures.erase(imported);
-              }
+            if (item.texture != nullptr && !item.owns_texture) {
+              item.texture = device->renderer->snapshot(item.texture);
+              item.owns_texture = item.texture != nullptr;
+              device->dmabuf_textures.erase(item.id);
             }
             item.content_ready = true;
             item.removed = true;
@@ -957,21 +870,14 @@ void RuntimeBackend::present(const ShmBufferView& buffer) {
           // Keep this scene intact until the output-level slide completes.
         } else if (surface->toplevel && config_->animations.enabled && config_->animations.close) {
           for (auto& item : card->shm_textures) if (item.root_id == surface->id) {
-            if (item.texture != 0 && !item.owns_texture) {
-              const GLuint copy = snapshot_texture(item.texture, item.buffer_width, item.buffer_height);
-              if (copy != 0) { item.texture = copy; item.owns_texture = true; }
-              else item.texture = 0;
-              const auto imported = device->dmabuf_textures.find(item.id);
-              if (imported != device->dmabuf_textures.end()) {
-                if (imported->second.texture != 0 && device->dmabuf_importer != nullptr)
-                  (void)device->dmabuf_importer->release(imported->second.texture);
-                device->dmabuf_textures.erase(imported);
-              }
+            if (item.texture != nullptr && !item.owns_texture) {
+              item.texture = device->renderer->snapshot(item.texture);
+              item.owns_texture = item.texture != nullptr;
+              device->dmabuf_textures.erase(item.id);
             }
             item.removed = true;
           }
         } else {
-          if (surface->texture != 0 && surface->owns_texture) glDeleteTextures(1, &surface->texture);
           card->shm_textures.erase(surface);
         }
       }
@@ -985,16 +891,9 @@ void RuntimeBackend::present(const ShmBufferView& buffer) {
       continue;
     }
     DrmOutput::ShmTexture updated = surface == card->shm_textures.end() ? DrmOutput::ShmTexture{} : std::move(*surface);
-    if (buffer.pixels != nullptr) {
-      const auto imported = device->dmabuf_textures.find(buffer.surface_id);
-      if (imported != device->dmabuf_textures.end()) {
-        if (imported->second.texture != 0 && device->dmabuf_importer != nullptr)
-          (void)device->dmabuf_importer->release(imported->second.texture);
-        device->dmabuf_textures.erase(imported);
-      }
-    }
+    if (buffer.pixels != nullptr) device->dmabuf_textures.erase(buffer.surface_id);
     const bool resized = updated.buffer_width != buffer.width || updated.buffer_height != buffer.height;
-    const bool full_upload = buffer.pixels != nullptr && (resized || updated.pixels.empty() || updated.texture == 0 ||
+    const bool full_upload = buffer.pixels != nullptr && (resized || updated.pixels.empty() || updated.texture == nullptr ||
         !updated.owns_texture || updated.shm_generation != buffer.buffer_generation);
     updated.id = buffer.surface_id;
     updated.root_id = buffer.root_surface_id;
@@ -1063,37 +962,42 @@ void RuntimeBackend::present(const ShmBufferView& buffer) {
     if (buffer.pixels != nullptr) {
       updated.shm_generation = buffer.buffer_generation;
       if (full_upload || (right > left && bottom > top)) {
-        if (updated.texture != 0 && !updated.owns_texture) updated.texture = 0;
-        if (updated.texture == 0) glGenTextures(1, &updated.texture);
-        updated.owns_texture = true;
-        glBindTexture(GL_TEXTURE_2D, updated.texture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, updated.buffer_width, updated.buffer_height, 0, GL_BGRA, GL_UNSIGNED_BYTE,
-                      updated.pixels.data());
-        glBindTexture(GL_TEXTURE_2D, 0);
+        if (!updated.owns_texture) updated.texture.reset();
+        const std::optional<renderer::Rect> damage = full_upload ? std::nullopt : std::optional<renderer::Rect>{
+            {{left, top}, {static_cast<std::uint32_t>(right - left), static_cast<std::uint32_t>(bottom - top)}}};
+        auto uploaded = device->renderer->upload(updated.texture, updated.pixels.data(),
+                                                 static_cast<std::uint32_t>(updated.buffer_width),
+                                                 static_cast<std::uint32_t>(updated.buffer_height),
+                                                 static_cast<std::uint32_t>(updated.buffer_width), damage);
+        if (uploaded == nullptr)
+          std::fprintf(stderr, "zwwm: DRM %s: shm upload failed for surface %llu: %s\n", device->path.c_str(),
+                       static_cast<unsigned long long>(buffer.surface_id), device->renderer->last_error().c_str());
+        updated.texture = std::move(uploaded);
+        updated.owns_texture = updated.texture != nullptr;
       }
     } else {
-      if (updated.texture != 0 && updated.owns_texture) glDeleteTextures(1, &updated.texture);
       auto& imported = device->dmabuf_textures[buffer.surface_id];
       if (imported.generation != buffer.buffer_generation) {
-        if (imported.texture != 0 && device->dmabuf_importer != nullptr)
-          (void)device->dmabuf_importer->release(imported.texture);
-        imported = {.generation = buffer.buffer_generation};
-        if (device->dmabuf_importer != nullptr && device->dmabuf_importer->supported())
-          imported.texture = device->dmabuf_importer->import(*buffer.dmabuf);
-        imported.failed = imported.texture == 0;
+        imported = DrmDevice::DmabufTexture{};
+        imported.generation = buffer.buffer_generation;
+        imported.texture = device->renderer->import_dmabuf(*buffer.dmabuf);
+        imported.failed = imported.texture == nullptr;
         if (imported.failed) {
           std::fprintf(stderr, "zwwm: DRM %s: DMA-BUF import failed for surface %llu generation %llu: %s; skipping it on this device\n",
                        device->path.c_str(), static_cast<unsigned long long>(buffer.surface_id),
                        static_cast<unsigned long long>(buffer.buffer_generation),
-                       device->dmabuf_importer == nullptr ? "importer unavailable" : device->dmabuf_importer->last_error().c_str());
+                       device->renderer->last_error().c_str());
         }
       }
-      updated.texture = imported.failed ? 0 : imported.texture;
+      updated.texture = imported.texture;
       updated.owns_texture = false;
       updated.pixels.clear();
+      updated.dmabuf = *buffer.dmabuf;
+      updated.buffer_id = buffer.buffer_id;
+    }
+    if (buffer.pixels != nullptr) {
+      updated.dmabuf.reset();
+      updated.buffer_id = 0;
     }
     if (surface == card->shm_textures.end()) card->shm_textures.push_back(std::move(updated)); else *surface = std::move(updated);
     std::stable_sort(card->shm_textures.begin(), card->shm_textures.end(), [](const auto& left, const auto& right) {
@@ -1115,11 +1019,6 @@ void RuntimeBackend::present(const ShmBufferView& buffer) {
         });
       };
       if (retained_by_transition(device->outputs) || retained_by_transition(device->retired_outputs)) continue;
-      DrmOutput* output = device->outputs.empty() ? nullptr : device->outputs.front().get();
-      if (output != nullptr && output->egl_surface != EGL_NO_SURFACE &&
-          eglMakeCurrent(device->egl_display, output->egl_surface, output->egl_surface, device->egl_context) == EGL_TRUE &&
-          imported->second.texture != 0 && device->dmabuf_importer != nullptr)
-        (void)device->dmabuf_importer->release(imported->second.texture);
       device->dmabuf_textures.erase(imported);
     }
   }
@@ -1161,6 +1060,8 @@ void RuntimeBackend::enable_seat(libseat*, void* data) {
   if (backend->udev_ != nullptr) {
     backend->discover_drm_devices();
   }
+  backend->probe_attempts_ = 0;
+  backend->schedule_output_probe();
 }
 
 void RuntimeBackend::disable_seat(libseat* seat, void* data) {
@@ -1471,21 +1372,12 @@ void RuntimeBackend::dispatch_drm(DrmDevice& device) {
 }
 
 void RuntimeBackend::repaint(DrmOutput& card) {
-  if (!active_ || card.retired) return;
+  if (!active_ || card.retired || card.powered_off) return;
   if (card.camera_frame_preparing || card.tag_transition_preparing) { card.needs_repaint = true; return; }
   auto& device = *card.device;
   const auto& output_config = config_->output_for(card.output.connector);
   if (card.flip_pending) { card.needs_repaint = true; return; }
-  if (card.crtc_id == 0 || card.connector_id == 0 || card.scanout_surface == nullptr ||
-      card.egl_surface == EGL_NO_SURFACE || device.renderer == nullptr) return;
-  if (eglMakeCurrent(device.egl_display, card.egl_surface, card.egl_surface, device.egl_context) != EGL_TRUE) {
-    last_error_ = "could not make direct EGL context current";
-    std::fprintf(stderr, "zwwm: %s\n", last_error_.c_str());
-    return;
-  }
-  glViewport(0, 0, card.mode.hdisplay, card.mode.vdisplay);
-  glClearColor(0.125F, 0.141F, 0.169F, 1.0F);
-  glClear(GL_COLOR_BUFFER_BIT);
+  if (card.crtc_id == 0 || card.connector_id == 0 || card.scanout.empty() || device.renderer == nullptr) return;
   renderer::FramePlan frame;
   frame.draw_background = true;
   frame.damage.push_back({{0, 0}, {static_cast<std::uint32_t>(card.mode.hdisplay), static_cast<std::uint32_t>(card.mode.vdisplay)}});
@@ -1518,7 +1410,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
       card.animations.remove(surface.id);
       continue;
     }
-    if (surface.toplevel && !surface.removed && surface.content_ready && surface.texture != 0)
+    if (surface.toplevel && !surface.removed && surface.content_ready && surface.texture != nullptr)
       animation_targets.push_back(
           {surface.id, bounds, !surface.suppress_geometry_animation,
             !surface.restore_scene && (!tag || surface.tag_outgoing), surface.track_geometry_animation,
@@ -1532,13 +1424,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
   }
   for (auto it = card.shm_textures.begin(); it != card.shm_textures.end();) {
     if (it->removed && !card.animations.retains(it->root_id)) {
-      if (it->texture != 0 && it->owns_texture) glDeleteTextures(1, &it->texture);
-      const auto imported = card.device->dmabuf_textures.find(it->id);
-      if (imported != card.device->dmabuf_textures.end()) {
-        if (imported->second.texture != 0 && card.device->dmabuf_importer != nullptr)
-          (void)card.device->dmabuf_importer->release(imported->second.texture);
-        card.device->dmabuf_textures.erase(imported);
-      }
+      card.device->dmabuf_textures.erase(it->id);
       it = card.shm_textures.erase(it);
     } else ++it;
   }
@@ -1547,8 +1433,6 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     const auto sample = card.animations.sample(id, now);
     if (sample) placements.push_back({id, sample->bounds});
   }
-  std::optional<renderer::DrawCall> pending_border;
-  std::uint64_t pending_border_root = 0;
   const auto apply_blur_parameters = [&](renderer::DrawCall& draw, std::string_view shader = {}) {
     draw.background_blur_passes = static_cast<std::uint32_t>(std::clamp(
         config_->shader_integer(shader, "blur_passes", 3), 1, 8));
@@ -1561,14 +1445,13 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     draw.background_blur_noise = std::clamp(
         config_->shader_integer(shader, "blur_noise", 0), 0, 100) / 100.0F;
   };
+  // Tiled shadows go under all tiled windows.
+  std::optional<std::size_t> tiled_shadows_at;
+  std::vector<renderer::DrawCall> tiled_shadows;
   for (const auto& surface : card.shm_textures) {
-    if (pending_border && (surface.root_id != pending_border_root || surface.popup)) {
-      frame.draws.push_back(std::move(*pending_border));
-      pending_border.reset();
-    }
     const auto placement = std::find_if(placements.begin(), placements.end(), [&surface](const auto& item) { return item.id == surface.root_id; });
     const auto root = std::find_if(card.shm_textures.begin(), card.shm_textures.end(), [&surface](const auto& item) { return item.id == surface.root_id; });
-    if (root == card.shm_textures.end() || !root->content_ready || surface.texture == 0 || root->width <= 0 || root->height <= 0) continue;
+    if (root == card.shm_textures.end() || !root->content_ready || surface.texture == nullptr || root->width <= 0 || root->height <= 0) continue;
     if (!root->toplevel) {
       frame.draws.push_back({surface.id, {{surface.x, surface.y}, {static_cast<std::uint32_t>(surface.width), static_cast<std::uint32_t>(surface.height)}}, surface.compositor_opacity, {1.0F, 1.0F, 1.0F, 1.0F}, surface.texture, 0.0F, 0.0F, {surface.source_left, surface.source_top, surface.source_right, surface.source_bottom}});
       frame.draws.back().opaque = surface.opaque && surface.compositor_opacity == 1.0F;
@@ -1598,22 +1481,6 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     const float border_width = config_->border_width() * decoration_scale;
     const float inner_radius = config_->radius() * decoration_scale;
     const float outer_radius = inner_radius + border_width;
-    const float border_join_width = border_width +
-        0.75F / (output_config.scale_per_mille / 1000.0F);
-    if (surface.toplevel && !root->fullscreen && border_width > 0.0F) {
-      constexpr std::array<float, 4> border{1.0F, 1.0F, 1.0F, 1.0F};
-      const auto animation = card.animations.sample(surface.id, now);
-      pending_border.emplace(surface.id, tag_bounds, (animation ? animation->opacity : 1.0F) * tag_root.opacity, border, std::nullopt,
-                             outer_radius, border_join_width);
-      pending_border->shader_role = renderer::ShaderRole::border;
-      pending_border->shader_name = surface.border_shader;
-      pending_border->toplevel_id = surface.root_id;
-      pending_border->toplevel_bounds = tag_bounds;
-      pending_border->toplevel_state = surface.focused ? 1U : 0U;
-      pending_border->shader_time = frame.shader_time;
-      pending_border_root = surface.root_id;
-      backend_scene::camera_geometry(*pending_border, *root, surface, tag_bounds);
-    }
     const auto content = animated_content(*root, tag_bounds);
     const int content_width = static_cast<int>(content.size.width);
     const int content_height = static_cast<int>(content.size.height);
@@ -1637,6 +1504,20 @@ void RuntimeBackend::repaint(DrmOutput& card) {
                                                         {static_cast<std::uint32_t>(std::max(1, surface.width * content_width / goal_width)),
                                                           static_cast<std::uint32_t>(std::max(1, surface.height * content_height / goal_height))}};
     const bool root_surface = surface.toplevel;
+    if (root_surface && !root->fullscreen && !card.overview) {
+      const std::uint32_t state = surface.focused ? 1U : 0U;
+      if (auto shadow = backend_scene::shadow_draw(*config_, surface.id, tag_bounds, outer_radius, decoration_scale,
+              (animation ? animation->opacity : 1.0F) * tag_root.opacity * surface.compositor_opacity, state,
+              frame.shader_time)) {
+        backend_scene::camera_geometry(*shadow, *root, surface, tag_bounds);
+        if (root->layer_priority == 0) {
+          if (!tiled_shadows_at) tiled_shadows_at = frame.draws.size();
+          tiled_shadows.push_back(std::move(*shadow));
+        } else {
+          frame.draws.push_back(std::move(*shadow));
+        }
+      }
+    }
     frame.draws.push_back({surface.id, bounds,
                                  (animation ? animation->opacity : 1.0F) * tag_root.opacity * surface.compositor_opacity, {1.0F, 1.0F, 1.0F, 1.0F}, surface.texture,
                                   root_surface && !root->fullscreen ? outer_radius : 0.0F,
@@ -1651,6 +1532,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     frame.draws.back().toplevel_state = (surface.focused ? 1U : 0U) |
         (root->fullscreen ? 2U : 0U) | (surface.popup ? 4U : 0U);
     frame.draws.back().shader_time = frame.shader_time;
+    frame.draws.back().shared_backdrop = root_surface && root->layer_priority == 0 && !root->fullscreen;
     if (root_surface) {
       frame.draws.back().texture_bounds = root_texture_bounds;
       frame.draws.back().texture_corner_radius = root->fullscreen ? 0.0F : inner_radius;
@@ -1658,30 +1540,39 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     frame.draws.back().background_blur_radius = static_cast<float>(surface.background_blur_radius);
     apply_blur_parameters(frame.draws.back(), surface.window_shader);
     backend_scene::camera_geometry(frame.draws.back(), *root, surface, tag_bounds);
+    if (root_surface && !root->fullscreen && std::lround(border_width) > 0) backend_scene::extend_under_border(frame.draws.back());
     if (card.overview && !backend_scene::overview_draw_visible(frame.draws.back(),
         {{card.output.logical_x, card.output.logical_y}, {card.output.logical_width, card.output.logical_height}})) frame.draws.pop_back();
+    if (surface.toplevel && !root->fullscreen) {
+      const auto border_animation = card.animations.sample(surface.id, now);
+      if (auto border = backend_scene::border_draw(surface.id, content, tag_bounds, border_width, inner_radius,
+              (border_animation ? border_animation->opacity : 1.0F) * tag_root.opacity, surface.focused ? 1U : 0U,
+              frame.shader_time)) {
+        border->shader_name = surface.border_shader;
+        border->toplevel_id = surface.root_id;
+        backend_scene::camera_geometry(*border, *root, surface, tag_bounds);
+        frame.draws.push_back(std::move(*border));
+      }
+    }
   }
-  if (pending_border) frame.draws.push_back(std::move(*pending_border));
+  if (tiled_shadows_at)
+    frame.draws.insert(frame.draws.begin() + static_cast<std::ptrdiff_t>(*tiled_shadows_at),
+                       std::make_move_iterator(tiled_shadows.begin()), std::make_move_iterator(tiled_shadows.end()));
   if (error_popup_visible_ && error_popup_) {
-    if (device.error_popup_texture == 0) glGenTextures(1, &device.error_popup_texture);
-    if (device.error_popup_generation != error_popup_generation_) {
-      glBindTexture(GL_TEXTURE_2D, device.error_popup_texture);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(error_popup_.width),
-                   static_cast<GLsizei>(error_popup_.height), 0, GL_BGRA, GL_UNSIGNED_BYTE,
-                   error_popup_.pixels.data());
-      glBindTexture(GL_TEXTURE_2D, 0);
+    if (device.error_popup_generation != error_popup_generation_ || device.error_popup_texture == nullptr) {
+      device.error_popup_texture = device.renderer->upload(nullptr, error_popup_.pixels.data(), error_popup_.width,
+                                                           error_popup_.height, error_popup_.width);
       device.error_popup_generation = error_popup_generation_;
     }
     const auto popup_x = card.output.logical_x + std::max(8, (static_cast<int>(card.output.logical_width) -
                                                               static_cast<int>(error_popup_.width)) / 2);
-    frame.draws.push_back({std::numeric_limits<std::uint64_t>::max() - 1,
-                           {{popup_x, card.output.logical_y + 24}, {error_popup_.width, error_popup_.height}},
-                           1.0F, {1.0F, 1.0F, 1.0F, 1.0F}, device.error_popup_texture});
+    if (device.error_popup_texture != nullptr)
+      frame.draws.push_back({std::numeric_limits<std::uint64_t>::max() - 1,
+                             {{popup_x, card.output.logical_y + 24}, {error_popup_.width, error_popup_.height}},
+                             1.0F, {1.0F, 1.0F, 1.0F, 1.0F}, device.error_popup_texture});
   }
   renderer::FramePlan cursor_frame;
-  if (cursor_visible_ && card.cursor_texture != 0 && card.cursor_width > 0 && card.cursor_height > 0) {
+  if (cursor_visible_ && card.cursor_texture != nullptr && card.cursor_width > 0 && card.cursor_height > 0) {
     cursor_frame.draws.push_back({std::numeric_limits<std::uint64_t>::max(),
                            {{static_cast<std::int32_t>(std::lround(cursor_x_)) - card.cursor_hotspot_x,
                              static_cast<std::int32_t>(std::lround(cursor_y_)) - card.cursor_hotspot_y},
@@ -1692,118 +1583,62 @@ void RuntimeBackend::repaint(DrmOutput& card) {
   const renderer::Point logical_origin{card.output.logical_x, card.output.logical_y};
   transform_frame(frame, output_config, physical, logical_origin);
   transform_frame(cursor_frame, output_config, physical, logical_origin);
-  if (card.capture_texture == 0) glGenTextures(1, &card.capture_texture);
-  glBindTexture(GL_TEXTURE_2D, card.capture_texture);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, card.mode.hdisplay, card.mode.vdisplay, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-  glBindTexture(GL_TEXTURE_2D, 0);
-  if (card.capture_framebuffer == 0) glGenFramebuffers(1, &card.capture_framebuffer);
-  glBindFramebuffer(GL_FRAMEBUFFER, card.capture_framebuffer);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, card.capture_texture, 0);
-  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-    last_error_ = "could not prepare offscreen frame";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+  if (!card.overview && !tag && !continue_animation && !error_popup_visible_ && cursor_frame.draws.empty() &&
+      !card.needs_modeset && now - last_capture_ms_ > 2000U && try_direct_scanout(card)) return;
+  int next = -1;
+  for (int index = 0; index < static_cast<int>(card.scanout.size()); ++index)
+    if (index != card.front_buffer && index != card.pending_buffer) { next = index; break; }
+  if (next < 0) { card.needs_repaint = true; return; }
+  auto& buffer = card.scanout[static_cast<std::size_t>(next)];
+  auto& renderer = *device.renderer;
+  if (card.capture_texture == nullptr || card.capture_texture->width() != physical.width ||
+      card.capture_texture->height() != physical.height)
+    card.capture_texture = renderer.create_target(physical);
+  if (card.capture_texture == nullptr) {
+    last_error_ = "could not allocate the offscreen frame: " + renderer.last_error();
+    std::fprintf(stderr, "zwwm: %s\n", last_error_.c_str());
     return;
   }
-  glViewport(0, 0, card.mode.hdisplay, card.mode.vdisplay);
-  glClearColor(0.125F, 0.141F, 0.169F, 1.0F);
-  glClear(GL_COLOR_BUFFER_BIT);
-  if (!device.renderer->render(frame, {static_cast<std::uint32_t>(card.mode.hdisplay), static_cast<std::uint32_t>(card.mode.vdisplay)})) {
-    last_error_ = "could not render offscreen frame";
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    return;
-  }
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, card.capture_framebuffer);
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-  glBlitFramebuffer(0, 0, card.mode.hdisplay, card.mode.vdisplay,
-                    0, 0, card.mode.hdisplay, card.mode.vdisplay,
-                    GL_COLOR_BUFFER_BIT, GL_NEAREST);
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  if (!cursor_frame.draws.empty() && !device.renderer->render(cursor_frame, physical)) {
-    last_error_ = "could not render direct cursor";
-    return;
-  }
-  if (eglSwapBuffers(device.egl_display, card.egl_surface) != EGL_TRUE) {
-    last_error_ = "could not swap direct EGL frame";
+  const bool recorded = renderer.begin() &&
+      renderer.render(frame, card.capture_texture, std::array<float, 4>{0.125F, 0.141F, 0.169F, 1.0F}) &&
+      renderer.copy(card.capture_texture, buffer.image) &&
+      (cursor_frame.draws.empty() || renderer.render(cursor_frame, buffer.image));
+  // Submit even partial work so imported buffers return to their owners.
+  const bool submitted = renderer.recording() && renderer.submit();
+  if (!recorded || !submitted) {
+    last_error_ = "could not render direct frame: " + renderer.last_error();
     std::fprintf(stderr, "zwwm: %s\n", last_error_.c_str());
     return;
   }
   card.capture_ready = true;
-  gbm_bo* bo = gbm_surface_lock_front_buffer(card.scanout_surface);
-  if (bo == nullptr) { last_error_ = "could not lock direct scanout buffer"; std::fprintf(stderr, "zwwm: %s\n", last_error_.c_str()); return; }
-  std::uint32_t fb = 0;
-  std::uint32_t handles[4]{}, strides[4]{}, offsets[4]{};
-  std::uint64_t modifiers[4]{};
-  const auto modifier = gbm_bo_get_modifier(bo);
-  const int planes = gbm_bo_get_plane_count(bo);
-  if (planes < 1 || planes > 4) {
-    gbm_surface_release_buffer(card.scanout_surface, bo);
-    last_error_ = "invalid scanout buffer plane count";
-    return;
-  }
-  for (int index = 0; index < planes; ++index) {
-    handles[index] = gbm_bo_get_handle_for_plane(bo, index).u32;
-    strides[index] = gbm_bo_get_stride_for_plane(bo, index);
-    offsets[index] = gbm_bo_get_offset(bo, index);
-    modifiers[index] = modifier;
-  }
-  std::uint64_t modifier_support = 0;
-  (void)drmGetCap(device.fd, DRM_CAP_ADDFB2_MODIFIERS, &modifier_support);
-  const bool explicit_modifier = modifier != DRM_FORMAT_MOD_INVALID && modifier_support != 0;
-  int added = explicit_modifier ?
-      drmModeAddFB2WithModifiers(device.fd, gbm_bo_get_width(bo), gbm_bo_get_height(bo),
-                                gbm_bo_get_format(bo), handles, strides, offsets, modifiers,
-                                &fb, DRM_MODE_FB_MODIFIERS) :
-      drmModeAddFB2(device.fd, gbm_bo_get_width(bo), gbm_bo_get_height(bo), gbm_bo_get_format(bo),
-                    handles, strides, offsets, &fb, 0);
-  if (added != 0 && explicit_modifier && modifier == DRM_FORMAT_MOD_LINEAR)
-    added = drmModeAddFB2(device.fd, gbm_bo_get_width(bo), gbm_bo_get_height(bo), gbm_bo_get_format(bo),
-                         handles, strides, offsets, &fb, 0);
-  if (added != 0) {
-    gbm_surface_release_buffer(card.scanout_surface, bo);
-    last_error_ = "could not create direct scanout framebuffer: " + std::string(std::strerror(errno));
-    std::fprintf(stderr, "zwwm: %s\n", last_error_.c_str());
-    return;
-  }
   if (card.needs_modeset) {
-    if (!commit_atomic_output(card, fb, true)) {
-      drmModeRmFB(device.fd, fb);
-      gbm_surface_release_buffer(card.scanout_surface, bo);
-      return;
-    }
-    if (card.front_fb != 0) drmModeRmFB(device.fd, card.front_fb);
-    if (card.front_bo != nullptr) gbm_surface_release_buffer(card.scanout_surface, card.front_bo);
-    card.front_bo = bo;
-    card.front_fb = fb;
+    if (!commit_atomic_output(card, buffer.framebuffer, true)) return;
+    card.front_buffer = next;
     card.needs_modeset = false;
     card.needs_repaint = false;
     if (input_target_ != nullptr) input_target_->notify_frame_presented(card.output.id);
     if (continue_animation) repaint(card);
     return;
   }
-  card.pending_bo = bo;
-  card.pending_fb = fb;
+  card.pending_buffer = next;
   card.flip_pending = true;
   card.needs_repaint = continue_animation;
-  if (!commit_atomic_output(card, fb, false)) {
+  if (!commit_atomic_output(card, buffer.framebuffer, false)) {
     card.flip_pending = false;
-    drmModeRmFB(device.fd, card.pending_fb);
-    gbm_surface_release_buffer(card.scanout_surface, card.pending_bo);
-    card.pending_bo = nullptr;
-    card.pending_fb = 0;
+    card.pending_buffer = -1;
   }
 }
 
 void RuntimeBackend::page_flip_complete(DrmOutput& card) {
   auto& device = *card.device;
   if (!card.flip_pending) return;
-  if (card.front_fb != 0) drmModeRmFB(device.fd, card.front_fb);
-  if (card.front_bo != nullptr) gbm_surface_release_buffer(card.scanout_surface, card.front_bo);
-  card.front_bo = card.pending_bo;
-  card.front_fb = card.pending_fb;
-  card.pending_bo = nullptr;
-  card.pending_fb = 0;
+  // The frame that just left the screen can go back to its client.
+  if (card.direct_front) release_direct_frame(card, card.direct_front->framebuffer, card.direct_front->buffer_id);
+  card.direct_front = card.direct_pending;
+  card.direct_pending.reset();
+  card.front_buffer = card.pending_buffer;
+  card.pending_buffer = -1;
   card.flip_pending = false;
   if (card.retired) {
     auto* retired = &card;
@@ -1815,8 +1650,98 @@ void RuntimeBackend::page_flip_complete(DrmOutput& card) {
     for (auto& output : device.outputs) repaint(*output);
     return;
   }
+  if (card.powered_off) {
+    if (!disable_atomic_output(card))
+      std::fprintf(stderr, "zwwm: DRM %s: could not power off output %u: %s\n", device.path.c_str(), card.connector_id,
+                   std::strerror(errno));
+    return;
+  }
   if (input_target_ != nullptr) input_target_->notify_frame_presented(card.output.id);
   if (card.needs_repaint) repaint(card);
+}
+
+void RuntimeBackend::release_direct_frame(DrmOutput& card, std::uint32_t framebuffer, std::uint64_t buffer_id) {
+  if (framebuffer != 0) drmModeRmFB(card.device->fd, framebuffer);
+  if (input_target_ != nullptr) input_target_->release_buffer_hold(buffer_id);
+}
+
+// A fullscreen opaque DMA-BUF that exactly fills the mode goes straight to the primary plane.
+bool RuntimeBackend::try_direct_scanout(DrmOutput& card) {
+  if (input_target_ == nullptr || card.flip_pending || card.output.transform != OutputTransform::normal) return false;
+  const DrmOutput::ShmTexture* candidate = nullptr;
+  for (auto it = card.shm_textures.rbegin(); it != card.shm_textures.rend(); ++it) {
+    if (it->removed || it->texture == nullptr || !it->content_ready) continue;
+    candidate = &*it;
+    break;
+  }
+  if (candidate == nullptr || !candidate->toplevel || !candidate->fullscreen || !candidate->opaque || !candidate->dmabuf ||
+      candidate->buffer_id == 0 || candidate->buffer_id == card.direct_failed_buffer ||
+      candidate->compositor_opacity < 1.0F || candidate->glass || candidate->background_blur_radius != 0 ||
+      candidate->source_left != 0.0F || candidate->source_top != 0.0F || candidate->source_right != 1.0F ||
+      candidate->source_bottom != 1.0F) return false;
+  const auto& attributes = *candidate->dmabuf;
+  if (attributes.width != static_cast<std::uint32_t>(card.mode.hdisplay) ||
+      attributes.height != static_cast<std::uint32_t>(card.mode.vdisplay) || attributes.planes.empty() ||
+      attributes.planes.size() > 4) return false;
+  // Nothing new to flip; composition keeps frame callbacks paced by vblank.
+  if (card.direct_front && card.direct_front->buffer_id == candidate->buffer_id) return false;
+  // Alpha is ignored on the primary plane, so opaque ARGB content scans out as XRGB.
+  std::uint32_t format = attributes.format;
+  if (format == DRM_FORMAT_ARGB8888) format = DRM_FORMAT_XRGB8888;
+  else if (format == DRM_FORMAT_ABGR8888) format = DRM_FORMAT_XBGR8888;
+  else if (format == DRM_FORMAT_ARGB2101010) format = DRM_FORMAT_XRGB2101010;
+  else if (format == DRM_FORMAT_ABGR2101010) format = DRM_FORMAT_XBGR2101010;
+  if (!input_target_->hold_buffer(candidate->buffer_id)) return false;
+  auto& device = *card.device;
+  std::array<std::uint32_t, 4> handles{}, pitches{}, offsets{};
+  std::array<std::uint64_t, 4> modifiers{};
+  bool imported = true;
+  for (std::size_t index = 0; index < attributes.planes.size(); ++index) {
+    const auto& plane = attributes.planes[index];
+    imported = imported && drmPrimeFDToHandle(device.fd, plane.fd, &handles[index]) == 0;
+    pitches[index] = plane.stride;
+    offsets[index] = plane.offset;
+    modifiers[index] = plane.modifier;
+  }
+  std::uint32_t framebuffer = 0;
+  const bool explicit_modifier = attributes.planes.front().modifier != DRM_FORMAT_MOD_INVALID;
+  if (imported)
+    imported = drmModeAddFB2WithModifiers(device.fd, attributes.width, attributes.height, format, handles.data(),
+                                          pitches.data(), offsets.data(), explicit_modifier ? modifiers.data() : nullptr,
+                                          &framebuffer, explicit_modifier ? DRM_MODE_FB_MODIFIERS : 0) == 0;
+  std::sort(handles.begin(), handles.end());
+  for (std::size_t index = 0; index < handles.size(); ++index)
+    if (handles[index] != 0 && (index == 0 || handles[index] != handles[index - 1])) (void)drmCloseBufferHandle(device.fd, handles[index]);
+  if (imported && commit_atomic_output(card, framebuffer, false)) {
+    card.direct_pending = DrmOutput::DirectFrame{framebuffer, candidate->buffer_id};
+    card.pending_buffer = -1;
+    card.flip_pending = true;
+    card.needs_repaint = false;
+    card.capture_ready = false;
+    return true;
+  }
+  card.direct_failed_buffer = candidate->buffer_id;
+  release_direct_frame(card, framebuffer, candidate->buffer_id);
+  return false;
+}
+
+bool RuntimeBackend::set_output_power(OutputId id, bool on) {
+  for (auto& device : devices_) for (auto& output : device->outputs) {
+    if (output->output.id != id) continue;
+    if (output->powered_off == !on) return true;
+    output->powered_off = !on;
+    output->needs_modeset = true;
+    if (on) {
+      repaint(*output);
+      return true;
+    }
+    // A pending flip powers the output off once it lands.
+    if (output->flip_pending || !active_) return true;
+    if (disable_atomic_output(*output)) return true;
+    output->powered_off = false;
+    return false;
+  }
+  return false;
 }
 
 void RuntimeBackend::discover_drm_devices() {
@@ -1839,8 +1764,37 @@ void RuntimeBackend::discover_drm_devices() {
   udev_enumerate_unref(enumeration);
 }
 
+void RuntimeBackend::probe_outputs() {
+  discover_drm_devices();
+  for (auto& drm_device : devices_) rescan_drm_device(*drm_device);
+  publish_outputs();
+  publish_dmabuf_importer();
+  for (auto& drm_device : devices_) for (auto& output : drm_device->outputs) repaint(*output);
+}
+
+// Retries with backoff while the seat is active but no output has appeared yet.
+void RuntimeBackend::schedule_output_probe() {
+  const bool lit = std::any_of(devices_.begin(), devices_.end(), [](const auto& device) { return !device->outputs.empty(); });
+  if (lit || !active_ || probe_timer_ >= 0 || probe_attempts_ >= 20) {
+    if (lit) probe_attempts_ = 0;
+    return;
+  }
+  const auto delay = std::min<std::uint32_t>(2000U, 100U << std::min<std::uint32_t>(probe_attempts_, 4U));
+  ++probe_attempts_;
+  probe_timer_ = event_loop_->add_timer(delay, [this] {
+    probe_timer_ = -1;
+    if (!active_) return;
+    probe_outputs();
+    schedule_output_probe();
+  });
+}
+
 void RuntimeBackend::add_drm_device(const char* path) {
   if (!is_drm_card(path) || std::any_of(devices_.begin(), devices_.end(), [path](const auto& device) { return device->path == path; })) {
+    return;
+  }
+  if (!drm_device_allowed(path)) {
+    std::fprintf(stderr, "zwwm: DRM %s: skipped, not listed in ZWWM_DRM_DEVICES\n", path);
     return;
   }
   auto device = std::make_unique<DrmDevice>();
@@ -1864,45 +1818,46 @@ void RuntimeBackend::add_drm_device(const char* path) {
     close_drm_device(*device);
     return;
   }
-  device->egl_display = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, device->gbm, nullptr);
-  if (device->egl_display == EGL_NO_DISPLAY || eglInitialize(device->egl_display, nullptr, nullptr) != EGL_TRUE ||
-       eglBindAPI(EGL_OPENGL_ES_API) != EGL_TRUE) {
-    std::fprintf(stderr, "zwwm: DRM %s: EGL display initialization failed: 0x%x\n", path, eglGetError());
+  struct stat node {};
+  std::string vulkan_error;
+  if (fstat(device->fd, &node) == 0)
+    device->vulkan = vlk::Device::create({.drm_device = node.st_rdev, .require_dmabuf = true}, &vulkan_error);
+  if (device->vulkan == nullptr) {
+    std::fprintf(stderr, "zwwm: DRM %s: Vulkan initialization failed: %s\n", path,
+                 vulkan_error.empty() ? "could not stat the DRM node" : vulkan_error.c_str());
     close_drm_device(*device);
     return;
   }
-  constexpr EGLint context_attributes[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-  const auto choose_scanout = [&](EGLint color_bits, EGLint alpha_bits) {
-    const EGLint attributes[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-                                 EGL_RED_SIZE, color_bits, EGL_GREEN_SIZE, color_bits, EGL_BLUE_SIZE, color_bits,
-                                 EGL_ALPHA_SIZE, alpha_bits, EGL_NONE};
-    EGLConfig candidate = nullptr;
-    EGLint count = 0;
-    if (eglChooseConfig(device->egl_display, attributes, &candidate, 1, &count) != EGL_TRUE || count == 0) return false;
-    EGLint native_visual = color_bits == 10 ? static_cast<EGLint>(DRM_FORMAT_XRGB2101010) : static_cast<EGLint>(DRM_FORMAT_XRGB8888);
-    (void)eglGetConfigAttrib(device->egl_display, candidate, EGL_NATIVE_VISUAL_ID, &native_visual);
-    device->egl_config = candidate;
-    device->scanout_format = native_visual == 0 ? (color_bits == 10 ? DRM_FORMAT_XRGB2101010 : DRM_FORMAT_XRGB8888)
-                                                : static_cast<std::uint32_t>(native_visual);
-    device->scanout_bit_depth = static_cast<std::uint32_t>(color_bits);
-    return true;
-  };
-  bool scanout_ready = false;
   const bool wants_ten_bit = config_->output.bit_depth == 10 ||
       std::any_of(config_->outputs.begin(), config_->outputs.end(), [](const auto& configured) {
         return configured.second.bit_depth == 10;
       });
-  if (wants_ten_bit) scanout_ready = choose_scanout(10, 0) || choose_scanout(10, 2);
-  if (!scanout_ready) scanout_ready = choose_scanout(8, 0) || choose_scanout(8, 8);
-  if (!scanout_ready) {
-    std::fprintf(stderr, "zwwm: DRM %s: no compatible EGL/GBM scanout format (error=0x%x)\n", path, eglGetError());
+  if (wants_ten_bit && !device->vulkan->render_modifiers(DRM_FORMAT_XRGB2101010).empty()) {
+    device->scanout_format = DRM_FORMAT_XRGB2101010;
+    device->scanout_bit_depth = 10;
+  } else if (!device->vulkan->render_modifiers(DRM_FORMAT_XRGB8888).empty()) {
+    device->scanout_format = DRM_FORMAT_XRGB8888;
+    device->scanout_bit_depth = 8;
+  } else {
+    std::fprintf(stderr, "zwwm: DRM %s: %s cannot render to any scanout format\n", path,
+                 device->vulkan->name().c_str());
     close_drm_device(*device);
     return;
   }
-  if ((device->egl_context = eglCreateContext(device->egl_display, device->egl_config, EGL_NO_CONTEXT, context_attributes)) == EGL_NO_CONTEXT) {
-    std::fprintf(stderr, "zwwm: DRM %s: EGL context creation failed: 0x%x\n", path, eglGetError());
+  device->renderer = std::make_unique<renderer::VulkanRenderer>();
+  if (!device->renderer->initialize(device->vulkan)) {
+    std::fprintf(stderr, "zwwm: DRM %s: Vulkan renderer initialization failed: %s\n", path,
+                 device->renderer->last_error().c_str());
     close_drm_device(*device);
     return;
+  }
+  {
+    renderer::ShaderSources sources;
+    std::string shader_error;
+    if (load_shader_sources(*config_, &sources, &shader_error) && device->renderer->prepare_shaders(sources))
+      device->renderer->commit_shaders();
+    else
+      last_error_ = shader_error.empty() ? device->renderer->last_error() : shader_error;
   }
   try {
     auto* monitored = device.get();
@@ -1917,9 +1872,9 @@ void RuntimeBackend::add_drm_device(const char* path) {
   }
   devices_.push_back(std::move(device));
   rescan_drm_device(*devices_.back());
-  std::fprintf(stderr, "zwwm: activated DRM device %s with %zu output(s), %u-bit using GBM backend %s\n",
+  std::fprintf(stderr, "zwwm: activated DRM device %s with %zu output(s), %u-bit using Vulkan on %s\n",
                path, devices_.back()->outputs.size(), devices_.back()->scanout_bit_depth,
-               gbm_device_get_backend_name(devices_.back()->gbm));
+               devices_.back()->vulkan->name().c_str());
   publish_outputs();
   publish_dmabuf_importer();
   for (auto& output : devices_.back()->outputs) repaint(*output);
@@ -1988,6 +1943,93 @@ bool RuntimeBackend::initialize_atomic_output(DrmOutput& output,
   return true;
 }
 
+std::uint32_t RuntimeBackend::add_framebuffer(DrmDevice& device, gbm_bo* bo) {
+  std::uint32_t fb = 0;
+  std::uint32_t handles[4]{}, strides[4]{}, offsets[4]{};
+  std::uint64_t modifiers[4]{};
+  const auto modifier = gbm_bo_get_modifier(bo);
+  const int planes = gbm_bo_get_plane_count(bo);
+  if (planes < 1 || planes > 4) return 0;
+  for (int index = 0; index < planes; ++index) {
+    handles[index] = gbm_bo_get_handle_for_plane(bo, index).u32;
+    strides[index] = gbm_bo_get_stride_for_plane(bo, index);
+    offsets[index] = gbm_bo_get_offset(bo, index);
+    modifiers[index] = modifier;
+  }
+  std::uint64_t modifier_support = 0;
+  (void)drmGetCap(device.fd, DRM_CAP_ADDFB2_MODIFIERS, &modifier_support);
+  const bool explicit_modifier = modifier != DRM_FORMAT_MOD_INVALID && modifier_support != 0;
+  int added = explicit_modifier ?
+      drmModeAddFB2WithModifiers(device.fd, gbm_bo_get_width(bo), gbm_bo_get_height(bo),
+                                gbm_bo_get_format(bo), handles, strides, offsets, modifiers,
+                                &fb, DRM_MODE_FB_MODIFIERS) :
+      drmModeAddFB2(device.fd, gbm_bo_get_width(bo), gbm_bo_get_height(bo), gbm_bo_get_format(bo),
+                    handles, strides, offsets, &fb, 0);
+  if (added != 0 && explicit_modifier && modifier == DRM_FORMAT_MOD_LINEAR)
+    added = drmModeAddFB2(device.fd, gbm_bo_get_width(bo), gbm_bo_get_height(bo), gbm_bo_get_format(bo),
+                         handles, strides, offsets, &fb, 0);
+  return added == 0 ? fb : 0;
+}
+
+bool RuntimeBackend::create_scanout(DrmOutput& output) {
+  auto& device = *output.device;
+  if (device.renderer == nullptr || device.vulkan == nullptr) return false;
+  const auto width = static_cast<std::uint32_t>(output.mode.hdisplay);
+  const auto height = static_cast<std::uint32_t>(output.mode.vdisplay);
+  std::vector<std::uint64_t> modifiers = device.vulkan->render_modifiers(device.scanout_format);
+  const auto in_formats = kms_property(device.fd, output.plane_id, DRM_MODE_OBJECT_PLANE, "IN_FORMATS");
+  if (in_formats.id != 0 && in_formats.value != 0) {
+    if (auto* blob = drmModeGetPropertyBlob(device.fd, static_cast<std::uint32_t>(in_formats.value))) {
+      std::vector<std::uint64_t> scanout_modifiers;
+      drmModeFormatModifierIterator iterator{};
+      while (drmModeFormatModifierBlobIterNext(blob, &iterator))
+        if (iterator.fmt == device.scanout_format) scanout_modifiers.push_back(iterator.mod);
+      drmModeFreePropertyBlob(blob);
+      std::erase_if(modifiers, [&](std::uint64_t modifier) {
+        return std::find(scanout_modifiers.begin(), scanout_modifiers.end(), modifier) == scanout_modifiers.end();
+      });
+    }
+  }
+  const auto renderable = device.vulkan->render_modifiers(device.scanout_format);
+  const bool linear = std::find(renderable.begin(), renderable.end(), DRM_FORMAT_MOD_LINEAR) != renderable.end();
+  constexpr std::size_t kScanoutBuffers = 3;
+  for (std::size_t index = 0; index < kScanoutBuffers; ++index) {
+    DrmOutput::ScanoutBuffer buffer;
+    if (!modifiers.empty())
+      buffer.bo = gbm_bo_create_with_modifiers2(device.gbm, width, height, device.scanout_format, modifiers.data(),
+                                                static_cast<unsigned>(modifiers.size()),
+                                                GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+    if (buffer.bo == nullptr && linear)
+      buffer.bo = gbm_bo_create(device.gbm, width, height, device.scanout_format,
+                                GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+    if (buffer.bo == nullptr) {
+      std::fprintf(stderr, "zwwm: DRM %s: could not allocate a %ux%u scanout buffer: %s\n", device.path.c_str(),
+                   width, height, std::strerror(errno));
+      return false;
+    }
+    renderer::DmabufAttributes attributes{width, height, device.scanout_format, {}};
+    std::vector<UniqueFd> fds;
+    const auto modifier = gbm_bo_get_modifier(buffer.bo);
+    for (int plane = 0; plane < gbm_bo_get_plane_count(buffer.bo); ++plane) {
+      fds.emplace_back(gbm_bo_get_fd_for_plane(buffer.bo, plane));
+      attributes.planes.push_back({fds.back().get(), gbm_bo_get_stride_for_plane(buffer.bo, plane),
+                                   gbm_bo_get_offset(buffer.bo, plane), modifier});
+    }
+    std::string error;
+    buffer.image = vlk::Image::import_dmabuf(device.vulkan, attributes, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &error);
+    buffer.framebuffer = buffer.image == nullptr ? 0 : add_framebuffer(device, buffer.bo);
+    if (buffer.image == nullptr || buffer.framebuffer == 0) {
+      std::fprintf(stderr, "zwwm: DRM %s: scanout buffer setup failed: %s\n", device.path.c_str(),
+                   buffer.image == nullptr ? error.c_str() : std::strerror(errno));
+      buffer.image.reset();
+      gbm_bo_destroy(buffer.bo);
+      return false;
+    }
+    output.scanout.push_back(std::move(buffer));
+  }
+  return true;
+}
+
 bool RuntimeBackend::commit_atomic_output(DrmOutput& output, std::uint32_t framebuffer, bool modeset) {
   auto& device = *output.device;
   const auto& p = output.atomic;
@@ -2012,8 +2054,7 @@ bool RuntimeBackend::commit_atomic_output(DrmOutput& output, std::uint32_t frame
     add(output.plane_id, p.crtc_h, output.mode.vdisplay);
     const auto rotation = kms_property(device.fd, output.plane_id, DRM_MODE_OBJECT_PLANE, "rotation");
     if (rotation.id != 0) add(output.plane_id, rotation.id, DRM_MODE_ROTATE_0);
-    // Clear cursor/overlay planes left on this CRTC by a previous seat owner.
-    // zwwm currently composes those elements into the primary framebuffer.
+    // Clear planes a previous seat owner left on this CRTC; zwwm composes into the primary.
     auto* planes = drmModeGetPlaneResources(device.fd);
     if (planes != nullptr) {
       for (std::uint32_t index = 0; index < planes->count_planes; ++index) {
@@ -2094,7 +2135,8 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
   for (int connector_index = 0; connector_index < resources->count_connectors; ++connector_index) {
     drmModeConnector* connector = drmModeGetConnector(device.fd, resources->connectors[connector_index]);
     if (connector == nullptr) continue;
-    const bool usable = connector->connection == DRM_MODE_CONNECTED && connector->count_modes > 0 &&
+    // Built-in panels often report an unknown status until the kernel's next hotplug probe.
+    const bool usable = connector->connection != DRM_MODE_DISCONNECTED && connector->count_modes > 0 &&
                         connector->connector_type != DRM_MODE_CONNECTOR_WRITEBACK;
     if (!usable) { drmModeFreeConnector(connector); continue; }
     const char* type = drmModeGetConnectorTypeName(connector->connector_type);
@@ -2213,12 +2255,7 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
     output->mode = candidate.mode;
     output->scanout_bit_depth = device.scanout_bit_depth;
     if (!initialize_atomic_output(*output, reserved_planes)) continue;
-    output->scanout_surface = gbm_surface_create(device.gbm, candidate.mode.hdisplay, candidate.mode.vdisplay,
-        device.scanout_format, GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT);
-    if (output->scanout_surface == nullptr) { close_drm_output(*output); continue; }
-    output->egl_surface = eglCreateWindowSurface(device.egl_display, device.egl_config,
-        reinterpret_cast<EGLNativeWindowType>(output->scanout_surface), nullptr);
-    if (output->egl_surface == EGL_NO_SURFACE) { close_drm_output(*output); continue; }
+    if (!create_scanout(*output)) { close_drm_output(*output); continue; }
     const auto& configured = config_->output_for(candidate.name);
     const auto logical = configured.logical_size({static_cast<std::uint32_t>(candidate.mode.hdisplay),
                                                    static_cast<std::uint32_t>(candidate.mode.vdisplay)});
@@ -2232,15 +2269,7 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
     reserved_planes.push_back(output->plane_id);
     next.push_back(std::move(output));
   }
-  if (next.empty() && !device.dmabuf_textures.empty() && !device.outputs.empty() &&
-      eglMakeCurrent(device.egl_display, device.outputs.front()->egl_surface, device.outputs.front()->egl_surface,
-                     device.egl_context) == EGL_TRUE && device.dmabuf_importer != nullptr) {
-    for (const auto& [id, imported] : device.dmabuf_textures) {
-      (void)id;
-      if (imported.texture != 0) (void)device.dmabuf_importer->release(imported.texture);
-    }
-    device.dmabuf_textures.clear();
-  }
+  if (next.empty() && !device.outputs.empty()) device.dmabuf_textures.clear();
   for (auto& output : device.outputs) if (output != nullptr) {
     output->retired = true;
     output->output.enabled = false;
@@ -2249,38 +2278,15 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
   }
   device.outputs = std::move(next);
   drmModeFreeResources(resources);
-  if (device.renderer == nullptr && !device.outputs.empty() && eglMakeCurrent(device.egl_display,
-      device.outputs.front()->egl_surface, device.outputs.front()->egl_surface, device.egl_context) == EGL_TRUE) {
-    device.renderer = std::make_unique<renderer::OpenGlRenderer>();
-    device.dmabuf_importer = std::make_unique<renderer::EglDmabufImporter>(device.egl_display);
-    if (!device.renderer->initialize() || !device.dmabuf_importer->initialize()) {
-      last_error_ = "could not initialize shared DRM renderer/importer";
-      device.dmabuf_importer->shutdown();
-      device.renderer->shutdown();
-      device.dmabuf_importer.reset();
-      device.renderer.reset();
-    } else {
-      renderer::ShaderSources sources;
-      std::string shader_error;
-      if (load_shader_sources(*config_, &sources, &shader_error) &&
-          device.renderer->prepare_shaders(sources))
-        device.renderer->commit_shaders();
-      else
-        last_error_ = shader_error.empty() ? device.renderer->last_error() : shader_error;
-    }
-  }
   XcursorImages* cursor = XcursorLibraryLoadImages(cursor_shape_.c_str(), cursor_theme_.c_str(), cursor_size_);
-  for (auto& output : device.outputs) if (output->cursor_texture == 0 && cursor != nullptr && cursor->nimage > 0 && cursor->images[0] != nullptr &&
-      eglMakeCurrent(device.egl_display, output->egl_surface, output->egl_surface, device.egl_context) == EGL_TRUE) {
+  for (auto& output : device.outputs) if (output->cursor_texture == nullptr && device.renderer != nullptr &&
+      cursor != nullptr && cursor->nimage > 0 && cursor->images[0] != nullptr) {
     const auto* image = cursor->images[0];
-    output->cursor_width = image->width; output->cursor_height = image->height;
-    output->cursor_hotspot_x = image->xhot; output->cursor_hotspot_y = image->yhot;
-    glGenTextures(1, &output->cursor_texture);
-    glBindTexture(GL_TEXTURE_2D, output->cursor_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, output->cursor_width, output->cursor_height, 0, GL_BGRA,
-                 GL_UNSIGNED_BYTE, image->pixels);
+    output->cursor_texture = device.renderer->upload(nullptr, image->pixels, image->width, image->height, image->width);
+    output->cursor_width = static_cast<std::int32_t>(image->width);
+    output->cursor_height = static_cast<std::int32_t>(image->height);
+    output->cursor_hotspot_x = static_cast<std::int32_t>(image->xhot);
+    output->cursor_hotspot_y = static_cast<std::int32_t>(image->yhot);
   }
   if (cursor != nullptr) XcursorImagesDestroy(cursor);
 }
@@ -2326,29 +2332,25 @@ void RuntimeBackend::resume_drm_devices() {
 
 void RuntimeBackend::close_drm_output(DrmOutput& output) {
   auto& device = *output.device;
-  if (active_ && device.fd >= 0 && (output.front_fb != 0 || output.pending_fb != 0)) {
+  if (active_ && device.fd >= 0 && (output.front_buffer >= 0 || output.pending_buffer >= 0)) {
     if (!disable_atomic_output(output))
       std::fprintf(stderr, "zwwm: DRM %s: could not disable atomic output %u: %s\n",
                    device.path.c_str(), output.connector_id, std::strerror(errno));
   }
-  if (device.egl_display != EGL_NO_DISPLAY && device.egl_context != EGL_NO_CONTEXT && output.egl_surface != EGL_NO_SURFACE)
-    eglMakeCurrent(device.egl_display, output.egl_surface, output.egl_surface, device.egl_context);
-  if (output.pending_fb != 0) drmModeRmFB(device.fd, output.pending_fb);
-  if (output.pending_bo != nullptr && output.scanout_surface != nullptr) gbm_surface_release_buffer(output.scanout_surface, output.pending_bo);
-  if (output.front_fb != 0) drmModeRmFB(device.fd, output.front_fb);
-  if (output.front_bo != nullptr && output.scanout_surface != nullptr) gbm_surface_release_buffer(output.scanout_surface, output.front_bo);
-  for (const auto& surface : output.shm_textures) if (surface.texture != 0 && surface.owns_texture) glDeleteTextures(1, &surface.texture);
-  if (output.cursor_texture != 0) glDeleteTextures(1, &output.cursor_texture);
-  if (output.capture_texture != 0) glDeleteTextures(1, &output.capture_texture);
-  if (output.capture_cursor_texture != 0) glDeleteTextures(1, &output.capture_cursor_texture);
-  if (output.capture_framebuffer != 0) glDeleteFramebuffers(1, &output.capture_framebuffer);
+  for (auto& buffer : output.scanout) {
+    if (buffer.framebuffer != 0) drmModeRmFB(device.fd, buffer.framebuffer);
+    if (buffer.bo != nullptr) gbm_bo_destroy(buffer.bo);
+  }
+  output.scanout.clear();
+  output.front_buffer = output.pending_buffer = -1;
+  if (output.direct_front) release_direct_frame(output, output.direct_front->framebuffer, output.direct_front->buffer_id);
+  if (output.direct_pending) release_direct_frame(output, output.direct_pending->framebuffer, output.direct_pending->buffer_id);
+  output.direct_front.reset();
+  output.direct_pending.reset();
   output.shm_textures.clear();
-  if (output.egl_surface != EGL_NO_SURFACE) eglDestroySurface(device.egl_display, output.egl_surface);
-  if (output.scanout_surface != nullptr) gbm_surface_destroy(output.scanout_surface);
-  output.egl_surface = EGL_NO_SURFACE;
-  output.scanout_surface = nullptr;
-  output.pending_bo = output.front_bo = nullptr;
-  output.pending_fb = output.front_fb = 0;
+  output.cursor_texture.reset();
+  output.capture_texture.reset();
+  output.capture_cursor_texture.reset();
   if (output.mode_blob != 0) drmModeDestroyPropertyBlob(device.fd, output.mode_blob);
   output.mode_blob = 0;
 }
@@ -2358,30 +2360,17 @@ void RuntimeBackend::close_drm_device(DrmDevice& device) {
     event_loop_->remove(device.source);
     device.source = -1;
   }
-  DrmOutput* current = !device.outputs.empty() ? device.outputs.front().get() :
-                       !device.retired_outputs.empty() ? device.retired_outputs.front().get() : nullptr;
-  if (current != nullptr && current->egl_surface != EGL_NO_SURFACE)
-    eglMakeCurrent(device.egl_display, current->egl_surface, current->egl_surface, device.egl_context);
-  if (device.dmabuf_importer != nullptr) for (const auto& [id, imported] : device.dmabuf_textures) {
-    (void)id;
-    if (imported.texture != 0) (void)device.dmabuf_importer->release(imported.texture);
-  }
+  if (device.vulkan != nullptr) device.vulkan->wait_idle();
   device.dmabuf_textures.clear();
-  if (device.dmabuf_importer != nullptr) device.dmabuf_importer->shutdown();
-  if (device.error_popup_texture != 0) glDeleteTextures(1, &device.error_popup_texture);
-  device.error_popup_texture = 0;
-  if (device.renderer != nullptr) device.renderer->shutdown();
-  device.dmabuf_importer.reset();
-  device.renderer.reset();
+  device.error_popup_texture.reset();
   for (auto& output : device.outputs) close_drm_output(*output);
   for (auto& output : device.retired_outputs) close_drm_output(*output);
   device.outputs.clear();
   device.retired_outputs.clear();
-  if (device.egl_display != EGL_NO_DISPLAY) eglMakeCurrent(device.egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-  if (device.egl_context != EGL_NO_CONTEXT) eglDestroyContext(device.egl_display, device.egl_context);
-  if (device.egl_display != EGL_NO_DISPLAY) eglTerminate(device.egl_display);
-  device.egl_context = EGL_NO_CONTEXT;
-  device.egl_display = EGL_NO_DISPLAY;
+  if (device.renderer != nullptr) device.renderer->shutdown();
+  device.renderer.reset();
+  if (device.vulkan != nullptr) device.vulkan->wait_idle();
+  device.vulkan.reset();
   if (device.gbm != nullptr) {
     gbm_device_destroy(device.gbm);
     device.gbm = nullptr;

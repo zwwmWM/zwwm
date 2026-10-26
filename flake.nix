@@ -16,6 +16,9 @@
         zwayland = final.callPackage ./nix/zwayland.nix {
           stdenv = final.clangStdenv;
         };
+        zwwm-vlk = final.callPackage ./nix/zwwm-vlk.nix {
+          stdenv = final.clangStdenv;
+        };
         zterm = final.callPackage ./nix/zterm.nix {
           stdenv = final.clangStdenv;
         };
@@ -38,7 +41,7 @@
               wrapQtAppsHook = pkgs.qt6.wrapQtAppsHook;
             };
         in {
-          inherit (pkgs) zwayland zwayland-scanner zwwm-protocols zterm libzterm zw-lang;
+          inherit (pkgs) zwayland zwayland-scanner zwwm-protocols zwwm-vlk zterm libzterm zw-lang;
           default = mkZwwm { };
           zwwm = mkZwwm { };
           zwwm-no-xwayland = mkZwwm { xwayland = false; };
@@ -72,10 +75,16 @@
               dbus
               dbus.dev
               libffi
-              libepoxy
               fontconfig
               freetype
-              libglvnd
+              vulkan-headers
+              vulkan-loader
+              vulkan-tools
+              vulkan-validation-layers
+              glslang
+              spirv-tools
+              pango
+              harfbuzz
               libdrm
               libgbm
               libinput

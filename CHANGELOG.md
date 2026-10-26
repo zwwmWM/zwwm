@@ -2,6 +2,50 @@
 
 All notable changes to zwwm are documented here.
 
+## Unreleased
+
+### Highlights
+
+- Replaced the OpenGL ES/EGL renderer with Vulkan 1.3. `zwwm-vlk` replaces
+  `zwwm-egl` and provides device selection, DMA-BUF import, and nested
+  presentation.
+- Direct sessions render into GBM scanout buffers imported into Vulkan, with
+  modifiers negotiated against the primary plane, and attach implicit-sync
+  fences so KMS and clients wait on the GPU instead of the CPU.
+- Shaders are now Vulkan GLSL 4.50 against a new `zwwm.glsl` ABI: per-draw
+  uniform block, bindless texture table, config blocks, and specialization
+  constants. **Breaking:** OpenGL ES user shaders must be ported (see
+  CONFIG.md); the packaged defaults are updated.
+- Nested sessions advertise the rendering GPU in linux-dmabuf feedback.
+- New `ZWWM_VULKAN_VALIDATION` and `ZWWM_VULKAN_DEVICE` environment variables.
+- New optional `shadow` shader role draws a quad under each toplevel; the
+  packaged `shadow.frag` renders soft Gaussian-style shadows.
+- `zwwm.toplevel_rect` is now in output pixels on scaled and rotated outputs.
+- zterm renders with Vulkan through `zwwm-vlk`: glyph atlases are array images
+  filled by batched uploads, and its shaders are compiled to SPIR-V at build time.
+- `zwwm-vlk` builds and installs standalone (pkg-config `zwwm-vlk`, flake package
+  `zwwm-vlk`).
+
+### Mobile
+
+- text-input-v3 relays to input-method-v2 (including the keyboard grab), and
+  virtual-keyboard-v1 is supported, so squeekboard and wvkbd work without patches.
+  Input-method popup surfaces are accepted but not drawn yet.
+- `ZWWM_DRM_DEVICES` allow-list for the direct backend.
+- Compositor-owned edge swipes through the new `zwwm-edge-swipe-v1` protocol.
+- A toplevel's first configure now waits for the client's batch, so the preferred
+  fractional scale arrives first; layer surfaces get it before their configure too.
+- Built-in panels that report an unknown connector status are used, and outputs
+  are re-probed with backoff until one lights up.
+- `mobile.windows` policy: full-area apps, one visible per tag, fitted and centred
+  dialogs.
+- wlr-output-power-management and idle-inhibit; powered-off outputs ignore touch.
+- Frame callbacks skip hidden apps and wallpaper or home layers covered by an
+  opaque app.
+- Direct scanout of fullscreen opaque DMA-BUF apps, releasing buffers only after
+  they leave the screen.
+- Bind flags `release`, `tap`, `hold`, `repeat` and `locked`, with `mobile.hold-ms`.
+
 ## 0.1.3-alpha.1 - 2026-09-23
 nothing really interesting another bug fixes
 

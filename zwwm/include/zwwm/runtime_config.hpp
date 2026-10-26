@@ -31,7 +31,7 @@ struct Color {
   bool operator==(const Color&) const = default;
 };
 
-enum class CustomShaderRole : std::uint8_t { window, border, background };
+enum class CustomShaderRole : std::uint8_t { window, border, background, shadow };
 using CustomShaderValue = std::variant<bool, std::int32_t, Color, std::vector<std::int32_t>,
                                        std::vector<Color>>;
 
@@ -136,11 +136,21 @@ enum class KeyAction : std::uint8_t {
   pan, leftclick, rightclick, middleclick, external
 };
 
+enum class KeyTrigger { press, release, tap, hold, repeat };
+
 struct Keybinding {
   std::string modifiers;
   std::string key;
   KeyAction action = KeyAction::exec;
   std::string argument;
+  KeyTrigger trigger = KeyTrigger::press;
+  bool locked = false;  // also fires while the session is locked
+};
+
+struct MobileConfig {
+  bool windows = false;  // every toplevel fills its output; dialogs are fitted and centred
+  std::uint32_t edge_swipe_size = 16;
+  std::uint32_t hold_ms = 500;
 };
 
 struct WindowRule {
@@ -178,10 +188,14 @@ class RuntimeConfig {
   std::vector<CustomShaderConfig> shaders{
       {"window", CustomShaderRole::window, default_shader_source("window.frag"), {}},
       {"border", CustomShaderRole::border, default_shader_source("border.frag"), {}},
-      {"background", CustomShaderRole::background, default_shader_source("background.frag"), {}}};
+      {"background", CustomShaderRole::background, default_shader_source("background.frag"), {}},
+      {"shadow", CustomShaderRole::shadow, default_shader_source("shadow.frag"),
+       {{"size", 28}, {"offset_x", 0}, {"offset_y", 8}, {"strength", 100},
+        {"color", Color{0, 0, 0, 90}}, {"focused_color", Color{0, 0, 0, 140}}}}};
   std::string window_shader = "window";
   std::string border_shader = "border";
   std::string background_shader = "background";
+  std::string shadow_shader = "shadow";
   std::string overview_backdrop_image;
   std::uint32_t overview_backdrop_blur_radius = 0;
   std::uint32_t overview_backdrop_blur_passes = 3;
@@ -190,6 +204,7 @@ class RuntimeConfig {
   std::uint32_t overview_master_ratio = 60;
   LayoutConfig layout;
   InputConfig input;
+  MobileConfig mobile;
   KeyboardConfig keyboard;
   OutputConfig output;
   std::vector<std::pair<std::string, OutputConfig>> outputs;
@@ -269,8 +284,7 @@ class ConfigReloader {
   std::string last_error_;
 };
 
-// Selects and loads the startup configuration. Throws after printing diagnostics
-// when an explicitly selected or discovered file is invalid.
+// Loads the startup configuration; throws after printing diagnostics if it is invalid.
 [[nodiscard]] LoadedRuntimeConfig load_runtime_config();
 [[nodiscard]] std::string format_runtime_config_error(
     const std::string& path, const std::vector<lang::Diagnostic>& diagnostics);

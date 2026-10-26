@@ -823,20 +823,22 @@ void Terminal::begin_selection(int row, int column, SelectionMode mode) {
   const auto [first, last] = selection_extent(row, column);
   anchor_first_ = selection_first_ = first; anchor_last_ = selection_last_ = last;
   selection_anchor_valid_ = true; selection_ = mode != SelectionMode::Character;
-  dirty = true;
+  dirty = true; ++selection_revision_;
 }
 
 void Terminal::extend_selection(int row, int column) {
   if (!selection_anchor_valid_) return;
   const auto [first, last] = selection_extent(row, column);
-  selection_first_ = std::min(first, anchor_first_);
-  selection_last_ = std::max(last, anchor_last_);
-  selection_ = selection_first_ != selection_last_ || selection_mode_ != SelectionMode::Character;
-  dirty = true;
+  const auto next_first = std::min(first,anchor_first_), next_last = std::max(last,anchor_last_);
+  const bool next_selected = next_first != next_last || selection_mode_ != SelectionMode::Character;
+  if (next_first == selection_first_ && next_last == selection_last_ && selection_ == next_selected) return;
+  selection_first_ = next_first; selection_last_ = next_last;
+  selection_ = next_selected;
+  dirty = true; ++selection_revision_;
 }
 
 void Terminal::clear_selection() {
-  if (selection_) dirty = true;
+  if (selection_) { dirty = true; ++selection_revision_; }
   selection_ = selection_anchor_valid_ = false;
 }
 

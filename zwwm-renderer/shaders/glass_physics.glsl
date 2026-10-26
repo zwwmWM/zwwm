@@ -1,3 +1,4 @@
+// Physically based glass; expects zwwm.glsl and a glass_quality constant.
 const float GLASS_PI = 3.14159265358979323846;
 const int GLASS_MAX_SAMPLES = 16;
 const int GLASS_MAX_BOUNCES = 4;
@@ -66,30 +67,30 @@ float glass_random(inout float state) {
 
 float glass_height(vec2 point) {
   vec2 phase = point * 0.035;
-  float waves = sin(phase.x + glass_time) * cos(phase.y - glass_time) * 0.5;
-  vec2 grain_uv = point * 0.012 + glass_time * 1.5;
-  float grain = glass_fbm(grain_uv) * glass_frost * 6.0;
-  return waves * glass_refraction + grain;
+  float waves = sin(phase.x + zwwm.time) * cos(phase.y - zwwm.time) * 0.5;
+  vec2 grain_uv = point * 0.012 + zwwm.time * 1.5;
+  float grain = glass_fbm(grain_uv) * zwwm.glass_frost * 6.0;
+  return waves * zwwm.glass_refraction + grain;
 }
 
 vec3 glass_geometric_normal(vec2 point) {
   float center = glass_height(point);
   vec2 gradient = vec2(glass_height(point + vec2(1.0, 0.0)) - center,
                        glass_height(point + vec2(0.0, 1.0)) - center);
-  vec2 panel_center = rect_size * 0.5;
-  vec2 inward = normalize(panel_center - local_pixel_coordinates + vec2(0.0001));
-  float edge_distance = min(min(local_pixel_coordinates.x, local_pixel_coordinates.y),
-                            min(rect_size.x - local_pixel_coordinates.x, rect_size.y - local_pixel_coordinates.y));
-  float meniscus_range = max(8.0, clip_radius + glass_thickness * 0.5);
+  vec2 panel_center = zwwm.draw_rect.zw * 0.5;
+  vec2 inward = normalize(panel_center - zwwm_local + vec2(0.0001));
+  float edge_distance = min(min(zwwm_local.x, zwwm_local.y),
+                            min(zwwm.draw_rect.zw.x - zwwm_local.x, zwwm.draw_rect.zw.y - zwwm_local.y));
+  float meniscus_range = max(8.0, zwwm.clip_radius + zwwm.glass_thickness * 0.5);
   float meniscus = pow(1.0 - clamp(edge_distance / meniscus_range, 0.0, 1.0), 2.0);
-  vec2 lens_gradient = inward * meniscus * (0.35 + glass_refraction * 0.045);
+  vec2 lens_gradient = inward * meniscus * (0.35 + zwwm.glass_refraction * 0.045);
   return normalize(vec3(-gradient + lens_gradient, -1.0));
 }
 
 vec3 glass_microfacet_normal(vec3 normal, inout float random_state) {
   float first = max(glass_random(random_state), 0.00001);
   float second = glass_random(random_state);
-  float radius = glass_roughness * sqrt(-2.0 * log(first));
+  float radius = zwwm.glass_roughness * sqrt(-2.0 * log(first));
   float angle = 2.0 * GLASS_PI * second;
   vec3 tangent = normalize(abs(normal.z) < 0.999 ? cross(normal, vec3(0.0, 0.0, 1.0)) :
                                                     cross(normal, vec3(0.0, 1.0, 0.0)));
@@ -105,34 +106,34 @@ float glass_fresnel(float cosine, float incident_ior, float transmitted_ior) {
 }
 
 vec2 glass_advance(vec2 uv, vec3 direction) {
-  return uv + direction.xy / max(abs(direction.z), 0.1) * glass_thickness / target_size;
+  return uv + direction.xy / max(abs(direction.z), 0.1) * zwwm.glass_thickness / zwwm.output_size;
 }
 
 vec3 glass_absorption() {
-  return -log(clamp(glass_tint.rgb, vec3(0.02), vec3(0.999))) * glass_tint.a;
+  return -log(clamp(zwwm.glass_tint.rgb, vec3(0.02), vec3(0.999))) * zwwm.glass_tint.a;
 }
 
 vec3 glass_reflection_radiance(vec2 uv, vec3 direction) {
   vec2 mirrored = vec2(1.0 - uv.x, uv.y);
-  vec2 parallax = direction.xy / max(abs(direction.z), 0.2) * glass_thickness * 0.35 / target_size;
-  vec3 scene_reflection = texture(reflection_texture, mirrored + parallax).rgb;
+  vec2 parallax = direction.xy / max(abs(direction.z), 0.2) * zwwm.glass_thickness * 0.35 / zwwm.output_size;
+  vec3 scene_reflection = zwwm_backdrop(mirrored + parallax).rgb;
   float overhead = pow(clamp(0.5 - direction.y * 0.5, 0.0, 1.0), 4.0);
   vec3 laboratory_light = vec3(0.75, 0.86, 1.0) * overhead;
   return scene_reflection + laboratory_light * 0.18;
 }
 
 float glass_edge_proximity() {
-  float distance = -rounded_rectangle_distance(local_pixel_coordinates, rect_size, corner_radius);
-  float width = max(8.0, corner_radius * 0.45 + glass_thickness * 0.65);
+  float distance = -zwwm_rounded_rect_distance(zwwm_local, zwwm.draw_rect.zw, zwwm.corner_radius);
+  float width = max(8.0, zwwm.corner_radius * 0.45 + zwwm.glass_thickness * 0.65);
   return exp(-max(distance, 0.0) / width);
 }
 
 vec2 glass_dome_offset() {
-  vec2 centered = local_pixel_coordinates / max(rect_size, vec2(1.0)) * 2.0 - 1.0;
+  vec2 centered = zwwm_local / max(zwwm.draw_rect.zw, vec2(1.0)) * 2.0 - 1.0;
   vec2 gradient = -4.0 * centered * (1.0 - centered.yx * centered.yx);
   float interior = 1.0 - glass_edge_proximity();
-  float strength = glass_refraction * min(rect_size.x, rect_size.y) * 0.00012;
-  return gradient * strength * interior / target_size;
+  float strength = zwwm.glass_refraction * min(zwwm.draw_rect.zw.x, zwwm.draw_rect.zw.y) * 0.00012;
+  return gradient * strength * interior / zwwm.output_size;
 }
 
 vec3 glass_finish(vec3 color, vec2 uv, vec3 incident, vec3 normal) {
@@ -148,9 +149,9 @@ vec3 glass_finish(vec3 color, vec2 uv, vec3 incident, vec3 normal) {
   color = mix(vec3(current_luminance), color, 1.0 + chroma * (0.18 + 0.12 * luminance));
 
   float facing = clamp(dot(-incident, normal), 0.0, 1.0);
-  float fresnel = glass_fresnel(facing, 1.0, glass_ior);
-  float top_bias = pow(clamp(1.0 - local_pixel_coordinates.y / max(rect_size.y, 1.0), 0.0, 1.0), 2.0);
-  float bottom_bias = pow(clamp(local_pixel_coordinates.y / max(rect_size.y, 1.0), 0.0, 1.0), 2.0);
+  float fresnel = glass_fresnel(facing, 1.0, zwwm.glass_ior);
+  float top_bias = pow(clamp(1.0 - zwwm_local.y / max(zwwm.draw_rect.zw.y, 1.0), 0.0, 1.0), 2.0);
+  float bottom_bias = pow(clamp(zwwm_local.y / max(zwwm.draw_rect.zw.y, 1.0), 0.0, 1.0), 2.0);
   vec3 reflected = glass_reflection_radiance(uv, reflect(incident, normal));
   color = mix(color, reflected, edge * (0.12 + fresnel * 0.3));
   color += vec3(1.0, 0.985, 0.95) * top_bias * edge * edge * 0.09;
@@ -177,7 +178,7 @@ vec3 trace_glass_path(vec2 origin_uv, vec3 incident, vec3 geometric_normal, floa
   vec3 throughput = vec3(1.0);
   vec3 absorption = glass_absorption();
   for (int bounce = 0; bounce < GLASS_MAX_BOUNCES; ++bounce) {
-    float distance_inside = glass_thickness / max(abs(direction.z), 0.1);
+    float distance_inside = zwwm.glass_thickness / max(abs(direction.z), 0.1);
     throughput *= exp(-absorption * distance_inside / 24.0);
     uv = glass_advance(uv, direction);
 
@@ -188,43 +189,43 @@ vec3 trace_glass_path(vec2 origin_uv, vec3 incident, vec3 geometric_normal, floa
     float reflection_probability = dot(transmitted, transmitted) < 0.00001 ? 1.0 :
         glass_fresnel(cosine, ior, 1.0);
     if (glass_random(random_state) >= reflection_probability && reflection_probability < 1.0) {
-      return texture(background_texture, glass_advance(uv, transmitted * 0.2)).rgb * throughput;
+      return zwwm_blurred_backdrop(glass_advance(uv, transmitted * 0.2)).rgb * throughput;
     }
     direction = reflect(direction, interface_normal);
   }
-  return texture(background_texture, glass_advance(uv, direction * 0.2)).rgb * throughput;
+  return zwwm_blurred_backdrop(glass_advance(uv, direction * 0.2)).rgb * throughput;
 }
 
 vec4 physically_based_glass(vec2 uv) {
-  vec2 panel_center = clip_rect.xy + clip_rect.zw * 0.5;
-  vec2 view_offset = (target_pixel_coordinates - panel_center) / max(target_size.y, 1.0);
+  vec2 panel_center = zwwm.clip_rect.xy + zwwm.clip_rect.zw * 0.5;
+  vec2 view_offset = (zwwm_position - panel_center) / max(zwwm.output_size.y, 1.0);
   vec3 incident = normalize(vec3(view_offset, 1.5));
-  vec3 geometric_normal = glass_geometric_normal(target_pixel_coordinates);
+  vec3 geometric_normal = glass_geometric_normal(zwwm_position);
   vec2 optical_uv = uv + glass_dome_offset();
   int sample_count = glass_quality <= 1 ? 4 : glass_quality == 2 ? 8 : 16;
-  float dispersion = glass_dispersion * 0.001;
+  float dispersion = zwwm.glass_dispersion * 0.001;
   vec3 integrated = vec3(0.0);
 
   for (int sample_index = 0; sample_index < GLASS_MAX_SAMPLES; ++sample_index) {
     if (sample_index >= sample_count) break;
-    uvec2 seed_lattice = uvec2(mod(target_pixel_coordinates + vec2(float(sample_index) * 17.0,
-                                      float(sample_index) * 47.0) + floor(glass_time * 59.0), 1048576.0));
+    uvec2 seed_lattice = uvec2(mod(zwwm_position + vec2(float(sample_index) * 17.0,
+                                      float(sample_index) * 47.0) + floor(zwwm.time * 59.0), 1048576.0));
     uvec2 seed_hash = glass_hash22(seed_lattice);
     float seed = fract(float(seed_hash.x ^ seed_hash.y) / 4294967296.0);
     if (glass_quality <= 1 || dispersion <= 0.0) {
-      integrated += trace_glass_path(optical_uv, incident, geometric_normal, glass_ior, seed);
+      integrated += trace_glass_path(optical_uv, incident, geometric_normal, zwwm.glass_ior, seed);
     } else {
       float red_seed = seed;
       float green_seed = fract(seed + 0.3333333);
       float blue_seed = fract(seed + 0.6666667);
-      integrated.r += trace_glass_path(optical_uv, incident, geometric_normal, max(1.0001, glass_ior - dispersion), red_seed).r;
-      integrated.g += trace_glass_path(optical_uv, incident, geometric_normal, glass_ior, green_seed).g;
-      integrated.b += trace_glass_path(optical_uv, incident, geometric_normal, glass_ior + dispersion, blue_seed).b;
+      integrated.r += trace_glass_path(optical_uv, incident, geometric_normal, max(1.0001, zwwm.glass_ior - dispersion), red_seed).r;
+      integrated.g += trace_glass_path(optical_uv, incident, geometric_normal, zwwm.glass_ior, green_seed).g;
+      integrated.b += trace_glass_path(optical_uv, incident, geometric_normal, zwwm.glass_ior + dispersion, blue_seed).b;
     }
   }
 
   integrated /= float(sample_count);
-  float frost = glass_grain(target_pixel_coordinates + vec2(0.0, glass_time * 12.0)) * glass_frost;
+  float frost = glass_grain(zwwm_position + vec2(0.0, zwwm.time * 12.0)) * zwwm.glass_frost;
   integrated = glass_finish(integrated, optical_uv, incident, geometric_normal);
   return vec4(clamp(integrated + frost, 0.0, 1.0), 1.0);
 }

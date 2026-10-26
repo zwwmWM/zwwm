@@ -71,19 +71,35 @@ void release_xkb(SeatState* seat) {
   seat->xkb_context_handle = nullptr;
 }
 
-UniqueFd keymap_fd(const SeatState& seat) { constexpr unsigned kMfdCloexec = 0x0001U, kMfdAllowSealing = 0x0002U; constexpr int kAddSeals = 1033, kSealShrink = 0x0002, kSealGrow = 0x0004, kSealWrite = 0x0008; int descriptor = -1;
+UniqueFd keymap_fd(std::string_view keymap) { constexpr unsigned kMfdCloexec = 0x0001U, kMfdAllowSealing = 0x0002U; constexpr int kAddSeals = 1033, kSealShrink = 0x0002, kSealGrow = 0x0004, kSealWrite = 0x0008; int descriptor = -1;
 #ifdef SYS_memfd_create
   descriptor = static_cast<int>(syscall(SYS_memfd_create, "zwwm-keymap", kMfdCloexec | kMfdAllowSealing));
 #endif
   if (descriptor < 0) { FILE* file = std::tmpfile(); if (file == nullptr) return {}; descriptor = fcntl(fileno(file), F_DUPFD_CLOEXEC, 0); std::fclose(file); if (descriptor < 0) return {}; }
-  UniqueFd fd(descriptor); const char* data = seat.keymap.c_str(); std::size_t remaining = seat.keymap.size() + 1; while (remaining != 0) { const ssize_t written = write(fd.get(), data, remaining); if (written < 0 && errno == EINTR) continue; if (written <= 0) return {}; data += written; remaining -= static_cast<std::size_t>(written); } if (lseek(fd.get(), 0, SEEK_SET) < 0) return {}; (void)fcntl(fd.get(), kAddSeals, kSealShrink | kSealGrow | kSealWrite); return fd; }
+  UniqueFd fd(descriptor); const std::string text(keymap); const char* data = text.c_str(); std::size_t remaining = text.size() + 1; while (remaining != 0) { const ssize_t written = write(fd.get(), data, remaining); if (written < 0 && errno == EINTR) continue; if (written <= 0) return {}; data += written; remaining -= static_cast<std::size_t>(written); } if (lseek(fd.get(), 0, SEEK_SET) < 0) return {}; (void)fcntl(fd.get(), kAddSeals, kSealShrink | kSealGrow | kSealWrite); return fd; }
+UniqueFd keymap_fd(const SeatState& seat) { return keymap_fd(seat.keymap); }
+
+void use_keyboard_keymap(SeatState& seat, zwayland::server::Client* client, const void* owner, std::string_view keymap) {
+  UniqueFd fd;
+  for (auto* keyboard : seat.keyboards) {
+    if (keyboard->client != client) continue;
+    const auto current = seat.keyboard_keymaps.find(keyboard);
+    if ((current == seat.keyboard_keymaps.end() ? nullptr : current->second) == owner) continue;
+    if (!fd) fd = keymap_fd(keymap);
+    if (!fd) return;
+    protocol::wl_keyboard_send_keymap(*keyboard, protocol::WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd.get(),
+                                      static_cast<std::uint32_t>(keymap.size() + 1));
+    if (owner == nullptr) seat.keyboard_keymaps.erase(keyboard); else seat.keyboard_keymaps[keyboard] = owner;
+  }
+}
 
 void remember_serial(SeatState& seat, zwayland::server::Client* client, std::uint32_t serial) { seat.input_serials.emplace_back(client, serial); if (seat.input_serials.size() > 64) seat.input_serials.erase(seat.input_serials.begin()); }
 bool valid_selection_serial(const SeatState& seat, zwayland::server::Client* client, std::uint32_t serial) { if (seat.keyboard_focus == nullptr || seat.keyboard_focus->resource->client != client) return false; return std::find(seat.input_serials.begin(), seat.input_serials.end(), std::pair{client, serial}) != seat.input_serials.end(); }
-void send_modifiers(SeatState& seat) { if (seat.keyboard_focus == nullptr || seat.xkb_state_handle == nullptr) return; const auto depressed = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_DEPRESSED), latched = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_LATCHED), locked = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_LOCKED), group = xkb_state_serialize_layout(seat.xkb_state_handle, XKB_STATE_LAYOUT_EFFECTIVE); const auto serial = seat.display->next_serial(); auto* client = seat.keyboard_focus->resource->client; bool sent = false; for (auto* resource : seat.keyboards) if (resource->client == client) { protocol::wl_keyboard_send_modifiers(*resource, serial, depressed, latched, locked, group); sent = true; } if (sent) remember_serial(seat, client, serial); }
+void send_modifiers(SeatState& seat) { if (seat.keyboard_focus == nullptr || seat.xkb_state_handle == nullptr) return; const auto depressed = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_DEPRESSED), latched = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_LATCHED), locked = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_LOCKED), group = xkb_state_serialize_layout(seat.xkb_state_handle, XKB_STATE_LAYOUT_EFFECTIVE); const auto serial = seat.display->next_serial(); auto* client = seat.keyboard_focus->resource->client; bool sent = false; for (auto* resource : seat.keyboards) if (resource->client == client) { protocol::wl_keyboard_send_modifiers(*resource, serial, depressed, latched, locked, group); sent = true; } if (sent) remember_serial(seat, client, serial); input_method_grab_modifiers(seat); }
 
 void publish_keymap(SeatState* seat) {
   publish_virtual_keymap(seat);
+  seat->keyboard_keymaps.clear();
   if (seat->keyboards.empty()) return;
   const auto fd = keymap_fd(*seat);
   if (!fd) return;
@@ -643,6 +659,7 @@ void bind_seat(zwayland::server::Client* c, void* data, std::uint32_t v, std::ui
         const auto fd = keymap_fd(*state);
         if (!fd) { resource->destroy(); client->post_no_memory(); return; }
         state->keyboards.push_back(resource);
+        state->keyboard_keymaps.erase(resource);
         resource->set_data(&state->keyboards); resource->set_handler(protocol::wl_keyboard_handler(WlKeyboardKeyboardHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (resource_destroyed)(&destroyed); });
         protocol::wl_keyboard_send_keymap(*resource, protocol::WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd.get(), static_cast<std::uint32_t>(state->keymap.size() + 1));
         if (resource->version >= 4) protocol::wl_keyboard_send_repeat_info(*resource, state->repeat_rate, state->repeat_delay);

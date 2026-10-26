@@ -1,20 +1,10 @@
-#version 300 es
+#version 450
+#include "zwwm.glsl"
 
-precision highp float;
-
-in vec2 texture_coordinates;
-
-uniform sampler2D source_texture;
-uniform vec2 texel_size;
-uniform float sample_offset;
-uniform bool upsample;
-uniform bool finalize;
-uniform float brightness;
-uniform float contrast;
-uniform float saturation;
-uniform float noise;
-
-out vec4 fragment_color;
+const int KAWASE_DOWNSAMPLE = 0;
+const int KAWASE_UPSAMPLE = 1;
+const int KAWASE_FINALIZE = 2;
+layout(constant_id = 0) const int kawase_mode = KAWASE_DOWNSAMPLE;
 
 uvec2 grain_hash22(uvec2 p) {
   p = uvec2(p.x * 1597334677U, p.y * 3812015801U);
@@ -45,37 +35,41 @@ float grain_value(vec2 p) {
 float grain_noise(vec2 point) {
   float envelope = 0.55 + 0.45 * (grain_value(point * 0.035) * 0.5 + 0.5);
   vec2 rotated = mat2(0.8, -0.6, 0.6, 0.8) * point;
-  float detail = grain_value(point * 1.7) * 0.7 +
-                 grain_value(rotated * 3.9) * 0.3;
+  float detail = grain_value(point * 1.7) * 0.7 + grain_value(rotated * 3.9) * 0.3;
   return clamp(detail, -1.0, 1.0) * envelope * 0.5;
 }
 
+vec4 source(vec2 uv) { return zwwm_window(uv); }
+
 void main() {
-  vec2 step_size = texel_size * sample_offset;
-  if (!upsample) {
-    fragment_color = texture(source_texture, texture_coordinates) * 4.0;
-    fragment_color += texture(source_texture, texture_coordinates + vec2(step_size.x, step_size.y));
-    fragment_color += texture(source_texture, texture_coordinates + vec2(-step_size.x, step_size.y));
-    fragment_color += texture(source_texture, texture_coordinates + vec2(step_size.x, -step_size.y));
-    fragment_color += texture(source_texture, texture_coordinates - step_size);
-    fragment_color /= 8.0;
+  vec2 step_size = zwwm.texel_size * zwwm.sample_offset;
+  vec2 uv = zwwm_uv;
+  vec4 color;
+  if (kawase_mode == KAWASE_DOWNSAMPLE) {
+    color = source(uv) * 4.0;
+    color += source(uv + vec2(step_size.x, step_size.y));
+    color += source(uv + vec2(-step_size.x, step_size.y));
+    color += source(uv + vec2(step_size.x, -step_size.y));
+    color += source(uv - step_size);
+    color /= 8.0;
   } else {
-    fragment_color = texture(source_texture, texture_coordinates + vec2(step_size.x, 0.0)) * 2.0;
-    fragment_color += texture(source_texture, texture_coordinates - vec2(step_size.x, 0.0)) * 2.0;
-    fragment_color += texture(source_texture, texture_coordinates + vec2(0.0, step_size.y)) * 2.0;
-    fragment_color += texture(source_texture, texture_coordinates - vec2(0.0, step_size.y)) * 2.0;
-    fragment_color += texture(source_texture, texture_coordinates + step_size);
-    fragment_color += texture(source_texture, texture_coordinates - step_size);
-    fragment_color += texture(source_texture, texture_coordinates + vec2(step_size.x, -step_size.y));
-    fragment_color += texture(source_texture, texture_coordinates + vec2(-step_size.x, step_size.y));
-    fragment_color /= 12.0;
+    color = source(uv + vec2(step_size.x, 0.0)) * 2.0;
+    color += source(uv - vec2(step_size.x, 0.0)) * 2.0;
+    color += source(uv + vec2(0.0, step_size.y)) * 2.0;
+    color += source(uv - vec2(0.0, step_size.y)) * 2.0;
+    color += source(uv + step_size);
+    color += source(uv - step_size);
+    color += source(uv + vec2(step_size.x, -step_size.y));
+    color += source(uv + vec2(-step_size.x, step_size.y));
+    color /= 12.0;
   }
-  if (finalize) {
-    float luminance = dot(fragment_color.rgb, vec3(0.2126, 0.7152, 0.0722));
-    fragment_color.rgb = mix(vec3(luminance), fragment_color.rgb, saturation);
-    fragment_color.rgb = (fragment_color.rgb - vec3(0.5)) * contrast + vec3(0.5);
-    fragment_color.rgb *= brightness;
-    fragment_color.rgb += vec3(grain_noise(gl_FragCoord.xy) * noise);
-    fragment_color.rgb = clamp(fragment_color.rgb, 0.0, 1.0);
+  if (kawase_mode == KAWASE_FINALIZE) {
+    float luminance = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    color.rgb = mix(vec3(luminance), color.rgb, zwwm.saturation);
+    color.rgb = (color.rgb - vec3(0.5)) * zwwm.contrast + vec3(0.5);
+    color.rgb *= zwwm.brightness;
+    color.rgb += vec3(grain_noise(gl_FragCoord.xy) * zwwm.noise);
+    color.rgb = clamp(color.rgb, 0.0, 1.0);
   }
+  zwwm_out = color;
 }
