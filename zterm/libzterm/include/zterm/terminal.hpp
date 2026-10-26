@@ -77,6 +77,7 @@ class Terminal {
   int rows() const { return rows_; }
   int columns() const { return columns_; }
   std::uint64_t revision() const { return revision_; }
+  std::uint64_t selection_revision() const { return selection_revision_; }
   std::string take_output();
   bool dirty = true;
   std::function<void(const std::string&)> title;
@@ -118,6 +119,7 @@ class Terminal {
   char32_t utf8_ = 0, utf8_min_ = 0;
   unsigned utf8_left_ = 0;
   std::uint64_t revision_ = 1;
+  std::uint64_t selection_revision_ = 1;
   Color default_foreground_{220,225,232}, default_background_{16,19,25};
   std::array<Color, 16> palette_{};
   CursorStyle default_cursor_style_{};

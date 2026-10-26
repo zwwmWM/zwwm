@@ -10,6 +10,7 @@ even though in 2026 everyone seems to be rewriting everything in Rust.
 ## Features
 
 - Atomic DRM/KMS and nested Wayland backends
+- Vulkan 1.3 renderer with zero-copy DMA-BUF clients and implicit sync
 - libinput and XKB keyboard support
 - Touchscreen input and a native virtual-keyboard protocol for on-screen keyboard clients
 - Master-stack tiling, floating windows, fullscreen, and tags
@@ -44,7 +45,7 @@ The flake also exports `packages.<system>.zwwm-no-xwayland` and a NixOS module:
             zterm = {
               enable = true;
               settings = {
-                font = { family = "JetBrainsMono Nerd Font Mono"; size = 14; };
+                font = { mono = "JetBrainsMono Nerd Font Mono"; size = 14; };
                 cursor.shape = "beam";
               };
             };
@@ -196,7 +197,8 @@ Latest repository screenshot:
 ## Components
 
 - `zwwm/`: compositor, backends, input, layout, and Xwayland integration
-- `zwwm-renderer/`: scene planning and OpenGL rendering
+- `zwwm-renderer/`: scene planning and Vulkan rendering
+- `zwwm-vlk/`: Vulkan device, DMA-BUF image import, and nested presentation
 - `zwayland/`: independent Wayland-compatible client/server runtime and transport
 - `zwayland-scanner/`: C++ XML-to-Wayland binding generator
 - `zwwm-protocols/`: standard and project protocol XML plus generated bindings

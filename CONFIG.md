@@ -102,10 +102,24 @@ you want in the final object.
 
 ## Bindings
 
-A binding contains exactly four comma-separated values:
+A binding contains four comma-separated values and an optional fifth one of
+flags:
 
 ```zw
 bind = MODIFIERS, KEY, ACTION, ARGUMENT
+bind = MODIFIERS, KEY, ACTION, ARGUMENT, FLAGS
+```
+
+FLAGS is a comma-joined list. Pick at most one trigger: `press` (default),
+`release`, `tap` (released before `mobile.hold-ms`), `hold` (held for
+`mobile.hold-ms`, fires once) or `repeat` (fires on press, then at the keyboard
+repeat rate). Add `locked` to also fire while the session is locked. A key can
+carry both a `tap` and a `hold` bind:
+
+```zw
+bind = , XF86PowerOff, exec, "wlopm --toggle '*'", "tap,locked"
+bind = , XF86PowerOff, exec, "$HOME/.local/bin/power-menu", "hold,locked"
+bind = , XF86AudioRaiseVolume, exec, "wpctl set-volume @DEFAULT_SINK@ 5%+", "repeat,locked"
 ```
 
 Modifiers are XKB modifier names joined with `+`. Omit the first value or use an
@@ -157,9 +171,10 @@ When `shaders` is omitted, zwwm loads its packaged default shaders, with a
 checkout-asset fallback for development builds. Explicit relative shader
 sources resolve beside the entry-point configuration file.
 
-`shaders` is a registry of named OpenGL ES 3 fragment shaders. Every entry has
-a `role`, a source path, and optional reflected values. At least one `window`,
-`border`, and `background` shader is required. The first shader declared for a
+`shaders` is a registry of named Vulkan GLSL 4.50 fragment shaders, compiled
+to SPIR-V when shaders load (see [Shader ABI](#shader-abi)). Every entry has
+a `role`, a source path, and optional reflected values. At least one `window` and
+`border` shader is required; `background` and `shadow` are optional. The first shader declared for a
 role is its default.
 
 ```zw
@@ -207,7 +222,7 @@ by this explicit transaction (required when only a `.frag` file changes):
 zwwmctl rebuild-switch-shaders
 ```
 
-Every registered shader is compiled and linked in every active GPU context
+Every registered shader is compiled and linked for every active GPU
 before any program is switched. If reading, compiling, or validating any shader
 fails, all contexts keep the previous programs and the command reports the
 diagnostic. Shader files are trusted GPU code; malformed source is recoverable,
@@ -215,16 +230,25 @@ but a GPU-hanging shader cannot be sandboxed by the compositor.
 
 ### Shader Values
 
-Each value named `NAME` is uploaded to `zwwm_config_NAME`. Supported mappings
-are:
+Values are written once, when shaders load, into the shader's config block:
+a uniform block at `layout(set = 1, binding = 0, std140)`. A value named `NAME`
+fills the block member `NAME`:
 
-| Configuration value | GLSL uniform |
+| Configuration value | Block member |
 |---|---|
 | Boolean | `bool` |
 | Integer | `int`, `uint`, or `float` |
 | `#RRGGBB` or `#RRGGBBAA` | `vec4` with normalized components |
 | Two to four integers | `ivec2..4` or `vec2..4` |
-| One to twenty colors | `vec4 NAME[20]`; `int NAME_count` receives the active count |
+| One to twenty colors | `vec4 NAME[N]`; an `int NAME_count` member receives the active count |
+
+```glsl
+layout(set = 1, binding = 0, std140) uniform Config {
+  int width;
+  vec4 gradient_colors[20];
+  int gradient_colors_count;
+} config;
+```
 
 Uppercase string variables may provide numeric shader values. For example,
 `RADIUS = "20"` and `radius = $RADIUS` produce an integer value.
@@ -239,60 +263,98 @@ Some names also configure the compositor pipeline:
 | `window` | `blur_passes` | Blur pass count, clamped to `1..8`. |
 | `window` | `blur_brightness`, `blur_contrast`, `blur_saturation` | Percentage controls, clamped to `0..200`. |
 | `window` | `blur_noise` | Noise percentage, clamped to `0..100`. |
+| `shadow` | `size` | Shadow reach in pixels; the quad extends this far around the window. |
+| `shadow` | `offset_x`, `offset_y` | Shadow offset in pixels. |
 
-All non-pipeline values must have a compatible active uniform in the shader;
-otherwise the transactional rebuild fails and keeps the previous programs.
-Backdrop blur is visible through transparent shader/client pixels.
+When a shader uses its config block, every non-pipeline value must match a
+member of a compatible type; otherwise the transactional rebuild fails and keeps
+the previous programs. A config block the shader never reads is removed by the
+compiler, and its values are then ignored. Backdrop blur is visible through
+transparent shader/client pixels.
 
-Use renderer-provided `zwwm_corner_radius`, `zwwm_border_width`, and
-`zwwm_clip_radius` for final geometry. They already include animation and
+The optional `shadow` role draws one quad under every non-fullscreen toplevel
+(outside the overview), grown by `size` and shifted by the offsets, all scaled
+with animations and canvas zoom. In shadow shaders `zwwm.toplevel_rect` is the
+window including its border, `zwwm.corner_radius` its outer radius, and
+`zwwm.border_width` the scaled `size`. Without a shadow entry no shadows are
+drawn; the packaged `shadow.frag` approximates a Gaussian-blurred rounded
+rectangle and leaves the window's own area untouched.
+Shadows of tiled windows are drawn beneath every tiled window, so they only
+fall on what is behind the tiling layer; floating windows cast theirs onto the
+windows below.
+
+Borders are drawn over their window and grow outward from the window's edge
+by a whole number of pixels. In border shaders `zwwm.texture_rect` and
+`zwwm.texture_corner_radius` are that edge; computing the ring's inner edge
+from them with the same coverage function as the window shader makes the two
+antialiasing ramps complementary, so the ring stays exactly `width` wide. A
+bordered window's `clip_rect` reaches one pixel under its ring so that edge
+never shows what is behind the window.
+
+Use renderer-provided `zwwm.corner_radius`, `zwwm.border_width`, and
+`zwwm.clip_radius` for final geometry. They already include animation and
 endless-canvas zoom scaling; using fixed config pixels directly makes rounding
 change proportion at different zoom levels.
 
 ### Shader ABI
 
-Window and border shaders use the compositor's `surface.vert` vertex stage and
-may declare any subset of this ABI:
+Shaders are Vulkan GLSL and start by including the compositor ABI:
 
 ```glsl
-in vec2 texture_coordinates;       // client texture UV for this draw
-in vec2 local_pixel_coordinates;   // position within zwwm_draw_rect
-in vec2 target_pixel_coordinates;  // output position, top-left origin
-flat in vec4 source_uv_value;
-flat in int texture_transform_value; // 0 normal, 1 90deg, 2 180deg, 3 270deg
+#version 450
+#include "zwwm.glsl"
 
-uniform sampler2D zwwm_window_texture;
-uniform sampler2D zwwm_backdrop_texture;         // sharp scene below this toplevel
-uniform sampler2D zwwm_blurred_backdrop_texture; // configured prepared blur, or sharp
-uniform vec2 zwwm_output_size;
-uniform vec4 zwwm_toplevel_rect; // x, y, width, height
-uniform vec4 zwwm_draw_rect;
-uniform vec4 zwwm_texture_rect;
-uniform vec4 zwwm_clip_rect;
-uniform vec4 zwwm_color;
-uniform float zwwm_opacity;
-uniform float zwwm_corner_radius;
-uniform float zwwm_border_width;
-uniform float zwwm_clip_radius;
-uniform float zwwm_time; // monotonic seconds, wrapping after 1000 seconds
-uniform int zwwm_state;  // bit 0 focused, bit 1 fullscreen, bit 2 popup
-uniform bool zwwm_has_texture;
+void main() {
+  zwwm_out = zwwm_window(zwwm_texture_rect_uv()) * zwwm.opacity;
+}
 ```
 
-Backdrop samplers use framebuffer coordinates. Sample them with
-`gl_FragCoord.xy / zwwm_output_size`. `zwwm_toplevel_rect` gives every draw in
-a managed surface tree the same root coordinate system, while
-`zwwm_draw_rect` identifies the current client surface or border. The default
+`zwwm.glsl` is built into the compositor; a reference copy is installed beside
+the default shaders and copied into new user shader directories. It provides:
+
+- `zwwm`: the per-draw `ZwwmDraw` uniform block (set 0, binding 0) with
+  `draw_rect`, `toplevel_rect`, `texture_rect`, `clip_rect` (x, y, width,
+  height in output pixels), `source_uv`, `color`, `opacity`, `corner_radius`,
+  `border_width`, `clip_radius`, `texture_corner_radius`, `output_size`,
+  `time` (monotonic seconds, wrapping after 1000), `state`
+  (`ZWWM_STATE_FOCUSED`, `ZWWM_STATE_FULLSCREEN`, `ZWWM_STATE_POPUP`),
+  `flags` (`ZWWM_HAS_TEXTURE`, ...), and `texture_transform`.
+- Inputs `zwwm_uv` (client texture coordinates), `zwwm_local` (pixels within
+  `zwwm.draw_rect`), `zwwm_position` (output pixels), and the premultiplied
+  output `zwwm_out`.
+- Texture helpers `zwwm_window(uv)`, `zwwm_backdrop(uv)` (sharp scene below
+  this toplevel), `zwwm_blurred_backdrop(uv)` (configured blur, or sharp),
+  `zwwm_background(uv)` and `zwwm_background_size()` for the wallpaper.
+- `zwwm_screen_uv()`, `zwwm_texture_rect_uv()`, `zwwm_transform()`,
+  `zwwm_rounded_rect_distance()`, and `zwwm_coverage()`.
+
+Coordinates are Vulkan-native: `gl_FragCoord` and every pixel rectangle have a
+top-left origin, and screen-space textures are stored top-down, so backdrops are
+sampled with `zwwm_screen_uv()` directly. `zwwm.toplevel_rect` gives every draw
+in a managed surface tree the same root coordinate system, while
+`zwwm.draw_rect` identifies the current client surface or border. The default
 window shader demonstrates clipping and correct sampling of undersized client
 buffers without stretching.
+
+Descriptors are limited to the ABI and the optional config block; push
+constants, storage buffers, other bindings, and filesystem `#include`s are
+rejected when compiling. Shaders written for the former OpenGL ES ABI
+(`#version 300 es`) are rejected with a porting hint: replace loose `uniform`s
+with `zwwm.*` fields and config block members, `fragment_color` with
+`zwwm_out`, and drop any `gl_FragCoord` Y flips.
+
+Set `ZWWM_VULKAN_VALIDATION=1` to run with the Vulkan validation layer, and
+`ZWWM_VULKAN_DEVICE=NAME` to prefer a GPU whose name contains `NAME` in nested
+sessions (direct sessions always render on the GPU driving each DRM card).
 
 The compositor loads its default wallpaper from
 `/etc/xdg/zwwm/background/background.png` (or its packaged data copy) and uses
 it as a center-cropped, full-output background. It is not copied into the user
 configuration directory or resolved relative to `config.zw`. The compositor
 draws it independently of user shaders. An optional background shader can draw
-over it, before scene surfaces and layer-shell wallpaper clients; it receives
-`zwwm_output_size` and `zwwm_time` and may use vertex-stage varyings.
+over it, before scene surfaces and layer-shell wallpaper clients; it covers
+`zwwm.draw_rect` (the output, or a scene card in the overview) and receives
+`zwwm.time`.
 Animating a shader does not itself schedule frames, so continuous
 animation requires another active repaint source such as a configured animated
 effect.
@@ -551,6 +613,30 @@ Refresh rates may contain decimals:
 output = { mode = "1920x1080@179.82" scale-per-mille = 1000 bit-depth = 10 transform = "normal" }
 ```
 
+## Mobile
+
+```zw
+mobile = {
+  windows = true        -- every app fills its output; dialogs are fitted and centred
+  edge-swipe-size = 16  -- logical pixels; 0 disables compositor edge swipes
+  hold-ms = 500         -- long-press threshold for `hold` and `tap` binds
+}
+```
+
+With `windows`, each app takes the whole work area (outside layer-shell
+exclusive zones) and only the most recently focused app on a tag is shown;
+focusing another app raises it. Dialogs (windows with a parent, modal
+xdg-dialogs and fixed-size windows) float, shrink to the work area minus
+`layout.outer-gap` and stay centred, and follow their app. `rule` entries with
+`floating` override this per app-id.
+
+Touches that start within `edge-swipe-size` of an output edge go to the shell
+through `zwwm-edge-swipe-v1` (installed under `share/zwwm/protocols`) instead of
+to clients, as long as a client listens for that edge.
+
+`ZWWM_DRM_DEVICES` restricts the direct backend to a colon-separated list of
+DRM cards, for example `/dev/dri/card1` or a `/dev/dri/by-path/*` link.
+
 ## Environment
 
 `environment` sets variables in the compositor process. Programs launched by
@@ -726,6 +812,7 @@ after changing the requested DRM mode or bit depth.
 
 - Configuration compatibility is not guaranteed yet.
 - Monitor placement is automatic and does not currently support explicit positions.
+- Input-method popup surfaces (candidate windows) are accepted but not drawn yet.
 - Unknown settings produce diagnostics; misspelled fields should not be relied
   upon being ignored.
 

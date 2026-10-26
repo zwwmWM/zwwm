@@ -13,6 +13,7 @@
 #include "zwwm/error_popup.hpp"
 #include "zwwm/plugin.hpp"
 
+struct gbm_bo;
 struct libinput;
 struct libseat;
 struct udev;
@@ -45,6 +46,7 @@ class RuntimeBackend {
   void set_gesture_observer(GestureObserver observer, void* data);
   void set_dmabuf_target(CompositorServer* compositor);
   void set_cursor_shape(const char* xcursor_name);
+  [[nodiscard]] bool set_output_power(OutputId output, bool on);
   [[nodiscard]] bool set_cursor_theme(const std::string& theme, std::uint32_t size,
                                       std::string* error);
   void set_cursor_position(std::int32_t x, std::int32_t y);
@@ -75,12 +77,18 @@ class RuntimeBackend {
   void dispatch_libinput();
   void dispatch_drm(DrmDevice& device);
   void discover_drm_devices();
+  void probe_outputs();
+  bool try_direct_scanout(DrmOutput& card);
+  void release_direct_frame(DrmOutput& card, std::uint32_t framebuffer, std::uint64_t buffer_id);
+  void schedule_output_probe();
   void add_drm_device(const char* path);
   void remove_drm_device(const char* path);
   void suspend_drm_devices();
   void resume_drm_devices();
   void rescan_drm_device(DrmDevice& device);
   bool initialize_atomic_output(DrmOutput& output, const std::vector<std::uint32_t>& reserved_planes);
+  bool create_scanout(DrmOutput& output);
+  std::uint32_t add_framebuffer(DrmDevice& device, gbm_bo* bo);
   bool commit_atomic_output(DrmOutput& output, std::uint32_t framebuffer, bool modeset);
   bool disable_atomic_output(DrmOutput& output);
   void close_drm_output(DrmOutput& output);
@@ -101,6 +109,9 @@ class RuntimeBackend {
   int udev_source_ = -1;
   int libinput_source_ = -1;
   int error_timer_ = -1;
+  int probe_timer_ = -1;
+  std::uint64_t last_capture_ms_ = 0;
+  std::uint32_t probe_attempts_ = 0;
   std::vector<std::unique_ptr<DrmDevice>> devices_;
   std::vector<std::pair<int, int>> restricted_devices_;
   bool active_ = false;

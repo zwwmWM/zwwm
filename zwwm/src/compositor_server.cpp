@@ -12,6 +12,12 @@
 #include <xdg-decoration-zwayland-server.h>
 #include <zwwm-decoration-manager-v1-zwayland-server.h>
 #include <zwwm-virtual-keyboard-v1-zwayland-server.h>
+#include <idle-inhibit-zwayland-server.h>
+#include <text-input-v3-zwayland-server.h>
+#include <input-method-unstable-v2-zwayland-server.h>
+#include <virtual-keyboard-unstable-v1-zwayland-server.h>
+#include <zwwm-edge-swipe-v1-zwayland-server.h>
+#include <wlr-output-power-management-unstable-v1-zwayland-server.h>
 #include <xdg-dialog-zwayland-server.h>
 #include <linux-dmabuf-zwayland-server.h>
 #include <cursor-shape-zwayland-server.h>
@@ -109,12 +115,26 @@ ProtocolGlobals& ProtocolGlobals::operator=(zwayland::server::Display* next) {
     layer_shell_alias = next->add_global(&layer_shell_compat, 4, [data = observer](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (bind_layer_shell)(&client, data, bound_version, id); });
     xwlr_layer_shell = next->add_global(&protocol::xwlr_layer_shell_v1_interface, 1, [data = observer](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (bind_xwlr_layer_shell)(&client, data, bound_version, id); });
     relative_pointer_manager = next->add_global(&protocol::zwp_relative_pointer_manager_v1_interface, 1, [data = observer->seat](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (bind_relative_pointer_manager)(&client, data, bound_version, id); });
+    const auto seat_global = [&](const zwayland::server::Interface* interface, std::uint32_t version, auto bind) {
+      return next->add_global(interface, version, [data = observer->seat, bind](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) {
+        bind(&client, data, bound_version, id);
+      });
+    };
+    idle_inhibit_manager = seat_global(&protocol::zwp_idle_inhibit_manager_v1_interface, 1, bind_idle_inhibit_manager);
+    text_input_manager = seat_global(&protocol::zwp_text_input_manager_v3_interface, 1, bind_text_input_manager);
+    input_method_manager = seat_global(&protocol::zwp_input_method_manager_v2_interface, 1, bind_input_method_manager);
+    virtual_keyboard_v1_manager = seat_global(&protocol::zwp_virtual_keyboard_manager_v1_interface, 1, bind_virtual_keyboard_v1_manager);
+    edge_swipe_manager = seat_global(&protocol::zwwm_edge_swipe_manager_v1_interface, 1, bind_edge_swipe_manager);
+    output_power_manager = next->add_global(&protocol::zwlr_output_power_manager_v1_interface, 1, [data = observer](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { bind_output_power_manager(&client, data, bound_version, id); });
     idle_notifier = next->add_global(&protocol::ext_idle_notifier_v1_interface, 2, [data = observer->seat](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (bind_idle_notifier)(&client, data, bound_version, id); });
     return *this;
 }
 ProtocolGlobals::~ProtocolGlobals() {
     if (display == nullptr) return;
     if (idle_notifier != 0) display->destroy_global(idle_notifier);
+    for (const auto global : {idle_inhibit_manager, text_input_manager, input_method_manager, virtual_keyboard_v1_manager,
+                              edge_swipe_manager, output_power_manager})
+      if (global != 0) display->destroy_global(global);
     if (relative_pointer_manager != 0) display->destroy_global(relative_pointer_manager);
     if (xwlr_layer_shell != 0) display->destroy_global(xwlr_layer_shell);
     if (layer_shell_alias != 0) display->destroy_global(layer_shell_alias);
@@ -307,6 +327,14 @@ OutputId surface_output(const SurfaceState* surface) {
 #endif
   return {};
 }
+void send_preferred_scale(SurfaceState* surface) {
+  auto* fractional = surface == nullptr ? nullptr : surface->fractional_scale;
+  if (fractional == nullptr) return;
+  const auto scale = output_config(surface->observer, surface_output(surface)).fractional_scale_120();
+  if (fractional->sent_scale_120 == scale) return;
+  fractional->sent_scale_120 = scale;
+  protocol::wp_fractional_scale_v1_send_preferred_scale(*fractional->resource, scale);
+}
 void reorder_layer_roots(Observer* observer, OutputId output, std::uint32_t bucket) {
   auto* state = output_state(observer, output);
   if (state == nullptr || bucket >= state->layer_roots.size()) return;
@@ -338,6 +366,7 @@ void send_configure(XdgSurfaceState* x, std::int32_t width, std::int32_t height,
   if (x == nullptr || x->toplevel == nullptr || width < 0 || height < 0 ||
       (!force && x->configured_width == width && x->configured_height == height &&
        x->configured_states == states)) return;
+  send_preferred_scale(x->surface);
   std::vector<std::uint32_t> state_array;
   if ((states & kActivatedState) != 0) append_state(state_array, protocol::XDG_TOPLEVEL_STATE_ACTIVATED);
   if ((states & kFullscreenState) != 0) append_state(state_array, protocol::XDG_TOPLEVEL_STATE_FULLSCREEN);
@@ -374,10 +403,35 @@ bool glob_match(std::string_view pattern, std::string_view value) {
   while (p < pattern.size() && pattern[p] == '*') ++p;
   return p == pattern.size();
 }
+bool endless_canvas(const Observer* observer);
+bool portal_surface(const SurfaceState* surface);
+bool mobile_windows(const Observer* observer) {
+  return observer != nullptr && observer->config != nullptr && observer->config->mobile.windows &&
+         !observer->external_layout && !observer->overview_visible && !endless_canvas(observer);
+}
+// The app on top of an output's active tag; other apps stay hidden under the mobile policy.
+const XdgSurfaceState* mobile_top(const Observer* observer, OutputId output, std::uint8_t tag) {
+  const XdgSurfaceState* top = nullptr;
+  for (const auto* surface : *observer->surfaces) {
+    const auto* x = surface->xdg_surface;
+    if (surface->parent != nullptr || x == nullptr || x->toplevel == nullptr || !x->mapped || x->hidden ||
+        x->floating || x->output != output || x->tag != tag || portal_surface(surface)) continue;
+    if (top == nullptr || surface->root_order > top->surface->root_order) top = x;
+  }
+  return top;
+}
 bool visible_xdg(const Observer* observer, const XdgSurfaceState* x) {
   if (observer == nullptr || x == nullptr || !x->mapped) return false;
   auto* output = output_state(const_cast<Observer*>(observer), x->output);
-  return output != nullptr && !x->hidden && x->tag == output->active_tag;
+  if (output == nullptr || x->hidden || x->tag != output->active_tag) return false;
+  if (!mobile_windows(observer)) return true;
+  const auto* top = mobile_top(observer, x->output, x->tag);
+  if (top == nullptr) return true;
+  if (!x->floating) return x == top;
+  // Dialogs follow the app they belong to.
+  for (const auto* parent = x->transient_parent; parent != nullptr; parent = parent->transient_parent)
+    if (!parent->floating) return parent == top;
+  return true;
 }
 bool focusable_toplevel(const Observer* observer, const SurfaceState* surface,
                         const SurfaceState* excluded = nullptr) {
@@ -686,6 +740,12 @@ std::vector<layout::Placement> root_placements(const Observer* observer, const X
     }
   }
   if (area.width < 0) area = {0, 0, observer->output_width, observer->output_height};
+  if (mobile_windows(observer)) {
+    std::vector<layout::Placement> placements;
+    for (const auto id : roots)
+      placements.push_back({id, {{area.x, area.y}, {static_cast<std::uint32_t>(area.width), static_cast<std::uint32_t>(area.height)}}});
+    return placements;
+  }
   auto* output_state_value = output_state(const_cast<Observer*>(observer), output);
   if (observer->external_layout && output_state_value != nullptr)
     return observer->external_layout(output_state_value->info.id, output_state_value->active_tag,
@@ -1094,6 +1154,12 @@ void configure_layout(Observer* observer, XdgSurfaceState* candidate) {
       }
       bounds = clamp_window(x->floating_bounds, work);
       bounds = constrain_xdg_window(*observer->config, *x, bounds);
+      if (mobile_windows(observer)) {
+        const auto margin = static_cast<std::int32_t>(observer->config->layout.outer_gap);
+        const auto width = std::clamp(bounds.width, 1, std::max(1, work.width - 2 * margin));
+        const auto height = std::clamp(bounds.height, 1, std::max(1, work.height - 2 * margin));
+        bounds = {work.x + (work.width - width) / 2, work.y + (work.height - height) / 2, width, height};
+      }
       bounds = x->floating_bounds = position_window(bounds, work);
       x->last_floating_bounds = bounds;
     }
@@ -1474,6 +1540,7 @@ void notify_surface(SurfaceState* s) {
      if (b->pool != nullptr) view.pixels = static_cast<const std::uint8_t*>(b->pool->mapping) + b->offset;
       view.width = b->width; view.height = b->height; view.stride = b->stride; view.format = b->format;
       view.buffer_generation = s->buffer_generation;
+      view.buffer_id = b->id;
       view.dmabuf = b->dmabuf ? &*b->dmabuf : nullptr;
      const auto& viewport = s->current_viewport;
      const double scale = s->current_buffer_scale;
@@ -2684,6 +2751,16 @@ void set_keyboard_focus(SeatState* seat, SurfaceState* next) {
   selection_focus_changed(seat, old_client, seat->session_lock == nullptr ? new_client : nullptr);
   seat->keyboard_focus = next;
   seat->toplevel_focus = root(next);
+  text_input_focus_changed(seat, next);
+  if (auto* top = root(next); top != nullptr && top->xdg_surface != nullptr && top->xdg_surface->toplevel != nullptr &&
+      !top->xdg_surface->floating && mobile_windows(top->observer) &&
+      mobile_top(top->observer, top->xdg_surface->output, top->xdg_surface->tag) != top->xdg_surface) {
+    raise_root(top);
+    configure_layout(top->observer);
+    for (auto* surface : *top->observer->surfaces)
+      if (surface->parent == nullptr && surface->xdg_surface != nullptr && surface->xdg_surface->output == top->xdg_surface->output)
+        notify_surface_tree(surface);
+  }
 #ifdef ZWWM_XWAYLAND
   focus_xwayland_surface(next);
 #endif
@@ -2848,7 +2925,13 @@ struct XdgPopupKPopupHandler {
   }
 };
 void xdg_destroyed(zwayland::server::Resource* r) { auto* x = r->data<XdgSurfaceState>(); if (x != nullptr) { if (x->popup != nullptr) { popup_done(x->popup); x->popup->xdg = nullptr; } if (x->surface != nullptr) { for (auto* child : std::vector<SurfaceState*>(x->surface->children)) if (child->xdg_surface != nullptr && child->xdg_surface->popup != nullptr) popup_done(child->xdg_surface->popup); x->surface->xdg_surface = nullptr; } if (x->toplevel != nullptr) x->toplevel->userdata.reset(); if (x->decoration != nullptr) x->decoration->userdata.reset(); delete x; } }
-void get_top(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id) { auto* x = r->data<XdgSurfaceState>(); if (x->toplevel != nullptr) { r->post_error(protocol::XDG_SURFACE_ERROR_ALREADY_CONSTRUCTED, "surface already has a role"); return; } x->output = x->surface->observer->active_output; if (auto* output = output_state(x->surface->observer, x->output)) x->tag = output->active_tag; x->toplevel = c->create_resource(&protocol::xdg_toplevel_interface, id, r->version); if (x->toplevel == nullptr) { c->post_no_memory(); return; } x->toplevel->set_data(x); x->toplevel->set_handler(protocol::xdg_toplevel_handler(XdgToplevelKTopHandler{})); x->toplevel->set_destroy_handler([](zwayland::server::Resource& destroyed) { (top_destroyed)(&destroyed); }); if (endless_canvas(x->surface->observer)) send_configure(x, 0, 0, 0, true); else configure_layout(x->surface->observer, x); }
+void get_top(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id) { auto* x = r->data<XdgSurfaceState>(); if (x->toplevel != nullptr) { r->post_error(protocol::XDG_SURFACE_ERROR_ALREADY_CONSTRUCTED, "surface already has a role"); return; } x->output = x->surface->observer->active_output; if (auto* output = output_state(x->surface->observer, x->output)) x->tag = output->active_tag; x->toplevel = c->create_resource(&protocol::xdg_toplevel_interface, id, r->version); if (x->toplevel == nullptr) { c->post_no_memory(); return; } x->toplevel->set_data(x); x->toplevel->set_handler(protocol::xdg_toplevel_handler(XdgToplevelKTopHandler{})); x->toplevel->set_destroy_handler([](zwayland::server::Resource& destroyed) { (top_destroyed)(&destroyed); }); // Deferred to the end of the client's batch so its preferred scale arrives first.
+  r->display->event_loop().add_idle([surface = x->surface, alive = x->surface->alive] {
+    if (!*alive || surface->xdg_surface == nullptr || surface->xdg_surface->toplevel == nullptr) return;
+    auto* xdg = surface->xdg_surface;
+    send_preferred_scale(surface);
+    if (endless_canvas(surface->observer)) send_configure(xdg, 0, 0, 0, true); else configure_layout(surface->observer, xdg);
+  }); }
 void get_popup(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id, zwayland::server::Resource* parent_r, zwayland::server::Resource* positioner_r) { auto* x = r->data<XdgSurfaceState>(); auto* parent = parent_r == nullptr ? nullptr : parent_r->data<XdgSurfaceState>(); auto* q = positioner_r->data<PositionerState>(); if (x->toplevel != nullptr || x->popup != nullptr || (parent != nullptr && parent->surface == nullptr) || q == nullptr || !valid_positioner(*q)) { r->post_error(protocol::XDG_WM_BASE_ERROR_INVALID_POSITIONER, "invalid popup construction"); return; } auto* pr = c->create_resource(&protocol::xdg_popup_interface, id, r->version); auto* p = pr == nullptr ? nullptr : new (std::nothrow) PopupState{.resource = pr, .xdg = x, .parent = parent, .positioner = *q}; if (pr == nullptr || p == nullptr) { if (pr != nullptr) pr->destroy(); c->post_no_memory(); return; } x->popup = p; if (parent != nullptr) { x->surface->parent = parent->surface; parent->surface->children.push_back(x->surface); refresh_tree_stacking(parent->surface); } pr->set_data(p); pr->set_handler(protocol::xdg_popup_handler(XdgPopupKPopupHandler{})); pr->set_destroy_handler([](zwayland::server::Resource& destroyed) { (popup_destroyed)(&destroyed); }); if (parent != nullptr) send_popup_configure(p); }
 struct XdgSurfaceKXdgSurfaceHandler {
   void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
@@ -3023,6 +3106,24 @@ struct CompositorServer::Impl { std::uint32_t compositor = 0, shm = 0, wm = 0, d
  }
  void CompositorServer::set_surface_commit_observer(SurfaceCommitObserver o, void* d) { impl_->observer.callback = o; impl_->observer.data = d; }
 void CompositorServer::set_cursor_shape_observer(CursorShapeObserver o, void* d) { impl_->observer.cursor_callback = o; impl_->observer.cursor_data = d; }
+void CompositorServer::set_output_power_observer(OutputPowerObserver o, void* d) { impl_->observer.output_power_callback = o; impl_->observer.output_power_data = d; }
+bool CompositorServer::hold_buffer(std::uint64_t buffer_id) {
+  auto* buffer = buffer_by_id(buffer_id);
+  if (buffer == nullptr) return false;
+  ++buffer->holds;
+  ++buffer->references;
+  return true;
+}
+void CompositorServer::release_buffer_hold(std::uint64_t buffer_id) {
+  auto* buffer = buffer_by_id(buffer_id);
+  if (buffer == nullptr || buffer->holds == 0) return;
+  if (--buffer->holds == 0 && buffer->release_deferred) {
+    buffer->release_deferred = false;
+    send_buffer_release(buffer);
+  }
+  unref_buffer(buffer);
+}
+bool CompositorServer::output_powered(OutputId output) const { const auto* state = output_state(&impl_->observer, output); return state == nullptr || state->powered; }
 void CompositorServer::set_pointer_position_observer(PointerPositionObserver o, void* d) { impl_->observer.pointer_position_callback = o; impl_->observer.pointer_position_data = d; }
 void CompositorServer::set_toplevel_observer(ToplevelObserver o, void* d) { impl_->observer.toplevel_callback = o; impl_->observer.toplevel_data = d; }
 void CompositorServer::set_presentation_observer(PresentationObserver o, void* d) { impl_->observer.presentation_callback = o; impl_->observer.presentation_data = d; }
@@ -3093,10 +3194,7 @@ bool CompositorServer::set_config(std::shared_ptr<const RuntimeConfig> config) {
       apply_window_rules(surface->xdg_surface, true);
       notify_surface_tree(surface);
     }
-    if (surface->fractional_scale != nullptr)
-      protocol::wp_fractional_scale_v1_send_preferred_scale(
-          *surface->fractional_scale->resource,
-          output_config(&impl_->observer, surface_output(surface)).fractional_scale_120());
+    send_preferred_scale(surface);
   }
   configure_layout(&impl_->observer);
   const auto reconfigure_popups = [&](const auto& self, SurfaceState* parent) -> void {
@@ -3837,6 +3935,45 @@ bool CompositorServer::dispatch_action(const std::string& action, const std::str
   return true;
 }
 void CompositorServer::set_dmabuf_feedback(std::vector<std::pair<std::uint32_t, std::uint64_t>> formats, std::optional<dev_t> main_device) { std::sort(formats.begin(), formats.end()); formats.erase(std::unique(formats.begin(), formats.end()), formats.end()); if (formats.size() > std::numeric_limits<std::uint16_t>::max()) formats.resize(std::numeric_limits<std::uint16_t>::max()); impl_->dmabuf_state = {std::move(formats), main_device}; if (impl_->dmabuf == 0 && !impl_->dmabuf_state.formats.empty()) { const auto version = impl_->dmabuf_state.main_device.has_value() ? 4U : 3U; impl_->dmabuf = impl_->seat_state.display->add_global(&protocol::zwp_linux_dmabuf_v1_interface, version, [data = &impl_->dmabuf_state](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (bind_dmabuf)(&client, data, bound_version, id); }); } }
+namespace detail {
+bool opaque_content(const SurfaceState* surface) {
+  const auto* buffer = surface->current_buffer;
+  if (buffer == nullptr) return false;
+  if (buffer->format == protocol::WL_SHM_FORMAT_XRGB8888 || buffer->format == DRM_FORMAT_XRGB8888) return true;
+  if (surface->current_opaque_region.empty()) return false;
+  const auto* x = surface->xdg_surface;
+  RegionState uncovered{{x != nullptr && x->window_geometry.width > 0 && x->window_geometry.height > 0
+                             ? x->window_geometry : surface_local_bounds(surface)}};
+  for (const auto& rect : surface->current_opaque_region) region_subtract(&uncovered, rect);
+  return uncovered.rects.empty();
+}
+// Hidden apps and wallpaper or home layers covered by an opaque app get no frame callbacks.
+bool frame_hidden(Observer* observer, SurfaceState* scene_root, OutputId assigned) {
+  if (const auto* state = output_state(observer, assigned); state != nullptr && !state->powered) return true;
+  if (observer->overview_visible) return false;
+  if (const auto* x = scene_root->xdg_surface; x != nullptr && x->toplevel != nullptr && x->mapped)
+    return !visible_xdg(observer, x);
+  const auto* layer = scene_root->layer_surface;
+  auto* output = layer == nullptr ? nullptr : output_state(observer, layer->output);
+  if (output == nullptr || !layer->mapped || layer->current.layer > protocol::ZWWM_LAYER_SHELL_V1_LAYER_BOTTOM) return false;
+  std::vector<Rect> covers;
+  for (auto* surface : *observer->surfaces) {
+    const auto* x = surface->xdg_surface;
+    if (surface->parent != nullptr || x == nullptr || x->toplevel == nullptr || x->output != layer->output ||
+        !visible_xdg(observer, x) || !opaque_content(surface)) continue;
+    if (x->fullscreen) covers.push_back(output_work(observer, x->output, true));
+    else if (mobile_windows(observer) && !x->floating) covers.push_back(x->content_bounds);
+  }
+  if (covers.empty()) return false;
+  for (const std::uint32_t bucket : {protocol::ZWWM_LAYER_SHELL_V1_LAYER_TOP, protocol::ZWWM_LAYER_SHELL_V1_LAYER_OVERLAY})
+    for (const auto* panel : output->layer_roots[bucket])
+      if (panel->layer_surface != nullptr && panel->layer_surface->mapped && opaque_content(panel))
+        covers.push_back({panel->x, panel->y, panel->layer_surface->configured_width, panel->layer_surface->configured_height});
+  RegionState uncovered{{Rect{scene_root->x, scene_root->y, layer->configured_width, layer->configured_height}}};
+  for (const auto& cover : covers) region_subtract(&uncovered, cover);
+  return uncovered.rects.empty();
+}
+}  // namespace detail
 void CompositorServer::notify_frame_presented(OutputId output) {
   const auto now = timestamp_ms();
   if (impl_->observer.camera.is_animating() &&
@@ -3866,6 +4003,7 @@ void CompositorServer::notify_frame_presented(OutputId output) {
 #endif
                                OutputId{};
     if ((output && assigned && assigned != output) || (lock != nullptr && scene_root->lock_surface == nullptr)) continue;
+    if (lock == nullptr && frame_hidden(&impl_->observer, scene_root, assigned)) continue;
     while (!surface->frame_callbacks.empty()) {
       auto* callback = surface->frame_callbacks.front();
       protocol::wl_callback_send_done(*callback, now);
@@ -4958,6 +5096,14 @@ void CompositorServer::keyboard_key(std::uint32_t time, std::uint32_t key, std::
   keyboard_key_from_source(0, time, key, state);
 }
 void CompositorServer::touch_down(std::uint32_t time, std::int32_t id, std::int32_t x, std::int32_t y) {
+  if (impl_->observer.outputs != nullptr)
+    for (const auto& output : *impl_->observer.outputs) {
+      const auto& info = output->info;
+      if (!output->powered && x >= info.logical_x && y >= info.logical_y &&
+          x < info.logical_x + static_cast<std::int32_t>(info.logical_width) &&
+          y < info.logical_y + static_cast<std::int32_t>(info.logical_height)) return;
+    }
+  if (edge_swipe_touch_down(&impl_->seat_state, time, id, x, y)) { idle_activity(&impl_->seat_state); return; }
   if (impl_->seat_state.focus_grab != nullptr && !focus_grab_contains(&impl_->seat_state, surface_at_global(&impl_->observer, x, y))) {
     dismiss_focus_grab(&impl_->seat_state, protocol::ZWWM_FOCUS_GRAB_V1_REASON_OUTSIDE);
     return;
@@ -4976,17 +5122,20 @@ void CompositorServer::touch_down(std::uint32_t time, std::int32_t id, std::int3
   if (previous != impl_->active_output) notify_active_tags(&impl_->observer);
 }
 void CompositorServer::touch_motion(std::uint32_t time, std::int32_t id, std::int32_t x, std::int32_t y) {
+  if (edge_swipe_touch_motion(&impl_->seat_state, time, id, x, y)) return;
   emit_policy_input(&impl_->observer, PolicyInput{.kind = PolicyInput::Kind::touch, .time = time,
       .code = static_cast<std::uint32_t>(id), .state = 2, .x = x, .y = y});
   deliver_touch_motion(&impl_->seat_state, time, id, x, y);
 }
 void CompositorServer::touch_up(std::uint32_t time, std::int32_t id) {
+  if (edge_swipe_touch_up(&impl_->seat_state, time, id)) return;
   emit_policy_input(&impl_->observer, PolicyInput{.kind = PolicyInput::Kind::touch, .time = time,
       .code = static_cast<std::uint32_t>(id), .state = 0});
   deliver_touch_up(&impl_->seat_state, time, id);
 }
 void CompositorServer::touch_frame() { deliver_touch_frame(&impl_->seat_state); }
 void CompositorServer::touch_cancel() {
+  edge_swipe_cancel(&impl_->seat_state, timestamp_ms());
   emit_policy_input(&impl_->observer, PolicyInput{.kind = PolicyInput::Kind::touch, .time = timestamp_ms(),
       .code = static_cast<std::uint32_t>(-1), .state = 3});
   cancel_touches(&impl_->seat_state);
@@ -5047,86 +5196,42 @@ void CompositorServer::keyboard_key_from_source(std::uint64_t source, std::uint3
     }
     return;
   }
-  if (state == protocol::WL_KEYBOARD_KEY_STATE_PRESSED && seat.session_lock == nullptr) {
+  if (state == protocol::WL_KEYBOARD_KEY_STATE_PRESSED && !seat.held_keys.contains(key)) {
+    HeldKey held;
+    const Keybinding* pressed = nullptr;
     for (const auto& binding : impl_->config->keybindings) {
-      if (!binding_matches(binding, seat, key)) continue;
+      if ((seat.session_lock != nullptr && !binding.locked) || !binding_matches(binding, seat, key)) continue;
       if (binding.action == KeyAction::external && !impl_->observer.external_policy) continue;
+      auto& slot = binding.trigger == KeyTrigger::tap ? held.tap : binding.trigger == KeyTrigger::hold ? held.hold :
+                   binding.trigger == KeyTrigger::release ? held.release : held.repeat;
+      if (binding.trigger == KeyTrigger::press) { if (pressed == nullptr) pressed = &binding; }
+      else if (!slot) slot = binding;
+    }
+    if (pressed != nullptr || held.tap || held.hold || held.release || held.repeat) {
       seat.consumed_keys.push_back(key);
-      if (binding.action == KeyAction::external) {
-        seat.external_key_bindings[key] = binding.argument;
+      if (pressed != nullptr && pressed->action == KeyAction::external) {
+        seat.external_key_bindings[key] = pressed->argument;
         emit_policy_input(&impl_->observer, PolicyInput{.kind = PolicyInput::Kind::binding, .time = time,
-            .code = key, .state = state, .name = binding.argument});
-        send_modifiers(seat);
-        return;
+            .code = key, .state = state, .name = pressed->argument});
+      } else if (pressed != nullptr) {
+        run_key_binding(*pressed);
       }
-      auto* focused = seat.toplevel_focus;
-      auto* xdg = focused == nullptr ? nullptr : focused->xdg_surface;
-#ifdef ZWWM_XWAYLAND
-      auto* xwayland = focused == nullptr ? nullptr : focused->xwayland_surface;
-#endif
-      if (binding.action == KeyAction::exec) execute_binding(binding);
-      else if (binding.action == KeyAction::killactive && xdg != nullptr && xdg->toplevel != nullptr) protocol::xdg_toplevel_send_close(*xdg->toplevel);
-#ifdef ZWWM_XWAYLAND
-      else if (binding.action == KeyAction::killactive && xwayland != nullptr && xwayland->runtime != nullptr)
-        xwayland->runtime->close_window(xwayland->window);
-#endif
-      else if (binding.action == KeyAction::killsession || binding.action == KeyAction::exit) seat.display->stop();
-      else if (binding.action == KeyAction::togglefloating && xdg != nullptr) set_floating(xdg, !xdg->floating);
-#ifdef ZWWM_XWAYLAND
-      else if (binding.action == KeyAction::togglefloating && xwayland != nullptr) {
-        set_xwayland_floating(xwayland, !xwayland->floating);
-        if (xwayland->runtime != nullptr) xwayland->runtime->publish_state(xwayland);
-        configure_layout(&impl_->observer);
-      }
-#endif
-      else if (binding.action == KeyAction::fullscreen && xdg != nullptr) set_fullscreen(xdg, {}, !xdg->fullscreen);
-#ifdef ZWWM_XWAYLAND
-      else if (binding.action == KeyAction::fullscreen && xwayland != nullptr) {
-        xwayland->fullscreen = !xwayland->fullscreen;
-        if (xwayland->runtime != nullptr) xwayland->runtime->publish_state(xwayland);
-        configure_layout(&impl_->observer);
-      }
-#endif
-      else if ((binding.action == KeyAction::tag || binding.action == KeyAction::movetotag) && !binding.argument.empty()) {
-        const auto tag = static_cast<std::uint8_t>(binding.argument.front() - '0');
-        auto* output = output_state(&impl_->observer, impl_->active_output);
-        if (binding.action == KeyAction::tag && output != nullptr) {
-          switch_active_tag(&impl_->observer, impl_->active_output, tag);
-          send_modifiers(seat);
-          return;
-        }
-        else if (binding.action == KeyAction::movetotag && xdg != nullptr) xdg->tag = tag;
-#ifdef ZWWM_XWAYLAND
-        else if (binding.action == KeyAction::movetotag && xwayland != nullptr) xwayland->tag = tag;
-#endif
-        SurfaceState* fallback = nullptr;
-        for (auto it = impl_->surfaces.rbegin(); it != impl_->surfaces.rend(); ++it) {
-          auto* candidate = (*it)->xdg_surface;
-          if ((*it)->parent == nullptr && candidate != nullptr && candidate->toplevel != nullptr &&
-              candidate->output == impl_->active_output && visible_xdg(&impl_->observer, candidate)) { fallback = *it; break; }
-        }
-        if (binding.action == KeyAction::movetotag && output != nullptr &&
-            ((xdg != nullptr && xdg->tag == output->active_tag)
-#ifdef ZWWM_XWAYLAND
-             || (xwayland != nullptr && xwayland->tag == output->active_tag)
-#endif
-            )) fallback = focused;
-        set_keyboard_focus(&seat, fallback);
-        configure_layout(&impl_->observer);
-        for (auto* surface : impl_->surfaces) if (surface->parent == nullptr &&
-            (surface->xdg_surface != nullptr
-#ifdef ZWWM_XWAYLAND
-             || surface->xwayland_surface != nullptr
-#endif
-            )) notify_surface_tree(surface);
-        if (binding.action == KeyAction::movetotag && xdg != nullptr) notify_toplevel_tags(&impl_->observer, xdg);
-      } else if (binding.action == KeyAction::focus) {
-        (void)dispatch_action("focus", binding.argument, nullptr);
-      } else if (binding.action == KeyAction::movecluster) {
-        (void)dispatch_action("movecluster", binding.argument, nullptr);
+      if (held.repeat) run_key_binding(*held.repeat);
+      if (held.tap || held.hold || held.release || held.repeat) {
+        auto& entry = seat.held_keys[key] = std::move(held);
+        schedule_held_key(key, entry.hold ? impl_->config->mobile.hold_ms : static_cast<std::uint32_t>(seat.repeat_delay));
       }
       send_modifiers(seat);
       return;
+    }
+  }
+  if (state == protocol::WL_KEYBOARD_KEY_STATE_RELEASED) {
+    if (const auto found = seat.held_keys.find(key); found != seat.held_keys.end()) {
+      auto held = std::move(found->second);
+      seat.held_keys.erase(found);
+      if (held.timer >= 0) seat.display->event_loop().remove(held.timer);
+      if (held.tap && !held.held) run_key_binding(*held.tap);
+      if (held.release) run_key_binding(*held.release);
     }
   }
   if (impl_->observer.overview_visible && state == protocol::WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -5144,12 +5249,109 @@ void CompositorServer::keyboard_key_from_source(std::uint64_t source, std::uint3
     send_modifiers(seat);
     return;
   }
+  if (input_method_grab_key(seat, source, time, key, state)) return;
   if (seat.keyboard_focus == nullptr) return;
   const auto serial = seat.display->next_serial();
   auto* client = seat.keyboard_focus->resource->client;
+  use_keyboard_keymap(seat, client, nullptr, seat.keymap);
   for (auto* resource : seat.keyboards) if (resource->client == client) protocol::wl_keyboard_send_key(*resource, serial, time, key, state);
   remember_serial(seat, client, serial);
   send_modifiers(seat);
+}
+// Hold binds fire once after the threshold; repeat binds re-fire at the keyboard repeat rate.
+void CompositorServer::schedule_held_key(std::uint32_t key, std::uint32_t delay) {
+  auto& seat = impl_->seat_state;
+  const auto found = seat.held_keys.find(key);
+  if (found == seat.held_keys.end() || (!found->second.hold && !found->second.repeat)) return;
+  found->second.timer = seat.display->event_loop().add_timer(std::max(1U, delay), [this, key] {
+    auto& seat = impl_->seat_state;
+    const auto held = seat.held_keys.find(key);
+    if (held == seat.held_keys.end()) return;
+    held->second.timer = -1;
+    if (held->second.hold && !held->second.held) {
+      held->second.held = true;
+      run_key_binding(*held->second.hold);
+      return;
+    }
+    if (!held->second.repeat || seat.repeat_rate <= 0) return;
+    const auto binding = *held->second.repeat;
+    run_key_binding(binding);
+    schedule_held_key(key, std::max(1U, 1000U / static_cast<std::uint32_t>(seat.repeat_rate)));
+  });
+}
+void CompositorServer::run_key_binding(const Keybinding& binding) {
+  auto& seat = impl_->seat_state;
+  if (binding.action == KeyAction::external) {
+    emit_policy_input(&impl_->observer, PolicyInput{.kind = PolicyInput::Kind::binding, .time = timestamp_ms(),
+        .code = 0, .state = protocol::WL_KEYBOARD_KEY_STATE_PRESSED, .name = binding.argument});
+    return;
+  }
+  auto* focused = seat.toplevel_focus;
+  auto* xdg = focused == nullptr ? nullptr : focused->xdg_surface;
+#ifdef ZWWM_XWAYLAND
+  auto* xwayland = focused == nullptr ? nullptr : focused->xwayland_surface;
+#endif
+  if (binding.action == KeyAction::exec) execute_binding(binding);
+  else if (binding.action == KeyAction::killactive && xdg != nullptr && xdg->toplevel != nullptr) protocol::xdg_toplevel_send_close(*xdg->toplevel);
+#ifdef ZWWM_XWAYLAND
+  else if (binding.action == KeyAction::killactive && xwayland != nullptr && xwayland->runtime != nullptr)
+    xwayland->runtime->close_window(xwayland->window);
+#endif
+  else if (binding.action == KeyAction::killsession || binding.action == KeyAction::exit) seat.display->stop();
+  else if (binding.action == KeyAction::togglefloating && xdg != nullptr) set_floating(xdg, !xdg->floating);
+#ifdef ZWWM_XWAYLAND
+  else if (binding.action == KeyAction::togglefloating && xwayland != nullptr) {
+    set_xwayland_floating(xwayland, !xwayland->floating);
+    if (xwayland->runtime != nullptr) xwayland->runtime->publish_state(xwayland);
+    configure_layout(&impl_->observer);
+  }
+#endif
+  else if (binding.action == KeyAction::fullscreen && xdg != nullptr) set_fullscreen(xdg, {}, !xdg->fullscreen);
+#ifdef ZWWM_XWAYLAND
+  else if (binding.action == KeyAction::fullscreen && xwayland != nullptr) {
+    xwayland->fullscreen = !xwayland->fullscreen;
+    if (xwayland->runtime != nullptr) xwayland->runtime->publish_state(xwayland);
+    configure_layout(&impl_->observer);
+  }
+#endif
+  else if ((binding.action == KeyAction::tag || binding.action == KeyAction::movetotag) && !binding.argument.empty()) {
+    const auto tag = static_cast<std::uint8_t>(binding.argument.front() - '0');
+    auto* output = output_state(&impl_->observer, impl_->active_output);
+    if (binding.action == KeyAction::tag && output != nullptr) {
+      switch_active_tag(&impl_->observer, impl_->active_output, tag);
+      send_modifiers(seat);
+      return;
+    }
+    else if (binding.action == KeyAction::movetotag && xdg != nullptr) xdg->tag = tag;
+#ifdef ZWWM_XWAYLAND
+    else if (binding.action == KeyAction::movetotag && xwayland != nullptr) xwayland->tag = tag;
+#endif
+    SurfaceState* fallback = nullptr;
+    for (auto it = impl_->surfaces.rbegin(); it != impl_->surfaces.rend(); ++it) {
+      auto* candidate = (*it)->xdg_surface;
+      if ((*it)->parent == nullptr && candidate != nullptr && candidate->toplevel != nullptr &&
+          candidate->output == impl_->active_output && visible_xdg(&impl_->observer, candidate)) { fallback = *it; break; }
+    }
+    if (binding.action == KeyAction::movetotag && output != nullptr &&
+        ((xdg != nullptr && xdg->tag == output->active_tag)
+#ifdef ZWWM_XWAYLAND
+         || (xwayland != nullptr && xwayland->tag == output->active_tag)
+#endif
+        )) fallback = focused;
+    set_keyboard_focus(&seat, fallback);
+    configure_layout(&impl_->observer);
+    for (auto* surface : impl_->surfaces) if (surface->parent == nullptr &&
+        (surface->xdg_surface != nullptr
+#ifdef ZWWM_XWAYLAND
+         || surface->xwayland_surface != nullptr
+#endif
+        )) notify_surface_tree(surface);
+    if (binding.action == KeyAction::movetotag && xdg != nullptr) notify_toplevel_tags(&impl_->observer, xdg);
+  } else if (binding.action == KeyAction::focus) {
+    (void)dispatch_action("focus", binding.argument, nullptr);
+  } else if (binding.action == KeyAction::movecluster) {
+    (void)dispatch_action("movecluster", binding.argument, nullptr);
+  }
 }
 void CompositorServer::keyboard_modifiers(std::uint32_t depressed, std::uint32_t latched, std::uint32_t locked, std::uint32_t group) {
   auto& seat = impl_->seat_state;
@@ -5174,6 +5376,8 @@ void CompositorServer::input_reset(bool preserve_keyboard_focus) {
   reset_virtual_keyboards(&seat);
   release_keyboard_source(0);
   seat.keyboard_sources.clear();
+  for (const auto& [key, held] : seat.held_keys) if (held.timer >= 0) seat.display->event_loop().remove(held.timer);
+  seat.held_keys.clear();
   seat.consumed_keys.clear();
   seat.consumed_buttons.clear();
   seat.external_key_bindings.clear();

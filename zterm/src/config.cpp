@@ -1,5 +1,6 @@
 #include "config.hpp"
 #include "text.hpp"
+#include "theme.hpp"
 
 #include <zwwm/lang/config.hpp>
 #include <algorithm>
@@ -16,6 +17,11 @@
 namespace zterm {
 namespace lang = zwwm::lang;
 namespace {
+
+constexpr std::pair<std::string_view, std::string FontFamilies::*> font_fields[] = {
+  {"family",&FontFamilies::mono},{"mono",&FontFamilies::mono},{"bold",&FontFamilies::bold},
+  {"italic",&FontFamilies::italic},{"bold-italic",&FontFamilies::bold_italic},
+  {"symbols",&FontFamilies::symbols},{"emoji",&FontFamilies::emoji}};
 
 CursorShape cursor_shape(const std::string& name) {
   if (name == "beam" || name == "bar") return CursorShape::Beam;
@@ -43,6 +49,18 @@ class Decoder {
         throw std::runtime_error(std::to_string(assignment.location.line) + ":" + std::to_string(assignment.location.column) + ": " + error.what());
       }
     }
+  }
+
+  std::string selected_theme(const lang::Config& config) const {
+    std::string selected;
+    const bool shared = std::any_of(config.assignments.begin(),config.assignments.end(),[](const auto& item) { return item.key == "zterm"; });
+    for (const auto& assignment : config.assignments) {
+      if (!shared && assignment.key == "theme") selected = string(assignment.value,"theme",true);
+      else if (shared && assignment.key == "zterm") object(assignment.value,"zterm",[&](const auto& key,const auto& value) {
+        if (key == "theme") selected = string(value,"theme",true);
+      });
+    }
+    return selected;
   }
 
  private:
@@ -102,8 +120,10 @@ class Decoder {
   }
 
   void setting(const std::string& name, const lang::Value& value) {
-    if (name == "font") object(value, name, [this](const auto& key, const auto& item) {
-      if (key == "family") options_.font = string(item, "font.family");
+    if (name == "theme") options_.theme = string(value,name,true);
+    else if (name == "font") object(value, name, [this](const auto& key, const auto& item) {
+      const auto field = std::find_if(std::begin(font_fields), std::end(font_fields), [&](const auto& field) { return field.first == key; });
+      if (field != std::end(font_fields)) options_.fonts.*(field->second) = string(item, "font." + key, field->second != &FontFamilies::mono);
       else if (key == "size") options_.size = integer(item, "font.size", 6, 96);
       else if (key == "weight") {
         const auto resolved = resolve(item);
@@ -113,12 +133,14 @@ class Decoder {
     else if (name == "rendering") object(value, name, [this](const auto& key, const auto& item) {
       if (key == "text-rounding-per-mille") options_.text_rounding = integer(item, "rendering." + key, 0, 1000) / 1000.f;
       else if (key == "icon-scale-per-mille") options_.icon_scale = integer(item, "rendering." + key, 500, 3000) / 1000.f;
+      else if (key == "background-opacity-per-mille") options_.background_opacity = integer(item, "rendering." + key, 0, 1000) / 1000.f;
       else throw std::runtime_error("unknown rendering setting: " + key);
     });
     else if (name == "colors") object(value, name, [this](const auto& key, const auto& item) {
       if (key == "foreground") options_.foreground = rgb(color(item, "colors." + key));
       else if (key == "background") options_.background = rgb(color(item, "colors." + key));
       else if (key == "selection") options_.selection = color(item, "colors." + key, true);
+      else if (key == "selection-foreground") options_.selection_foreground = rgb(color(item,"colors."+key));
       else if (key == "palette") {
         const auto resolved = resolve(item); const auto* list = lang::as_array(resolved);
         if (!list || list->values.size() != 16) throw std::runtime_error("colors.palette must contain exactly 16 RGB colors");
@@ -140,11 +162,16 @@ class Decoder {
     else if (name == "window") object(value, name, [this](const auto& key, const auto& item) {
       if (key == "width") options_.width = integer(item, "window.width", 1, 8192);
       else if (key == "height") options_.height = integer(item, "window.height", 1, 8192);
+      else if (key == "padding") options_.padding_x = options_.padding_y = integer(item, "window.padding", 0, 512);
+      else if (key == "padding-x") options_.padding_x = integer(item, "window.padding-x", 0, 512);
+      else if (key == "padding-y") options_.padding_y = integer(item, "window.padding-y", 0, 512);
       else throw std::runtime_error("unknown window setting: " + key);
     });
     else if (name == "cursor") object(value, name, [this](const auto& key, const auto& item) {
       if (key == "shape") options_.cursor.shape = cursor_shape(string(item, "cursor.shape"));
       else if (key == "blink") options_.cursor.blink = boolean(item, "cursor.blink");
+      else if (key == "color") options_.cursor_color = rgb(color(item,"cursor.color"));
+      else if (key == "text-color") options_.cursor_text = rgb(color(item,"cursor.text-color"));
       else throw std::runtime_error("unknown cursor setting: " + key);
     });
     else if (name == "input") object(value, name, [this](const auto& key, const auto& item) {
@@ -166,6 +193,23 @@ class Decoder {
     } else throw std::runtime_error("unknown zterm setting: " + name);
   }
 };
+
+void apply_theme(Options& options, const std::string& name, const std::filesystem::path& relative,
+                 std::vector<std::filesystem::path>& stack) {
+  auto document = read_theme(name,relative,options.config_sources);
+  const auto path = std::filesystem::weakly_canonical(document.path);
+  if (stack.size() >= 16 || std::find(stack.begin(),stack.end(),path) != stack.end())
+    throw ConfigError("theme inheritance cycle at "+path.string(),options.config_sources);
+  stack.push_back(path);
+  try {
+    Decoder decoder(options,document.config);
+    const auto parent = decoder.selected_theme(document.config);
+    if (!parent.empty()) apply_theme(options,parent,document.path.parent_path(),stack);
+    decoder.apply(document.config);
+  } catch (const ConfigError&) { throw; }
+  catch (const std::exception& error) { throw ConfigError(document.path.string()+":"+error.what(),options.config_sources); }
+  stack.pop_back(); options.theme = name;
+}
 
 std::string default_config() {
   if (const auto* path = std::getenv("ZTERM_CONFIG"); path && *path) return path;
@@ -203,9 +247,16 @@ Options load_options(int argc, char** argv) {
     overrides.emplace_back([member, value = std::move(value)](Options& target) { target.*member = value; });
   };
   std::optional<std::string> config;
+  std::optional<std::string> cli_theme;
   bool no_config = false;
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
+    std::string font_flag;
+    std::string FontFamilies::* font_field = nullptr;
+    for (const auto& [name, member] : font_fields) {
+      const auto flag = name == "family" ? std::string("--font") : "--font-" + std::string(name);
+      if (argument == flag || argument.starts_with(flag + "=")) { font_flag = flag; font_field = member; break; }
+    }
     const auto value = [&](const std::string& name) -> std::string {
       if (argument != name) return argument.substr(name.size() + 1);
       if (i + 1 == argc) throw std::runtime_error(name + " requires a value");
@@ -219,9 +270,27 @@ Options load_options(int argc, char** argv) {
       return result;
     };
     if (argument == "--help") { options.action = Options::Action::Help; return options; }
+    if (argument == "--list-themes") { options.action = Options::Action::ListThemes; return options; }
     if (argument == "--config" || argument.starts_with("--config=")) { config = value("--config"); no_config = false; if (config->empty()) throw std::runtime_error("--config requires a path"); }
     else if (argument == "--no-config") { no_config = true; config.reset(); }
     else if (argument == "--standalone") set(&Options::standalone, true);
+    else if (argument == "--theme" || argument.starts_with("--theme=")) {
+      std::string name = argument == "--theme" ? "" : argument.substr(8);
+      while (i+1 < argc && argv[i+1][0] != '-') { if (!name.empty()) name += ' '; name += argv[++i]; }
+      if (name.empty()) throw std::runtime_error("--theme requires a name or path");
+      cli_theme = std::move(name);
+    }
+    else if (argument == "--padding" || argument.starts_with("--padding=") ||
+             argument == "--padding-x" || argument.starts_with("--padding-x=") ||
+             argument == "--padding-y" || argument.starts_with("--padding-y=")) {
+      const auto name = argument.substr(0,argument.find('='));
+      const auto text = value(name); unsigned padding = 0;
+      const auto [end,error] = std::from_chars(text.data(),text.data()+text.size(),padding);
+      if (error != std::errc{} || end != text.data()+text.size() || padding > 512)
+        throw std::runtime_error("padding must be an integer in 0..512");
+      if (name != "--padding-y") set(&Options::padding_x,padding);
+      if (name != "--padding-x") set(&Options::padding_y,padding);
+    }
     else if (argument == "--cursor" || argument.starts_with("--cursor=")) {
       const auto shape = cursor_shape(value("--cursor"));
       overrides.emplace_back([shape](Options& target) { target.cursor.shape = shape; });
@@ -229,11 +298,11 @@ Options load_options(int argc, char** argv) {
       const bool blink = argument == "--cursor-blink";
       overrides.emplace_back([blink](Options& target) { target.cursor.blink = blink; });
     }
-    else if (argument == "--font" || argument.starts_with("--font=")) {
-      std::string family = argument == "--font" ? "" : argument.substr(7);
+    else if (font_field) {
+      std::string family = argument == font_flag ? "" : argument.substr(font_flag.size() + 1);
       while (i + 1 < argc && argv[i + 1][0] != '-') { if (!family.empty()) family += ' '; family += argv[++i]; }
       if (family.empty()) throw std::runtime_error("--font requires a font family");
-      set(&Options::font, std::move(family));
+      overrides.emplace_back([font_field, family = std::move(family)](Options& target) { target.fonts.*font_field = family; });
     } else if (argument == "--font-size" || argument.starts_with("--font-size=")) {
       const auto text = value("--font-size"); unsigned size = 0;
       const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), size);
@@ -242,6 +311,7 @@ Options load_options(int argc, char** argv) {
     } else if (argument == "--font-weight" || argument.starts_with("--font-weight=")) set(&Options::weight, Text::parse_weight(value("--font-weight")));
     else if (argument == "--text-rounding" || argument.starts_with("--text-rounding=")) set(&Options::text_rounding, number(value("--text-rounding"), 0, 1, "text rounding"));
     else if (argument == "--icon-scale" || argument.starts_with("--icon-scale=")) set(&Options::icon_scale, number(value("--icon-scale"), 0.5f, 3, "icon scale"));
+    else if (argument == "--background-opacity" || argument.starts_with("--background-opacity=")) set(&Options::background_opacity, number(value("--background-opacity"), 0, 1, "background opacity"));
     else if (argument == "--shell" || argument.starts_with("--shell=")) {
       auto shell = value("--shell"); if (shell.empty()) throw std::runtime_error("--shell requires a program");
       set(&Options::shell, std::vector<std::string>{std::move(shell)});
@@ -254,18 +324,33 @@ Options load_options(int argc, char** argv) {
   }
   if (!no_config) {
     options.config_path = config.value_or(default_config());
+    options.config_sources.push_back(options.config_path);
     const auto* environment = std::getenv("ZTERM_CONFIG");
     if (config || (environment && *environment) || std::filesystem::exists(options.config_path)) {
       const auto parsed = lang::parse_config_file(options.config_path);
+      options.config_sources.insert(options.config_sources.end(),parsed.source_paths.begin(),parsed.source_paths.end());
       if (!parsed.ok()) {
         std::string errors;
         for (const auto& error : parsed.diagnostics) if (error.level == lang::DiagnosticLevel::error)
           errors += options.config_path + ":" + std::to_string(error.location.line) + ":" + std::to_string(error.location.column) + ": " + error.message + "\n";
-        throw std::runtime_error(errors);
+        throw ConfigError(errors,options.config_sources);
       }
-      try { Decoder(options, parsed.config).apply(parsed.config); }
-      catch (const std::exception& error) { throw std::runtime_error(options.config_path + ":" + error.what()); }
+      try {
+        Decoder decoder(options,parsed.config);
+        const auto theme = decoder.selected_theme(parsed.config);
+        if (!theme.empty()) {
+          std::vector<std::filesystem::path> stack;
+          apply_theme(options,theme,std::filesystem::path(options.config_path).parent_path(),stack);
+        }
+        decoder.apply(parsed.config);
+      }
+      catch (const ConfigError&) { throw; }
+      catch (const std::exception& error) { throw ConfigError(options.config_path + ":" + error.what(),options.config_sources); }
     }
+  }
+  if (cli_theme) {
+    std::vector<std::filesystem::path> stack;
+    apply_theme(options,*cli_theme,std::filesystem::path(options.config_path).parent_path(),stack);
   }
   for (const auto& override : overrides) override(options);
   return options;
@@ -274,9 +359,14 @@ Options load_options(int argc, char** argv) {
 void print_help() {
   std::puts("zterm daemon\n"
             "zterm [--config FILE] [--no-config] [--standalone]\n"
-            "      [--font FAMILY] [--font-size PIXELS] [--font-weight WEIGHT]\n"
+            "      [--theme NAME|FILE] [--list-themes]\n"
+             "      [--font FAMILY] [--font-size PIXELS] [--font-weight WEIGHT]\n"
+             "      [--font-mono FAMILY] [--font-bold FAMILY] [--font-italic FAMILY]\n"
+             "      [--font-bold-italic FAMILY] [--font-symbols FAMILY] [--font-emoji FAMILY]\n"
             "      [--text-rounding 0..1] [--icon-scale 0.5..3] [--cursor beam|line|block]\n"
-            "      [--cursor-blink|--no-cursor-blink] [--shell PROGRAM] [-e COMMAND [ARGS...]]\n"
+             "      [--background-opacity 0..1] [--cursor-blink|--no-cursor-blink]\n"
+             "      [--padding PIXELS] [--padding-x PIXELS] [--padding-y PIXELS]\n"
+             "      [--shell PROGRAM] [-e COMMAND [ARGS...]]\n"
             "Config: $ZTERM_CONFIG or $XDG_CONFIG_HOME/zterm/config.zw; command-line flags override it.\n"
             "Ctrl+Shift+R: reload; Ctrl+Shift+C/V: copy/paste; drag or double/triple-click: select.\n"
             "Shift-drag: select in mouse-aware applications. Wheel/trackpad: scrollback or application input.\n"

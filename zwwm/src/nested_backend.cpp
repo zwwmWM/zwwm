@@ -1,19 +1,16 @@
 #include "zwwm/nested_backend.hpp"
 #include "backend/scene.hpp"
 #include "zwwm/layout/master_stack.hpp"
-#include "zwwm/renderer/egl_dmabuf_importer.hpp"
-#include "zwwm/renderer/opengl.hpp"
+#include "zwwm/renderer/vulkan.hpp"
 #include "zwwm/runtime_config.hpp"
-#include "zwwm-egl/window.hpp"
+#include "zwwm-vlk/device.hpp"
+#include "zwwm-vlk/window.hpp"
 
 #include <wayland-zwayland-client.h>
 #include <xdg-shell-zwayland-client.h>
 #include <zwayland/client/core.hpp>
 #include <zwayland/server/event_loop.hpp>
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <epoxy/gl.h>
 #include <X11/Xcursor/Xcursor.h>
 
 #include <algorithm>
@@ -94,8 +91,8 @@ struct NestedBackend::Window {
   std::string window_shader;
   std::string border_shader;
   std::vector<std::uint32_t> pixels;
-  GLuint texture = 0;
-  GLuint upload_texture = 0;
+  renderer::TextureRef texture;
+  renderer::TextureRef upload_texture;
   std::uint32_t overview_tag = 0;
   std::uint64_t buffer_generation = 0;
   bool dmabuf_texture = false;
@@ -103,8 +100,7 @@ struct NestedBackend::Window {
 
 class renderer_holder {
  public:
-  renderer::OpenGlRenderer renderer;
-  std::unique_ptr<renderer::EglDmabufImporter> importer;
+  renderer::VulkanRenderer renderer;
 };
 
 struct NestedBackend::RegistryObserver {
@@ -188,6 +184,7 @@ void transform_frame(renderer::FramePlan& frame, const OutputConfig& output, ren
   for (auto& draw : frame.draws) {
     backend_scene::transform_geometry(draw, output, physical);
     draw.bounds = output.physical_bounds(draw.bounds, physical);
+    if (!draw.toplevel_bounds.empty()) draw.toplevel_bounds = output.physical_bounds(draw.toplevel_bounds, physical);
     if (draw.clip_bounds) draw.clip_bounds = output.physical_bounds(*draw.clip_bounds, physical);
     if (draw.texture_bounds) draw.texture_bounds = output.physical_bounds(*draw.texture_bounds, physical);
     draw.corner_radius *= scale;
@@ -199,34 +196,6 @@ void transform_frame(renderer::FramePlan& frame, const OutputConfig& output, ren
     draw.glass_dispersion *= scale;
     draw.texture_transform = static_cast<std::uint32_t>(output.transform);
   }
-}
-
-GLuint snapshot_texture(GLuint source, int width, int height) {
-  if (source == 0 || width <= 0 || height <= 0) return 0;
-  GLint previous_texture = 0, previous_framebuffer = 0;
-  glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
-  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_framebuffer);
-  GLuint copy = 0, framebuffer = 0;
-  glGenTextures(1, &copy);
-  glBindTexture(GL_TEXTURE_2D, copy);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-  glGenFramebuffers(1, &framebuffer);
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
-  glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source, 0);
-  if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glBindTexture(GL_TEXTURE_2D, copy);
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
-  } else {
-    glDeleteTextures(1, &copy);
-    copy = 0;
-  }
-  glDeleteFramebuffers(1, &framebuffer);
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_framebuffer));
-  glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous_texture));
-  return copy;
 }
 
 bool inside_rounded_rect(int x, int y, int left, int top, int width, int height, int radius) {
@@ -396,8 +365,8 @@ bool NestedBackend::rebuild_switch_shaders(std::string* error) {
   return true;
 }
 bool NestedBackend::prepare_config_shaders(const RuntimeConfig& config, std::string* error) {
-  if (renderer_ == nullptr || egl_window_ == nullptr || !egl_window_->make_current()) {
-    if (error != nullptr) *error = "nested OpenGL renderer is unavailable";
+  if (renderer_ == nullptr || vk_window_ == nullptr) {
+    if (error != nullptr) *error = "nested Vulkan renderer is unavailable";
     return false;
   }
   renderer::ShaderSources sources;
@@ -409,14 +378,13 @@ bool NestedBackend::prepare_config_shaders(const RuntimeConfig& config, std::str
   return true;
 }
 void NestedBackend::commit_config_shaders() {
-  if (renderer_ == nullptr || egl_window_ == nullptr || !egl_window_->make_current()) return;
+  if (renderer_ == nullptr || vk_window_ == nullptr) return;
   renderer_->renderer.commit_shaders();
   repaint_pending_ = true;
   repaint_gpu();
 }
 void NestedBackend::discard_config_shaders() {
-  if (renderer_ != nullptr && egl_window_ != nullptr && egl_window_->make_current())
-    renderer_->renderer.discard_shaders();
+  if (renderer_ != nullptr) renderer_->renderer.discard_shaders();
 }
 void NestedBackend::show_error(std::string message) {
   auto popup = render_error_popup(message);
@@ -544,10 +512,10 @@ bool NestedBackend::capture_toplevel(std::uint64_t id, OutputCapture& capture, b
   capture.width = static_cast<std::uint32_t>(root->width);
   capture.height = static_cast<std::uint32_t>(root->height);
   bool captured = false;
-  if (renderer_ != nullptr && root->texture != 0) {
+  if (renderer_ != nullptr && root->texture != nullptr) {
     renderer::FramePlan frame;
     for (const auto& window : windows_) {
-      if (window.root_id != id || window.removed || window.popup || window.texture == 0 ||
+      if (window.root_id != id || window.removed || window.popup || window.texture == nullptr ||
           window.width <= 0 || window.height <= 0) continue;
       renderer::DrawCall draw{window.id,
           {{window.x - root->x, window.y - root->y},
@@ -601,11 +569,11 @@ bool NestedBackend::capture_toplevel(std::uint64_t id, OutputCapture& capture, b
 }
 
 void NestedBackend::publish_dmabuf_importer() {
-  if (dmabuf_target_ == nullptr || renderer_ == nullptr || renderer_->importer == nullptr ||
-      !renderer_->importer->supported()) {
-    return;
-  }
-  dmabuf_target_->set_dmabuf_feedback(renderer_->importer->supported_formats(), std::nullopt);
+  if (dmabuf_target_ == nullptr || renderer_ == nullptr) return;
+  auto formats = renderer_->renderer.dmabuf_formats();
+  if (formats.empty()) return;
+  // Feedback v4 lets clients allocate on the GPU that composites them.
+  dmabuf_target_->set_dmabuf_feedback(std::move(formats), renderer_->renderer.device()->render_node());
 }
 
 void NestedBackend::present(const ShmBufferView& buffer) {
@@ -666,7 +634,7 @@ void NestedBackend::present(const ShmBufferView& buffer) {
     if (!is_new && it->removed) return;
     if (buffer.toplevel && buffer.assigned_content_width > 0 && buffer.assigned_content_height > 0) {
       Window window = is_new ? Window{} : *it;
-      const bool retain_content = !is_new && (window.texture != 0 || !window.pixels.empty());
+      const bool retain_content = !is_new && (window.texture != nullptr || !window.pixels.empty());
       const bool closing = retain_content && buffer.unmapped;
       window.id = buffer.surface_id;
       window.root_id = buffer.root_surface_id;
@@ -713,20 +681,17 @@ void NestedBackend::present(const ShmBufferView& buffer) {
        if (!retain_content) window.content_ready = buffer.content_ready;
        window.removed = closing;
        if (!retain_content) {
-         window.texture = 0;
+         window.texture.reset();
          window.pixels.clear();
       }
       window.damaged = true;
       if (is_new) windows_.push_back(std::move(window)); else *it = std::move(window);
       if (closing) {
         for (auto& item : windows_) if (item.root_id == buffer.surface_id) {
-          if (renderer_ != nullptr && item.texture != 0 && item.upload_texture == 0) {
-            const GLuint imported = item.texture;
-            item.upload_texture = snapshot_texture(imported, item.buffer_width, item.buffer_height);
-            if (item.upload_texture != 0) {
+          if (renderer_ != nullptr && item.texture != nullptr && item.upload_texture == nullptr) {
+            item.upload_texture = renderer_->renderer.snapshot(item.texture);
+            if (item.upload_texture != nullptr) {
               item.texture = item.upload_texture;
-              if (item.dmabuf_texture && renderer_->importer != nullptr)
-                (void)renderer_->importer->release(imported);
               item.dmabuf_texture = false;
             }
           }
@@ -748,24 +713,16 @@ void NestedBackend::present(const ShmBufferView& buffer) {
         for (auto& window : windows_) if (window.root_id == it->root_id) window.damaged = true;
       } else if (it->toplevel && config_->animations.enabled && config_->animations.close) {
         for (auto& window : windows_) if (window.root_id == it->id) {
-          if (renderer_ != nullptr && window.texture != 0 && window.upload_texture == 0) {
-            const GLuint imported = window.texture;
-            window.upload_texture = snapshot_texture(imported, window.buffer_width, window.buffer_height);
-            if (window.upload_texture != 0) {
+          if (renderer_ != nullptr && window.texture != nullptr && window.upload_texture == nullptr) {
+            window.upload_texture = renderer_->renderer.snapshot(window.texture);
+            if (window.upload_texture != nullptr) {
               window.texture = window.upload_texture;
-              if (window.dmabuf_texture && renderer_->importer != nullptr)
-                (void)renderer_->importer->release(imported);
               window.dmabuf_texture = false;
             }
           }
           window.removed = true;
         }
       } else {
-        if (renderer_ != nullptr) {
-          if (it->dmabuf_texture && it->texture != 0 && renderer_->importer != nullptr)
-            (void)renderer_->importer->release(it->texture);
-          if (it->upload_texture != 0) glDeleteTextures(1, &it->upload_texture);
-        }
         windows_.erase(it);
       }
       for (auto& window : windows_) window.damaged = true;
@@ -777,11 +734,8 @@ void NestedBackend::present(const ShmBufferView& buffer) {
     return;
   }
   const bool shm = buffer.pixels != nullptr;
-  const bool supported_format = shm
-                                    ? buffer.format == protocol::WL_SHM_FORMAT_ARGB8888 ||
-                                          buffer.format == protocol::WL_SHM_FORMAT_XRGB8888
-                                    : buffer.format == DRM_FORMAT_ARGB8888 ||
-                                          buffer.format == DRM_FORMAT_XRGB8888;
+  const bool supported_format = !shm || buffer.format == protocol::WL_SHM_FORMAT_ARGB8888 ||
+                                buffer.format == protocol::WL_SHM_FORMAT_XRGB8888;
   if (buffer.width <= 0 || buffer.height <= 0 || !supported_format ||
       (shm && (buffer.width > std::numeric_limits<std::int32_t>::max() / 4 ||
                buffer.stride < buffer.width * 4))) {
@@ -789,7 +743,7 @@ void NestedBackend::present(const ShmBufferView& buffer) {
   }
   Window window = is_new ? Window{} : std::move(*it);
   const bool resized = window.buffer_width != buffer.width || window.buffer_height != buffer.height;
-  const bool allocate_texture = resized || window.upload_texture == 0;
+  const bool allocate_texture = resized || window.upload_texture == nullptr;
   const bool full_upload = resized || window.pixels.empty() || window.buffer_generation != buffer.buffer_generation ||
       window.dmabuf_texture || (renderer_ != nullptr && allocate_texture);
   const bool moved = !is_new && (window.x != buffer.x || window.y != buffer.y ||
@@ -866,37 +820,30 @@ void NestedBackend::present(const ShmBufferView& buffer) {
   }
   if (buffer.pixels != nullptr) window.buffer_generation = buffer.buffer_generation;
   if (renderer_ != nullptr && buffer.pixels != nullptr) {
-    if (window.dmabuf_texture && window.texture != 0 && renderer_->importer != nullptr)
-      (void)renderer_->importer->release(window.texture);
     window.dmabuf_texture = false;
     window.buffer_generation = buffer.buffer_generation;
-    if (window.upload_texture == 0) glGenTextures(1, &window.upload_texture);
-    window.texture = window.upload_texture;
-    glBindTexture(GL_TEXTURE_2D, window.upload_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    if (allocate_texture) {
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, buffer.width, buffer.height, 0, GL_BGRA, GL_UNSIGNED_BYTE, window.pixels.data());
-    } else if (right > left && bottom > top) {
-      glPixelStorei(GL_UNPACK_ROW_LENGTH, buffer.width);
-      glTexSubImage2D(GL_TEXTURE_2D, 0, left, top, right - left, bottom - top, GL_BGRA, GL_UNSIGNED_BYTE,
-                      window.pixels.data() + static_cast<std::size_t>(top) * buffer.width + left);
-      glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    if (allocate_texture || (right > left && bottom > top)) {
+      const std::optional<renderer::Rect> damage = allocate_texture ? std::nullopt : std::optional<renderer::Rect>{
+          {{left, top}, {static_cast<std::uint32_t>(right - left), static_cast<std::uint32_t>(bottom - top)}}};
+      window.upload_texture = renderer_->renderer.upload(window.upload_texture, window.pixels.data(),
+                                                         static_cast<std::uint32_t>(buffer.width),
+                                                         static_cast<std::uint32_t>(buffer.height),
+                                                         static_cast<std::uint32_t>(buffer.width), damage);
+      if (window.upload_texture == nullptr)
+        std::fprintf(stderr, "zwwm: nested Vulkan: shm upload failed for surface %llu: %s\n",
+                     static_cast<unsigned long long>(buffer.surface_id), renderer_->renderer.last_error().c_str());
     }
-    glBindTexture(GL_TEXTURE_2D, 0);
+    window.texture = window.upload_texture;
   } else if (renderer_ != nullptr && buffer.dmabuf != nullptr &&
              window.buffer_generation != buffer.buffer_generation) {
-    if (window.dmabuf_texture && window.texture != 0 && renderer_->importer != nullptr)
-      (void)renderer_->importer->release(window.texture);
-    window.texture = renderer_->importer == nullptr ? 0 : renderer_->importer->import(*buffer.dmabuf);
+    window.texture = renderer_->renderer.import_dmabuf(*buffer.dmabuf);
     window.buffer_generation = buffer.buffer_generation;
-    window.dmabuf_texture = window.texture != 0;
-    if (window.texture == 0)
-      std::fprintf(stderr, "zwwm: nested EGL: DMA-BUF import failed for surface %llu generation %llu: %s; skipping it\n",
+    window.dmabuf_texture = window.texture != nullptr;
+    if (window.texture == nullptr)
+      std::fprintf(stderr, "zwwm: nested Vulkan: DMA-BUF import failed for surface %llu generation %llu: %s; skipping it\n",
                    static_cast<unsigned long long>(buffer.surface_id),
                    static_cast<unsigned long long>(buffer.buffer_generation),
-                   renderer_->importer == nullptr ? "importer unavailable" : renderer_->importer->last_error().c_str());
+                   renderer_->renderer.last_error().c_str());
   }
   if (is_new) windows_.push_back(std::move(window)); else *it = std::move(window);
   std::stable_sort(windows_.begin(), windows_.end(), [](const Window& left, const Window& right) {
@@ -912,7 +859,7 @@ void NestedBackend::present(const ShmBufferView& buffer) {
 
 void NestedBackend::repaint_gpu() {
   if (camera_frame_preparing_ || tag_transition_preparing_) return;
-  if (renderer_ == nullptr || egl_window_ == nullptr || frame_pending_) return;
+  if (renderer_ == nullptr || vk_window_ == nullptr || frame_pending_) return;
   const std::uint64_t now = monotonic_ms();
   const auto tag = overview_ ? std::nullopt : animations_.tag_transition(now);
   if (!tag) {
@@ -931,7 +878,7 @@ void NestedBackend::repaint_gpu() {
       animations_.remove(window.id);
       continue;
     }
-    if (window.toplevel && !window.removed && window.content_ready && window.texture != 0)
+    if (window.toplevel && !window.removed && window.content_ready && window.texture != nullptr)
       animation_targets.push_back({window.id, bounds,
                                      !window.suppress_geometry_animation,
                                        !window.restore_scene && (!tag || window.tag_outgoing),
@@ -945,9 +892,6 @@ void NestedBackend::repaint_gpu() {
   }
   for (auto it = windows_.begin(); it != windows_.end();) {
     if (it->removed && !animations_.retains(it->root_id)) {
-      if (it->dmabuf_texture && it->texture != 0 && renderer_->importer != nullptr)
-        (void)renderer_->importer->release(it->texture);
-      if (it->upload_texture != 0) glDeleteTextures(1, &it->upload_texture);
       it = windows_.erase(it);
     } else ++it;
   }
@@ -966,8 +910,6 @@ void NestedBackend::repaint_gpu() {
   if (overview_) backend_scene::overview_scenes(frame, {{0, 0}, {logical_width_, logical_height_}},
       overview_scroll_, overview_active_tag_, overview_progress_, config_->background_shader, config_->overview_scene_radius,
       config_->overview_stack_master, config_->overview_master_ratio / 100.0);
-  std::optional<renderer::DrawCall> pending_border;
-  std::uint64_t pending_border_root = 0;
   const auto apply_effect_parameters = [&](renderer::DrawCall& draw, std::string_view shader = {}) {
     draw.background_blur_passes = static_cast<std::uint32_t>(std::clamp(
         config_->shader_integer(shader, "blur_passes", 3), 1, 8));
@@ -980,14 +922,13 @@ void NestedBackend::repaint_gpu() {
     draw.background_blur_noise = std::clamp(
         config_->shader_integer(shader, "blur_noise", 0), 0, 100) / 100.0F;
   };
+  // Tiled shadows go under all tiled windows.
+  std::optional<std::size_t> tiled_shadows_at;
+  std::vector<renderer::DrawCall> tiled_shadows;
   for (const auto& window : windows_) {
-    if (pending_border && (window.root_id != pending_border_root || window.popup)) {
-      frame.draws.push_back(std::move(*pending_border));
-      pending_border.reset();
-    }
     auto placement = std::find_if(placements.begin(), placements.end(), [&window](const auto& item) { return item.id == window.root_id; });
     const auto root = std::find_if(windows_.begin(), windows_.end(), [&window](const Window& item) { return item.id == window.root_id; });
-    if (root == windows_.end() || !root->content_ready || root->width <= 0 || root->height <= 0 || window.texture == 0) continue;
+    if (root == windows_.end() || !root->content_ready || root->width <= 0 || root->height <= 0 || window.texture == nullptr) continue;
     if (!root->toplevel) {
       frame.draws.push_back({window.id, {{window.x, window.y}, {static_cast<std::uint32_t>(window.width), static_cast<std::uint32_t>(window.height)}}, window.compositor_opacity, {1.0F, 1.0F, 1.0F, 1.0F}, window.texture, 0.0F, 0.0F, {window.source_left, window.source_top, window.source_right, window.source_bottom}});
       frame.draws.back().opaque = window.opaque && window.compositor_opacity == 1.0F;
@@ -1017,22 +958,6 @@ void NestedBackend::repaint_gpu() {
     const float border_width = config_->border_width() * decoration_scale;
     const float inner_radius = config_->radius() * decoration_scale;
     const float outer_radius = inner_radius + border_width;
-    const float border_join_width = border_width +
-        0.75F / (config_->output_for(kNestedConnector).scale_per_mille / 1000.0F);
-    if (window.toplevel && !root->fullscreen && border_width > 0.0F) {
-      constexpr std::array<float, 4> border{1.0F, 1.0F, 1.0F, 1.0F};
-      const auto animation = animations_.sample(window.id, now);
-      pending_border.emplace(window.id, tag_bounds, (animation ? animation->opacity : 1.0F) * tag_root.opacity, border, std::nullopt,
-                             outer_radius, border_join_width);
-      pending_border->shader_role = renderer::ShaderRole::border;
-      pending_border->shader_name = window.border_shader;
-      pending_border->toplevel_id = window.root_id;
-      pending_border->toplevel_bounds = tag_bounds;
-      pending_border->toplevel_state = window.focused ? 1U : 0U;
-      pending_border->shader_time = frame.shader_time;
-      pending_border_root = window.root_id;
-      backend_scene::camera_geometry(*pending_border, *root, window, tag_bounds);
-    }
     const auto content = animated_content(*root, tag_bounds);
     const auto animation = animations_.sample(window.root_id, now);
     const int content_x = content.origin.x, content_y = content.origin.y;
@@ -1057,6 +982,20 @@ void NestedBackend::repaint_gpu() {
                                                     static_cast<std::uint32_t>(std::max(1, window.height * content_h / goal_h))}};
     const bool root_window = window.toplevel;
     const float radius = root_window && !root->fullscreen ? outer_radius : 0.0F;
+    if (root_window && !root->fullscreen && !overview_) {
+      const std::uint32_t state = window.focused ? 1U : 0U;
+      if (auto shadow = backend_scene::shadow_draw(*config_, window.id, tag_bounds, outer_radius, decoration_scale,
+              (animation ? animation->opacity : 1.0F) * tag_root.opacity * window.compositor_opacity, state,
+              frame.shader_time)) {
+        backend_scene::camera_geometry(*shadow, *root, window, tag_bounds);
+        if (root->layer_priority == 0) {
+          if (!tiled_shadows_at) tiled_shadows_at = frame.draws.size();
+          tiled_shadows.push_back(std::move(*shadow));
+        } else {
+          frame.draws.push_back(std::move(*shadow));
+        }
+      }
+    }
     frame.draws.push_back({window.id, bounds, (animation ? animation->opacity : 1.0F) * tag_root.opacity * window.compositor_opacity, {1.0F, 1.0F, 1.0F, 1.0F}, window.texture, radius, 0.0F,
                            window.toplevel ? source_uv(geometry, window) : std::array<float, 4>{window.source_left, window.source_top, window.source_right, window.source_bottom},
                                window.popup ? std::nullopt : std::optional<renderer::Rect>{content},
@@ -1069,6 +1008,7 @@ void NestedBackend::repaint_gpu() {
     frame.draws.back().toplevel_state = (window.focused ? 1U : 0U) |
         (root->fullscreen ? 2U : 0U) | (window.popup ? 4U : 0U);
     frame.draws.back().shader_time = frame.shader_time;
+    frame.draws.back().shared_backdrop = root_window && root->layer_priority == 0 && !root->fullscreen;
     if (root_window) {
       frame.draws.back().texture_bounds = root_texture_bounds;
       frame.draws.back().texture_corner_radius = root->fullscreen ? 0.0F : inner_radius;
@@ -1076,42 +1016,49 @@ void NestedBackend::repaint_gpu() {
     frame.draws.back().background_blur_radius = static_cast<float>(window.background_blur_radius);
     apply_effect_parameters(frame.draws.back(), window.window_shader);
     backend_scene::camera_geometry(frame.draws.back(), *root, window, tag_bounds);
+    if (root_window && !root->fullscreen && std::lround(border_width) > 0) backend_scene::extend_under_border(frame.draws.back());
     if (overview_ && !backend_scene::overview_draw_visible(frame.draws.back(), {{0, 0}, {logical_width_, logical_height_}})) frame.draws.pop_back();
+    if (window.toplevel && !root->fullscreen) {
+      const auto border_animation = animations_.sample(window.id, now);
+      if (auto border = backend_scene::border_draw(window.id, content, tag_bounds, border_width, inner_radius,
+              (border_animation ? border_animation->opacity : 1.0F) * tag_root.opacity, window.focused ? 1U : 0U,
+              frame.shader_time)) {
+        border->shader_name = window.border_shader;
+        border->toplevel_id = window.root_id;
+        backend_scene::camera_geometry(*border, *root, window, tag_bounds);
+        frame.draws.push_back(std::move(*border));
+      }
+    }
   }
-  if (pending_border) frame.draws.push_back(std::move(*pending_border));
+  if (tiled_shadows_at)
+    frame.draws.insert(frame.draws.begin() + static_cast<std::ptrdiff_t>(*tiled_shadows_at),
+                       std::make_move_iterator(tiled_shadows.begin()), std::make_move_iterator(tiled_shadows.end()));
   if (error_popup_visible_ && error_popup_) {
-    if (error_popup_texture_ == 0) glGenTextures(1, &error_popup_texture_);
-    if (uploaded_error_popup_generation_ != error_popup_generation_) {
-      glBindTexture(GL_TEXTURE_2D, error_popup_texture_);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(error_popup_.width),
-                   static_cast<GLsizei>(error_popup_.height), 0, GL_BGRA, GL_UNSIGNED_BYTE,
-                   error_popup_.pixels.data());
-      glBindTexture(GL_TEXTURE_2D, 0);
+    if (error_popup_texture_ == nullptr || uploaded_error_popup_generation_ != error_popup_generation_) {
+      error_popup_texture_ = renderer_->renderer.upload(nullptr, error_popup_.pixels.data(), error_popup_.width,
+                                                        error_popup_.height, error_popup_.width);
       uploaded_error_popup_generation_ = error_popup_generation_;
     }
     const auto popup_x = std::max(8, (static_cast<int>(logical_width_) - static_cast<int>(error_popup_.width)) / 2);
-    frame.draws.push_back({std::numeric_limits<std::uint64_t>::max() - 1,
-                           {{popup_x, 24}, {error_popup_.width, error_popup_.height}},
-                           1.0F, {1.0F, 1.0F, 1.0F, 1.0F}, error_popup_texture_});
+    if (error_popup_texture_ != nullptr)
+      frame.draws.push_back({std::numeric_limits<std::uint64_t>::max() - 1,
+                             {{popup_x, 24}, {error_popup_.width, error_popup_.height}},
+                             1.0F, {1.0F, 1.0F, 1.0F, 1.0F}, error_popup_texture_});
   }
   transform_frame(frame, config_->output_for(kNestedConnector), {physical_width_, physical_height_});
-  glViewport(0, 0, static_cast<int>(physical_width_), static_cast<int>(physical_height_));
-  glClearColor(0.125F, 0.141F, 0.169F, 1.0F);
-  glClear(GL_COLOR_BUFFER_BIT);
-  if (!renderer_->renderer.render(frame, {physical_width_, physical_height_}) ||
+  if (!renderer_->renderer.render(frame, vk_window_->target(), std::array<float, 4>{0.125F, 0.141F, 0.169F, 1.0F}) ||
       !request_parent_frame()) {
-    last_error_ = "could not render nested EGL frame";
+    last_error_ = "could not render nested Vulkan frame: " + renderer_->renderer.last_error();
+    std::fprintf(stderr, "zwwm: %s\n", last_error_.c_str());
     return;
   }
-  if (!egl_window_->present()) {
-    last_error_ = "could not present nested EGL frame: " + egl_window_->last_error();
+  if (!vk_window_->present()) {
+    last_error_ = "could not present nested Vulkan frame: " + vk_window_->last_error();
     protocol::wl_surface_commit(*parent_display_, surface_->id);
     (void)parent_display_->flush();
     return;
   }
-  const auto snapshot = egl_window_->pixels();
+  const auto snapshot = vk_window_->pixels();
   capture_pixels_.assign(snapshot.begin(), snapshot.end());
   capture_pending_ = !capture_pixels_.empty();
   for (auto& window : windows_) window.damaged = false;
@@ -1438,12 +1385,13 @@ void NestedBackend::WmBaseObserver::ping(zwayland::client::Proxy& wm_base,
 void NestedBackend::XdgSurfaceObserver::configure(zwayland::client::Proxy& surface,
                                                   std::uint32_t serial) const {
   protocol::xdg_surface_ack_configure(*backend->parent_display_, surface.id, serial);
-  if (!backend->egl_initialization_attempted_) {
-    backend->egl_initialization_attempted_ = true;
+  if (!backend->gpu_initialization_attempted_) {
+    backend->gpu_initialization_attempted_ = true;
     const char* requested_renderer = std::getenv("ZWWM_RENDERER");
     const bool force_shm = requested_renderer != nullptr && std::strcmp(requested_renderer, "shm") == 0;
-    if (!force_shm && backend->create_egl_surface()) {
-      std::fputs("zwwm: nested renderer=OpenGL\n", stderr);
+    if (!force_shm && backend->create_gpu_surface()) {
+      std::fprintf(stderr, "zwwm: nested renderer=Vulkan (%s)\n",
+                   backend->vk_window_->device()->name().c_str());
       backend->buffer_attached_ = true;
       backend->publish_dmabuf_importer();
       backend->repaint_pending_ = true;
@@ -1712,20 +1660,22 @@ bool NestedBackend::create_buffer() {
   return true;
 }
 
-bool NestedBackend::create_egl_surface() {
-  egl_window_ = egl::Window::create(*parent_display_, *surface_, *shm_,
-                                    physical_width_, physical_height_);
-  if (egl_window_ == nullptr) {
-    last_error_ = "native EGL window initialization failed";
+bool NestedBackend::create_gpu_surface() {
+  std::string error;
+  auto device = vlk::Device::create({}, &error);
+  if (device != nullptr)
+    vk_window_ = vlk::Window::create(device, *parent_display_, *surface_, *shm_, physical_width_, physical_height_,
+                                     &error);
+  if (vk_window_ == nullptr) {
+    last_error_ = "Vulkan presentation initialization failed: " + error;
+    std::fprintf(stderr, "zwwm: nested Vulkan: %s\n", last_error_.c_str());
     return false;
   }
   renderer_ = std::make_unique<renderer_holder>();
-  renderer_->importer = std::make_unique<renderer::EglDmabufImporter>(
-      egl_window_->egl_display());
-  if (!renderer_->renderer.initialize()) {
-    last_error_ = "OpenGL renderer initialization failed: " + renderer_->renderer.last_error();
-    std::fprintf(stderr, "zwwm: nested EGL: %s\n", last_error_.c_str());
-    release_egl_surface();
+  if (!renderer_->renderer.initialize(std::move(device))) {
+    last_error_ = "Vulkan renderer initialization failed: " + renderer_->renderer.last_error();
+    std::fprintf(stderr, "zwwm: nested Vulkan: %s\n", last_error_.c_str());
+    release_gpu_surface();
     return false;
   }
   {
@@ -1737,37 +1687,26 @@ bool NestedBackend::create_egl_surface() {
     else
       last_error_ = shader_error.empty() ? renderer_->renderer.last_error() : shader_error;
   }
-  if (!renderer_->importer->initialize()) {
-    last_error_ = "DMA-BUF importer initialization failed: " + renderer_->importer->last_error();
-    std::fprintf(stderr, "zwwm: nested EGL: %s; retaining EGL wl_shm texture upload\n", last_error_.c_str());
-  } else if (renderer_->importer->supported_formats().empty()) {
-    last_error_ = "DMA-BUF importer reported no supported format/modifier pairs";
-    std::fprintf(stderr, "zwwm: nested EGL: %s; retaining EGL wl_shm texture upload\n", last_error_.c_str());
-  }
+  if (renderer_->renderer.dmabuf_formats().empty())
+    std::fputs("zwwm: nested Vulkan: DMA-BUF import is unavailable; clients fall back to wl_shm\n", stderr);
   publish_dmabuf_importer();
   return true;
 }
 
-void NestedBackend::release_egl_surface() {
+void NestedBackend::release_gpu_surface() {
   capture_ready_ = false;
   capture_pending_ = false;
   capture_pixels_.clear();
-  if (renderer_ != nullptr) {
-    if (egl_window_ != nullptr && egl_window_->make_current()) {
-      for (auto& window : windows_) {
-        if (window.dmabuf_texture && window.texture != 0 && renderer_->importer != nullptr)
-          (void)renderer_->importer->release(window.texture);
-        if (window.upload_texture != 0) glDeleteTextures(1, &window.upload_texture);
-      }
-      if (error_popup_texture_ != 0) glDeleteTextures(1, &error_popup_texture_);
-      error_popup_texture_ = 0;
-      uploaded_error_popup_generation_ = 0;
-      renderer_->importer->shutdown();
-      renderer_->renderer.shutdown();
-    }
-    renderer_.reset();
+  for (auto& window : windows_) {
+    window.texture.reset();
+    window.upload_texture.reset();
+    window.dmabuf_texture = false;
   }
-  egl_window_.reset();
+  error_popup_texture_.reset();
+  uploaded_error_popup_generation_ = 0;
+  if (renderer_ != nullptr) renderer_->renderer.shutdown();
+  renderer_.reset();
+  vk_window_.reset();
 }
 
 bool NestedBackend::arm_parent_display() {
@@ -1813,7 +1752,7 @@ void NestedBackend::release_wayland_objects() {
     touch_ = nullptr;
     if (input_target_ != nullptr) input_target_->touch_cancel();
   }
-  release_egl_surface();
+  release_gpu_surface();
   if (frame_callback_ != nullptr) {
     parent_display_->destroy_proxy(frame_callback_->id);
     frame_callback_ = nullptr;

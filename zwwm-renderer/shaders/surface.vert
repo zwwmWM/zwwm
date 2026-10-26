@@ -1,28 +1,18 @@
-#version 300 es
+#version 450
+#include "zwwm.glsl"
 
-layout (location = 0) in vec2 position;
+layout(location = 0) out vec2 zwwm_uv;
+layout(location = 1) out vec2 zwwm_local;
+layout(location = 2) out vec2 zwwm_position;
 
-uniform vec4 rect;
-uniform vec2 rect_size;
-uniform vec4 source_uv;
-uniform vec2 draw_origin;
-uniform int texture_transform;
-
-out vec2 texture_coordinates;
-out vec2 local_pixel_coordinates;
-out vec2 target_pixel_coordinates;
-flat out vec4 source_uv_value;
-flat out int texture_transform_value;
+const vec2 corners[6] = vec2[6](vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+                                vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0));
 
 void main() {
-  gl_Position = vec4(rect.xy + position * rect.zw, 0.0, 1.0);
-  vec2 source_position = position;
-  if (texture_transform == 1) source_position = vec2(position.y, 1.0 - position.x);
-  else if (texture_transform == 2) source_position = vec2(1.0) - position;
-  else if (texture_transform == 3) source_position = vec2(1.0 - position.y, position.x);
-  texture_coordinates = mix(source_uv.xy, source_uv.zw, source_position);
-  source_uv_value = source_uv;
-  texture_transform_value = texture_transform;
-  local_pixel_coordinates = position * rect_size;
-  target_pixel_coordinates = draw_origin + local_pixel_coordinates;
+  vec2 corner = corners[gl_VertexIndex];
+  vec2 pixel = zwwm.draw_rect.xy + corner * zwwm.draw_rect.zw;
+  gl_Position = vec4(pixel / max(zwwm.output_size, vec2(1.0)) * 2.0 - 1.0, 0.0, 1.0);
+  zwwm_uv = mix(zwwm.source_uv.xy, zwwm.source_uv.zw, zwwm_transform(corner));
+  zwwm_local = corner * zwwm.draw_rect.zw;
+  zwwm_position = pixel;
 }

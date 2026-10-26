@@ -172,6 +172,7 @@ void configure_layer_surface(LayerSurfaceState* layer, Rect geometry) {
   layer->serials.push_back(serial); layer->last_sent = serial;
   layer->configured_width = geometry.width; layer->configured_height = geometry.height;
   layer->configure_requested = false;
+  send_preferred_scale(layer->surface);
   protocol::zwwm_layer_surface_v1_send_configure(*layer->resource, serial, geometry.width, geometry.height);
 }
 

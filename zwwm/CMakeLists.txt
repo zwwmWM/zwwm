@@ -63,6 +63,9 @@ add_library(zwwm_compositor STATIC
   src/compositor_server_data_device.cpp
   src/compositor_server_input.cpp
   src/compositor_server_virtual_keyboard.cpp
+  src/compositor_server_text_input.cpp
+  src/compositor_server_edge_swipe.cpp
+  src/compositor_server_output_power.cpp
   src/compositor_server_touch.cpp
   src/compositor_server_idle.cpp
   src/compositor_server_layer_shell.cpp
@@ -108,7 +111,7 @@ target_link_libraries(zwwm PRIVATE
   zwwm::master_stack
   zwwm::renderer
   zwwm::animation
-  zwwm::egl
+  zwwm::vlk
   ${CMAKE_DL_LIBS}
 )
 target_compile_options(zwwm PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -130,6 +133,10 @@ install(FILES data/config.zw DESTINATION "${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/z
 install(FILES data/background.png DESTINATION "${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/zwwm/background")
 install(DIRECTORY data/shaders/ DESTINATION "${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/zwwm/shaders")
 install(DIRECTORY data/shaders/ DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/shaders")
+install(FILES "${CMAKE_SOURCE_DIR}/zwwm-renderer/shaders/zwwm.glsl"
+        DESTINATION "${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/zwwm/shaders")
+install(FILES "${CMAKE_SOURCE_DIR}/zwwm-renderer/shaders/zwwm.glsl"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/shaders")
 install(FILES data/config.zw DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm")
 install(FILES data/background.png DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/background")
 install(FILES data/zwwm.desktop DESTINATION "${CMAKE_INSTALL_DATADIR}/wayland-sessions")
