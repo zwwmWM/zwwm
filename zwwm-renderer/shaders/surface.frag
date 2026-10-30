@@ -8,7 +8,10 @@ void main() {
                                : vec4(zwwm.color.rgb * zwwm.color.a, zwwm.color.a);
   if ((zwwm.flags & ZWWM_HAS_TEXTURE) != 0u) {
     vec4 surface = zwwm_window(has_texture_rect ? zwwm_texture_rect_uv() : zwwm_uv);
-    if (background_only) color *= surface.a > zwwm.mask_threshold ? surface.a : 0.0;
+    // The blur replaces what is behind the surface outright, as window.frag's
+    // blend does. Scaling it by the surface's alpha would leave a sharp copy of
+    // the backdrop showing through.
+    if (background_only) color *= smoothstep(zwwm.mask_threshold, zwwm.mask_threshold + 0.04, surface.a);
     else color *= surface;
   }
 
