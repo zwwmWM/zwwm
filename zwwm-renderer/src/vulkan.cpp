@@ -1513,6 +1513,8 @@ bool VulkanRenderer::render(const FramePlan& frame, const TextureRef& target,
       }
     }
     if (draw.shader_role == ShaderRole::shadow) {
+      // Only shadow windows drawn in this frame.
+      if (item.toplevel_id == 0 || !window_draws.contains(item.toplevel_id)) continue;
       if (const auto* shadow = custom_program(draw.shader_name, state.shadow_shader, ShaderRole::shadow))
         draw_custom(draw, *shadow, false);
       continue;

@@ -79,6 +79,7 @@ class RuntimeBackend {
   void discover_drm_devices();
   void probe_outputs();
   bool try_direct_scanout(DrmOutput& card);
+  void store_capture_surface(const ShmBufferView& buffer);
   void release_direct_frame(DrmOutput& card, std::uint32_t framebuffer, std::uint64_t buffer_id);
   void schedule_output_probe();
   void add_drm_device(const char* path);
@@ -111,6 +112,7 @@ class RuntimeBackend {
   int error_timer_ = -1;
   int probe_timer_ = -1;
   std::uint64_t last_capture_ms_ = 0;
+  std::unordered_map<std::uint64_t, std::uint64_t> capture_requests_;
   std::uint32_t probe_attempts_ = 0;
   std::vector<std::unique_ptr<DrmDevice>> devices_;
   std::vector<std::pair<int, int>> restricted_devices_;
