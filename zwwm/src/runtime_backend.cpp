@@ -319,6 +319,8 @@ struct RuntimeBackend::DrmDevice {
   std::unique_ptr<renderer::VulkanRenderer> renderer;
   renderer::TextureRef error_popup_texture;
   std::uint64_t error_popup_generation = 0;
+  // Windows on hidden tags, kept only for toplevel capture.
+  std::vector<DrmOutput::ShmTexture> capture_surfaces;
   std::unordered_map<std::uint64_t, DmabufTexture> dmabuf_textures;
   std::vector<std::unique_ptr<DrmOutput>> outputs;
   std::vector<std::unique_ptr<DrmOutput>> retired_outputs;
@@ -650,23 +652,91 @@ bool RuntimeBackend::capture_output(OutputCapture& capture, bool overlay_cursor)
   for (auto& pixel : capture.pixels) pixel |= 0xff000000U;
   return true;
 }
+void RuntimeBackend::store_capture_surface(const ShmBufferView& buffer) {
+  const auto requested = capture_requests_.find(buffer.root_surface_id);
+  if (requested == capture_requests_.end() || monotonic_ms() - requested->second > 5000U) return;
+  if ((buffer.pixels == nullptr && buffer.dmabuf == nullptr) || buffer.width <= 0 || buffer.height <= 0) return;
+  DrmDevice* device = nullptr;
+  for (auto& candidate : devices_) {
+    if (candidate->renderer == nullptr) continue;
+    if (device == nullptr) device = candidate.get();
+    if (std::any_of(candidate->outputs.begin(), candidate->outputs.end(),
+                    [&](const auto& output) { return output->output.id == buffer.output; })) { device = candidate.get(); break; }
+  }
+  if (device == nullptr) return;
+  auto& list = device->capture_surfaces;
+  auto entry = std::find_if(list.begin(), list.end(), [&](const auto& item) { return item.id == buffer.surface_id; });
+  if (entry == list.end()) entry = list.insert(list.end(), DrmOutput::ShmTexture{});
+  auto& item = *entry;
+  item.id = buffer.surface_id;
+  item.root_id = buffer.root_surface_id;
+  item.toplevel = buffer.toplevel;
+  item.popup = buffer.popup;
+  item.x = buffer.x;
+  item.y = buffer.y;
+  item.width = buffer.logical_width;
+  item.height = buffer.logical_height;
+  item.source_left = buffer.source_left; item.source_top = buffer.source_top;
+  item.source_right = buffer.source_right; item.source_bottom = buffer.source_bottom;
+  item.opaque = buffer.opaque;
+  item.content_ready = true;
+  item.removed = false;
+  if (buffer.dmabuf != nullptr) {
+    if (item.texture == nullptr || item.owns_texture || item.shm_generation != buffer.buffer_generation) {
+      item.texture = device->renderer->import_dmabuf(*buffer.dmabuf);
+      item.owns_texture = false;
+      item.pixels.clear();
+    }
+  } else {
+    item.pixels.resize(static_cast<std::size_t>(buffer.width) * buffer.height);
+    for (int y = 0; y < buffer.height; ++y) {
+      auto* row = item.pixels.data() + static_cast<std::size_t>(y) * buffer.width;
+      std::memcpy(row, buffer.pixels + static_cast<std::size_t>(y) * buffer.stride,
+                  static_cast<std::size_t>(buffer.width) * sizeof(std::uint32_t));
+      if (buffer.format == protocol::WL_SHM_FORMAT_XRGB8888)
+        for (int x = 0; x < buffer.width; ++x) row[x] |= 0xff000000U;
+    }
+    item.texture = device->renderer->upload(item.owns_texture ? item.texture : nullptr, item.pixels.data(),
+                                            static_cast<std::uint32_t>(buffer.width), static_cast<std::uint32_t>(buffer.height),
+                                            static_cast<std::uint32_t>(buffer.width));
+    item.owns_texture = item.texture != nullptr;
+  }
+  item.shm_generation = buffer.buffer_generation;
+  if (list.size() > 64) list.erase(list.begin());
+  // Flips pace both the hidden window's frame callbacks and the portal's captures.
+  if (!device->outputs.empty()) repaint(*device->outputs.front());
+}
+
 bool RuntimeBackend::capture_toplevel(std::uint64_t id, OutputCapture& capture, bool overlay_cursor) {
+  capture_requests_[id] = monotonic_ms();
   DrmOutput* selected = nullptr;
-  DrmOutput::ShmTexture* root_surface = nullptr;
-  for (const auto& device : devices_) for (const auto& output : device->outputs) {
-    const auto root = std::find_if(output->shm_textures.begin(), output->shm_textures.end(), [id](auto& surface) {
+  const DrmOutput::ShmTexture* root_surface = nullptr;
+  const std::vector<DrmOutput::ShmTexture>* surfaces = nullptr;
+  const auto find_root = [id](const std::vector<DrmOutput::ShmTexture>& list) {
+    return std::find_if(list.begin(), list.end(), [id](const auto& surface) {
       return surface.id == id && surface.root_id == id && surface.toplevel && !surface.removed &&
              surface.content_ready && surface.texture != nullptr && surface.width > 0 && surface.height > 0;
     });
-    if (root != output->shm_textures.end()) { selected = output.get(); root_surface = &*root; break; }
+  };
+  for (const auto& device : devices_) for (const auto& output : device->outputs) {
+    const auto root = find_root(output->shm_textures);
+    if (root != output->shm_textures.end()) { selected = output.get(); root_surface = &*root; surfaces = &output->shm_textures; break; }
   }
+  // Fall back to a window on a hidden tag; the cursor is not over it.
+  for (const auto& device : devices_) if (selected == nullptr && !device->outputs.empty()) {
+    const auto root = find_root(device->capture_surfaces);
+    if (root == device->capture_surfaces.end()) continue;
+    selected = device->outputs.front().get(); root_surface = &*root; surfaces = &device->capture_surfaces;
+    overlay_cursor = false;
+  }
+  if (selected == nullptr) for (auto& device : devices_) if (!device->outputs.empty()) { repaint(*device->outputs.front()); break; }
   if (selected == nullptr || root_surface == nullptr || selected->device->renderer == nullptr) return false;
 
   capture.output = selected->output.id;
   capture.width = static_cast<std::uint32_t>(root_surface->width);
   capture.height = static_cast<std::uint32_t>(root_surface->height);
   renderer::FramePlan frame;
-  for (const auto& surface : selected->shm_textures) {
+  for (const auto& surface : *surfaces) {
     if (surface.root_id != id || surface.removed || surface.popup || surface.texture == nullptr ||
         surface.width <= 0 || surface.height <= 0) continue;
     renderer::DrawCall draw{surface.id,
@@ -752,6 +822,13 @@ void RuntimeBackend::publish_outputs() {
   if (input_target_ != nullptr) input_target_->set_outputs(std::move(outputs));
 }
 void RuntimeBackend::present(const ShmBufferView& buffer) {
+  if (buffer.capture_only) {
+    store_capture_surface(buffer);
+    return;
+  }
+  if (buffer.pixels != nullptr || buffer.dmabuf != nullptr)
+    for (auto& device : devices_)
+      std::erase_if(device->capture_surfaces, [&](const auto& item) { return item.id == buffer.surface_id; });
   for (auto& device : devices_) for (auto& output_ptr : device->outputs) {
     auto* card = output_ptr.get();
     if (buffer.output && buffer.output != card->output.id) continue;
@@ -1693,25 +1770,23 @@ bool RuntimeBackend::try_direct_scanout(DrmOutput& card) {
   else if (format == DRM_FORMAT_ABGR2101010) format = DRM_FORMAT_XBGR2101010;
   if (!input_target_->hold_buffer(candidate->buffer_id)) return false;
   auto& device = *card.device;
-  std::array<std::uint32_t, 4> handles{}, pitches{}, offsets{};
-  std::array<std::uint64_t, 4> modifiers{};
-  bool imported = true;
+  // GBM shares RADV's refcounted GEM handles; closing them by hand loses the device.
+  gbm_import_fd_modifier_data import{};
+  import.width = attributes.width;
+  import.height = attributes.height;
+  import.format = format;
+  import.num_fds = static_cast<std::uint32_t>(attributes.planes.size());
+  import.modifier = attributes.planes.front().modifier;
   for (std::size_t index = 0; index < attributes.planes.size(); ++index) {
-    const auto& plane = attributes.planes[index];
-    imported = imported && drmPrimeFDToHandle(device.fd, plane.fd, &handles[index]) == 0;
-    pitches[index] = plane.stride;
-    offsets[index] = plane.offset;
-    modifiers[index] = plane.modifier;
+    import.fds[index] = attributes.planes[index].fd;
+    import.strides[index] = static_cast<int>(attributes.planes[index].stride);
+    import.offsets[index] = static_cast<int>(attributes.planes[index].offset);
   }
-  std::uint32_t framebuffer = 0;
-  const bool explicit_modifier = attributes.planes.front().modifier != DRM_FORMAT_MOD_INVALID;
-  if (imported)
-    imported = drmModeAddFB2WithModifiers(device.fd, attributes.width, attributes.height, format, handles.data(),
-                                          pitches.data(), offsets.data(), explicit_modifier ? modifiers.data() : nullptr,
-                                          &framebuffer, explicit_modifier ? DRM_MODE_FB_MODIFIERS : 0) == 0;
-  std::sort(handles.begin(), handles.end());
-  for (std::size_t index = 0; index < handles.size(); ++index)
-    if (handles[index] != 0 && (index == 0 || handles[index] != handles[index - 1])) (void)drmCloseBufferHandle(device.fd, handles[index]);
+  gbm_bo* bo = gbm_bo_import(device.gbm, GBM_BO_IMPORT_FD_MODIFIER, &import, GBM_BO_USE_SCANOUT);
+  const std::uint32_t framebuffer = bo == nullptr ? 0 : add_framebuffer(device, bo);
+  // The framebuffer holds its own reference to the buffer.
+  if (bo != nullptr) gbm_bo_destroy(bo);
+  const bool imported = framebuffer != 0;
   if (imported && commit_atomic_output(card, framebuffer, false)) {
     card.direct_pending = DrmOutput::DirectFrame{framebuffer, candidate->buffer_id};
     card.pending_buffer = -1;

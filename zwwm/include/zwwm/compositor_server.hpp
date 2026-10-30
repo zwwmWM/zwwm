@@ -35,6 +35,8 @@ struct ShmBufferView {
   std::int32_t logical_height = 0;
   // Identifies the wl_buffer for hold_buffer() while it is scanned out directly.
   std::uint64_t buffer_id = 0;
+  // Not part of the drawn scene; only kept for toplevel capture.
+  bool capture_only = false;
   // Normalized buffer-pixel crop used by GPU and software presentation.
   float source_left = 0.0F;
   float source_top = 0.0F;

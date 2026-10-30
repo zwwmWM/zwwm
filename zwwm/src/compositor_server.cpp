@@ -208,6 +208,8 @@ struct XdgSurfaceState {
   Rect floating_bounds{0, 0, 0, 0};
   Rect last_floating_bounds{0, 0, 0, 0};
   CanvasBounds canvas_bounds;
+  // Client-sized and kept centered until the user moves or resizes it.
+  bool auto_placed = true;
   bool floating = false;
   bool fullscreen = false;
   bool hidden = false;
@@ -523,6 +525,18 @@ Rect position_window(Rect rect, Rect area) {
   rect.x = rect.width > area.width ? area.x : std::clamp(rect.x, area.x, area.x + area.width - rect.width);
   rect.y = rect.height > area.height ? area.y : std::clamp(rect.y, area.y, area.y + area.height - rect.height);
   return rect;
+}
+Rect center_in(Rect rect, Rect area) {
+  rect.x = area.x + (area.width - rect.width) / 2;
+  rect.y = area.y + (area.height - rect.height) / 2;
+  return rect;
+}
+// Transient windows center on their parent.
+Rect placement_area(const XdgSurfaceState& x, Rect work) {
+  const auto* parent = x.transient_parent;
+  if (parent != nullptr && parent->mapped && parent->output == x.output &&
+      parent->tile_bounds.width > 0 && parent->tile_bounds.height > 0) return parent->tile_bounds;
+  return work;
 }
 Rect constrain_xdg_window(const RuntimeConfig& config, const XdgSurfaceState& x, Rect bounds) {
   bounds.width = std::max(1, bounds.width);
@@ -890,7 +904,7 @@ bool pan_canvas(Observer* observer, double dx, double dy, bool finish) {
   idle_activity(observer->seat);
   auto& viewport = output->canvas_viewports[output->active_tag - 1];
   const Rect work = output_work(observer, output->info.id);
-  const bool changed = finish ? observer->camera.finish_pan(viewport, work.width, work.height, timestamp_ms()) :
+  const bool changed = finish ? observer->camera.finish_pan(viewport, work.width, work.height) :
       observer->camera.pan_by(viewport, work.width, work.height, dx, dy, timestamp_ms());
   if (changed) {
     configure_canvas_frame(observer, output->info.id);
@@ -976,9 +990,11 @@ void configure_canvas_layout(Observer* observer, XdgSurfaceState* candidate) {
       const bool state_changed = x->configured_states != states;
       x->tile_bounds = bounds;
       x->content_bounds = assigned;
+      const bool client_sized = !x->fullscreen && x->floating && x->auto_placed &&
+          (x->accepted_width <= 1 || x->accepted_height <= 1);
       if (observer->seat == nullptr || !(observer->canvas_frame && x->output == observer->canvas_frame_output))
-        send_configure(x, static_cast<std::int32_t>(client_content.size.width),
-                       static_cast<std::int32_t>(client_content.size.height), states);
+        send_configure(x, client_sized ? 0 : static_cast<std::int32_t>(client_content.size.width),
+                       client_sized ? 0 : static_cast<std::int32_t>(client_content.size.height), states);
       if (changed || state_changed || (observer->canvas_frame && x->output == observer->canvas_frame_output))
         notify_surface_tree(surface);
       continue;
@@ -1154,6 +1170,9 @@ void configure_layout(Observer* observer, XdgSurfaceState* candidate) {
       }
       bounds = clamp_window(x->floating_bounds, work);
       bounds = constrain_xdg_window(*observer->config, *x, bounds);
+      // Size constraints move the corner, so recenter.
+      const bool dragged = observer->seat != nullptr && root(observer->seat->interactive) == surface;
+      if (x->auto_placed && !dragged) bounds = center_in(bounds, placement_area(*x, work));
       if (mobile_windows(observer)) {
         const auto margin = static_cast<std::int32_t>(observer->config->layout.outer_gap);
         const auto width = std::clamp(bounds.width, 1, std::max(1, work.width - 2 * margin));
@@ -1167,7 +1186,11 @@ void configure_layout(Observer* observer, XdgSurfaceState* candidate) {
                                         observer->config->content_bounds({{bounds.x, bounds.y}, {static_cast<std::uint32_t>(bounds.width), static_cast<std::uint32_t>(bounds.height)}});
     x->tile_bounds = bounds;
     x->content_bounds = {content.origin.x, content.origin.y, static_cast<std::int32_t>(content.size.width), static_cast<std::int32_t>(content.size.height)};
-    send_configure(x, x->content_bounds.width, x->content_bounds.height, states);
+    // Let the client pick its size instead of the half-screen placeholder.
+    const bool client_sized = !x->fullscreen && x->auto_placed &&
+        (x->accepted_width <= 1 || x->accepted_height <= 1);
+    if (client_sized) send_configure(x, 0, 0, states);
+    else send_configure(x, x->content_bounds.width, x->content_bounds.height, states);
     notify_surface_tree(surface);
   }
 #ifdef ZWWM_XWAYLAND
@@ -1276,6 +1299,43 @@ bool overview_projection(Observer* observer, SurfaceState* surface, renderer::Re
   return true;
 }
 void refresh_overview(Observer* observer);
+void describe_buffer(ShmBufferView& view, const SurfaceState* s) {
+     const auto* b = s->current_buffer;
+     if (b->pool != nullptr) view.pixels = static_cast<const std::uint8_t*>(b->pool->mapping) + b->offset;
+      view.width = b->width; view.height = b->height; view.stride = b->stride; view.format = b->format;
+      view.buffer_generation = s->buffer_generation;
+      view.buffer_id = b->id;
+      view.dmabuf = b->dmabuf ? &*b->dmabuf : nullptr;
+     const auto& viewport = s->current_viewport;
+     const double scale = s->current_buffer_scale;
+     const double source_x = viewport.has_source ? (viewport.x) * scale : 0.0;
+     const double source_y = viewport.has_source ? (viewport.y) * scale : 0.0;
+     const double source_width = viewport.has_source ? (viewport.width) * scale : b->width;
+     const double source_height = viewport.has_source ? (viewport.height) * scale : b->height;
+     view.logical_width = viewport.has_destination ? viewport.destination_width : viewport.has_source ? static_cast<int>(viewport.width) : b->width / s->current_buffer_scale;
+     view.logical_height = viewport.has_destination ? viewport.destination_height : viewport.has_source ? static_cast<int>(viewport.height) : b->height / s->current_buffer_scale;
+      view.source_left = static_cast<float>(source_x / b->width); view.source_top = static_cast<float>(source_y / b->height);
+      view.source_right = static_cast<float>((source_x + source_width) / b->width); view.source_bottom = static_cast<float>((source_y + source_height) / b->height);
+      view.opaque = b->format == protocol::WL_SHM_FORMAT_XRGB8888 || b->format == DRM_FORMAT_XRGB8888;
+      if (!view.opaque && view.logical_width > 0 && view.logical_height > 0 && !s->current_opaque_region.empty()) {
+        RegionState uncovered{{Rect{0, 0, view.logical_width, view.logical_height}}};
+        for (const Rect& rect : s->current_opaque_region) region_subtract(&uncovered, rect);
+        view.opaque = uncovered.rects.empty();
+      }
+}
+// Windows on hidden tags still feed toplevel capture, without joining the drawn scene.
+void notify_capture_only(SurfaceState* s, SurfaceState* scene_root, OutputId output) {
+  if (s->current_buffer == nullptr) return;
+  ShmBufferView view{.surface_id = s->id, .root_surface_id = scene_root->id, .output = output,
+                     .window_shader = {}, .border_shader = {}};
+  view.capture_only = true;
+  view.toplevel = s == scene_root;
+  view.popup = s->xdg_surface != nullptr && s->xdg_surface->popup != nullptr;
+  view.content_ready = true;
+  absolute_position(s, &view.x, &view.y);
+  describe_buffer(view, s);
+  s->observer->callback(s->observer->data, view);
+}
 void notify_surface(SurfaceState* s) {
   if (s == nullptr || s->observer == nullptr) return;
    if (!s->observer->overview_repainting && s->xdg_surface != nullptr && s->observer->toplevel_callback != nullptr) s->observer->toplevel_callback(s->observer->toplevel_data);
@@ -1303,6 +1363,8 @@ void notify_surface(SurfaceState* s) {
     s->observer->callback(s->observer->data, ShmBufferView{.surface_id = s->id,
         .root_surface_id = scene_root->id, .output = output, .scene_reset = s->observer->restoring_scene,
         .window_shader = {}, .border_shader = {}});
+    if (scene_root->xdg_surface->mapped) notify_capture_only(s, scene_root, output);
+    s->pending_buffer_damage.clear();
     return;
   }
 #ifdef ZWWM_XWAYLAND
@@ -1313,6 +1375,8 @@ void notify_surface(SurfaceState* s) {
       s->observer->callback(s->observer->data, ShmBufferView{.surface_id = s->id,
           .root_surface_id = scene_root->id, .output = output, .scene_reset = s->observer->restoring_scene,
           .window_shader = {}, .border_shader = {}});
+      if (owner != nullptr && role->window != nullptr && role->window->mapped) notify_capture_only(s, scene_root, output);
+      s->pending_buffer_damage.clear();
       return;
     }
   }
@@ -1536,28 +1600,7 @@ void notify_surface(SurfaceState* s) {
         && (scene_root->xwayland_surface == nullptr || xwayland_content_ready)
 #endif
         ) {
-     const auto* b = s->current_buffer;
-     if (b->pool != nullptr) view.pixels = static_cast<const std::uint8_t*>(b->pool->mapping) + b->offset;
-      view.width = b->width; view.height = b->height; view.stride = b->stride; view.format = b->format;
-      view.buffer_generation = s->buffer_generation;
-      view.buffer_id = b->id;
-      view.dmabuf = b->dmabuf ? &*b->dmabuf : nullptr;
-     const auto& viewport = s->current_viewport;
-     const double scale = s->current_buffer_scale;
-     const double source_x = viewport.has_source ? (viewport.x) * scale : 0.0;
-     const double source_y = viewport.has_source ? (viewport.y) * scale : 0.0;
-     const double source_width = viewport.has_source ? (viewport.width) * scale : b->width;
-     const double source_height = viewport.has_source ? (viewport.height) * scale : b->height;
-     view.logical_width = viewport.has_destination ? viewport.destination_width : viewport.has_source ? static_cast<int>(viewport.width) : b->width / s->current_buffer_scale;
-     view.logical_height = viewport.has_destination ? viewport.destination_height : viewport.has_source ? static_cast<int>(viewport.height) : b->height / s->current_buffer_scale;
-      view.source_left = static_cast<float>(source_x / b->width); view.source_top = static_cast<float>(source_y / b->height);
-      view.source_right = static_cast<float>((source_x + source_width) / b->width); view.source_bottom = static_cast<float>((source_y + source_height) / b->height);
-      view.opaque = b->format == protocol::WL_SHM_FORMAT_XRGB8888 || b->format == DRM_FORMAT_XRGB8888;
-      if (!view.opaque && view.logical_width > 0 && view.logical_height > 0 && !s->current_opaque_region.empty()) {
-        RegionState uncovered{{Rect{0, 0, view.logical_width, view.logical_height}}};
-        for (const Rect& rect : s->current_opaque_region) region_subtract(&uncovered, rect);
-        view.opaque = uncovered.rects.empty();
-      }
+      describe_buffer(view, s);
    }
   if (!s->pending_buffer_damage.empty()) {
     Rect damage = s->pending_buffer_damage.front();
@@ -2150,8 +2193,30 @@ void surface_commit(zwayland::server::Client*, zwayland::server::Resource* r) {
             static_cast<std::int64_t>(geometry.height) + 2 * border, 1,
             std::numeric_limits<std::int32_t>::max()));
         canvas_size_changed = x->canvas_bounds.width != width || x->canvas_bounds.height != height;
+        if (canvas_size_changed && x->auto_placed) {
+          const auto* parent = x->transient_parent;
+          if (parent != nullptr && parent->canvas_bounds.initialized) {
+            x->canvas_bounds.x = parent->canvas_bounds.x + (parent->canvas_bounds.width - width) / 2;
+            x->canvas_bounds.y = parent->canvas_bounds.y + (parent->canvas_bounds.height - height) / 2;
+          } else {
+            x->canvas_bounds.x += (x->canvas_bounds.width - width) / 2;
+            x->canvas_bounds.y += (x->canvas_bounds.height - height) / 2;
+          }
+        }
         x->canvas_bounds.width = width;
         x->canvas_bounds.height = height;
+      } else if (x->toplevel != nullptr && x->mapped && x->floating && !x->fullscreen && x->auto_placed &&
+                 !endless_canvas(s->observer) &&
+                 (s->observer->seat == nullptr || root(s->observer->seat->interactive) != s) &&
+                 (x->size_configure_serial == 0 ||
+                  (x->size_configure_acked && x->commit_count > x->size_ack_commit_count))) {
+        // Adopt the committed size; the layout pass recenters it.
+        const auto border = static_cast<std::int32_t>(s->observer->config->border_width());
+        const auto width = std::max(1, geometry.width + 2 * border);
+        const auto height = std::max(1, geometry.height + 2 * border);
+        canvas_size_changed = x->floating_bounds.width != width || x->floating_bounds.height != height;
+        x->floating_bounds.width = width;
+        x->floating_bounds.height = height;
       }
     }
     const bool toplevel_unmapped = x->toplevel != nullptr && s->current_buffer == nullptr;
@@ -2557,6 +2622,8 @@ void begin_interactive(XdgSurfaceState* x, zwayland::server::Client* client, std
 }
 void end_interactive(SeatState* seat) {
   if (seat == nullptr) return;
+  if (auto* moved = root(seat->interactive); moved != nullptr && moved->xdg_surface != nullptr)
+    moved->xdg_surface->auto_placed = false;
   const bool group_dragging = seat->canvas_cluster_dragging;
   const bool restore_cursor = seat->canvas_panning || group_dragging;
   auto* observer = seat->display.observer;
@@ -2568,8 +2635,7 @@ void end_interactive(SeatState* seat) {
   if (seat->canvas_panning && pan_handled) {
     const Rect work = output_work(observer, pan_output->info.id);
     pan_changed = observer->camera.finish_pan(
-        pan_output->canvas_viewports[pan_output->active_tag - 1], work.width, work.height,
-        timestamp_ms());
+        pan_output->canvas_viewports[pan_output->active_tag - 1], work.width, work.height);
   }
   if (restore_cursor && !pan_handled) observer->camera.stop();
   seat->interactive = nullptr;
@@ -3951,8 +4017,9 @@ bool opaque_content(const SurfaceState* surface) {
 bool frame_hidden(Observer* observer, SurfaceState* scene_root, OutputId assigned) {
   if (const auto* state = output_state(observer, assigned); state != nullptr && !state->powered) return true;
   if (observer->overview_visible) return false;
+  // Hidden tags keep rendering on the desktop so their windows stay capturable.
   if (const auto* x = scene_root->xdg_surface; x != nullptr && x->toplevel != nullptr && x->mapped)
-    return !visible_xdg(observer, x);
+    return mobile_windows(observer) && !visible_xdg(observer, x);
   const auto* layer = scene_root->layer_surface;
   auto* output = layer == nullptr ? nullptr : output_state(observer, layer->output);
   if (output == nullptr || !layer->mapped || layer->current.layer > protocol::ZWWM_LAYER_SHELL_V1_LAYER_BOTTOM) return false;
