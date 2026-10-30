@@ -27,7 +27,7 @@ stdenvNoCC.mkDerivation {
 
   meta = {
     description = "zwwm and vendored upstream Wayland protocol XML for third-party generators";
-    homepage = "https://github.com/binarylinuxx/zwwm";
+    homepage = "https://github.com/zwwmWM/zwwm";
     license = with lib.licenses; [ bsd3 mit ];
     platforms = lib.platforms.all;
   };

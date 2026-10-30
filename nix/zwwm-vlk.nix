@@ -17,7 +17,7 @@ stdenv.mkDerivation {
 
   meta = {
     description = "Vulkan device, DMA-BUF image, and presentation helpers shared by zwwm and zterm";
-    homepage = "https://github.com/binarylinuxx/zwwm";
+    homepage = "https://github.com/zwwmWM/zwwm";
     license = lib.licenses.bsd3;
     platforms = lib.platforms.linux;
   };

@@ -32,7 +32,7 @@ The flake also exports `packages.<system>.zwwm-no-xwayland` and a NixOS module:
 
 ```nix
 {
-  inputs.zwwm.url = "github:binarylinuxx/zwwm";
+  inputs.zwwm.url = "github:zwwmWM/zwwm";
 
   outputs = { nixpkgs, zwwm, ... }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {
