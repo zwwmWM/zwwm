@@ -30,8 +30,8 @@ void main() {
   float distance = zwwm_rounded_rect_distance(window - offset, window_size, zwwm.corner_radius);
   float shadow = 0.5 - 0.5 * erf_approx(distance / (sigma * 1.41421356));
 
-  // Translucent windows are not darkened by their own shadow.
-  float outside = clamp(zwwm_rounded_rect_distance(window, window_size, zwwm.corner_radius) + 0.5, 0.0, 1.0);
+  // Cut only where the window fully covers the pixel, so edges never seam.
+  float outside = zwwm_rounded_rect_distance(window, window_size, zwwm.corner_radius) > -0.5 ? 1.0 : 0.0;
   vec4 tint = (zwwm.state & ZWWM_STATE_FOCUSED) != 0u ? config.focused_color : config.color;
   // Stacks the shadow; 0 keeps a single one.
   float layers = config.strength > 0 ? float(config.strength) / 100.0 : 1.0;
