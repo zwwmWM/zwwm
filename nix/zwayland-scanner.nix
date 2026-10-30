@@ -15,7 +15,7 @@ stdenv.mkDerivation {
 
   meta = {
     description = "Native C++23 Wayland client/server binding generator";
-    homepage = "https://github.com/binarylinuxx/zwwm";
+    homepage = "https://github.com/zwwmWM/zwwm";
     license = lib.licenses.bsd3;
     platforms = lib.platforms.linux;
     mainProgram = "zwayland-scanner";

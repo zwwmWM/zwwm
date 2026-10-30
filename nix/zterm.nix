@@ -13,7 +13,7 @@ stdenv.mkDerivation {
   buildInputs = [ zwayland zwwm-protocols libzterm zw-lang zwwm-vlk pango harfbuzz libgbm libdrm libxkbcommon ];
   meta = {
     description = "Experimental GPU-native zwayland terminal";
-    homepage = "https://github.com/binarylinuxx/zwwm";
+    homepage = "https://github.com/zwwmWM/zwwm";
     license = lib.licenses.bsd3;
     platforms = lib.platforms.linux;
     mainProgram = "zterm";

@@ -108,7 +108,7 @@ stdenv.mkDerivation {
 
   meta = {
     description = "C++23 post-Wayland compositor";
-    homepage = "https://github.com/binarylinuxx/zwwm";
+    homepage = "https://github.com/zwwmWM/zwwm";
     license = lib.licenses.bsd3;
     platforms = lib.platforms.linux;
     mainProgram = "zwwm-session";
