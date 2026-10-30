@@ -503,18 +503,77 @@ bool NestedBackend::capture_output(OutputCapture& capture, bool overlay_cursor) 
   return true;
 }
 
+void NestedBackend::store_capture_window(const ShmBufferView& buffer) {
+  const auto requested = capture_requests_.find(buffer.root_surface_id);
+  if (requested == capture_requests_.end() || monotonic_ms() - requested->second > 5000U) return;
+  if ((buffer.pixels == nullptr && buffer.dmabuf == nullptr) || buffer.width <= 0 || buffer.height <= 0) return;
+  auto entry = std::find_if(capture_windows_.begin(), capture_windows_.end(),
+                            [&](const Window& item) { return item.id == buffer.surface_id; });
+  if (entry == capture_windows_.end()) entry = capture_windows_.insert(capture_windows_.end(), Window{});
+  auto& window = *entry;
+  window.id = buffer.surface_id;
+  window.root_id = buffer.root_surface_id;
+  window.toplevel = buffer.toplevel;
+  window.popup = buffer.popup;
+  window.x = buffer.x;
+  window.y = buffer.y;
+  window.width = buffer.logical_width;
+  window.height = buffer.logical_height;
+  window.buffer_width = buffer.width;
+  window.buffer_height = buffer.height;
+  window.source_left = buffer.source_left; window.source_top = buffer.source_top;
+  window.source_right = buffer.source_right; window.source_bottom = buffer.source_bottom;
+  window.opaque = buffer.opaque;
+  window.content_ready = true;
+  window.removed = false;
+  if (buffer.dmabuf != nullptr) {
+    if (renderer_ != nullptr && (window.texture == nullptr || !window.dmabuf_texture || window.buffer_generation != buffer.buffer_generation))
+      window.texture = renderer_->renderer.import_dmabuf(*buffer.dmabuf);
+    window.dmabuf_texture = true;
+    window.pixels.clear();
+  } else {
+    window.pixels.resize(static_cast<std::size_t>(buffer.width) * buffer.height);
+    for (int y = 0; y < buffer.height; ++y) {
+      auto* row = window.pixels.data() + static_cast<std::size_t>(y) * buffer.width;
+      std::memcpy(row, buffer.pixels + static_cast<std::size_t>(y) * buffer.stride,
+                  static_cast<std::size_t>(buffer.width) * sizeof(std::uint32_t));
+      if (buffer.format == protocol::WL_SHM_FORMAT_XRGB8888)
+        for (int x = 0; x < buffer.width; ++x) row[x] |= 0xff000000U;
+    }
+    if (renderer_ != nullptr)
+      window.texture = renderer_->renderer.upload(window.dmabuf_texture ? nullptr : window.texture, window.pixels.data(),
+                                                  static_cast<std::uint32_t>(buffer.width),
+                                                  static_cast<std::uint32_t>(buffer.height),
+                                                  static_cast<std::uint32_t>(buffer.width));
+    window.dmabuf_texture = false;
+  }
+  window.buffer_generation = buffer.buffer_generation;
+  if (capture_windows_.size() > 64) capture_windows_.erase(capture_windows_.begin());
+  // Frames pace both the hidden window's frame callbacks and the portal's captures.
+  repaint();
+}
+
 bool NestedBackend::capture_toplevel(std::uint64_t id, OutputCapture& capture, bool overlay_cursor) {
-  const auto root = std::find_if(windows_.begin(), windows_.end(), [id](const Window& window) {
+  capture_requests_[id] = monotonic_ms();
+  const auto is_root = [id](const Window& window) {
     return window.id == id && window.root_id == id && window.toplevel && !window.removed &&
            window.content_ready && window.width > 0 && window.height > 0;
-  });
-  if (root == windows_.end()) return false;
+  };
+  const std::vector<Window>* source = &windows_;
+  auto root = std::find_if(windows_.begin(), windows_.end(), is_root);
+  // Fall back to a window on a hidden tag; the cursor is not over it.
+  if (root == windows_.end()) {
+    root = std::find_if(capture_windows_.begin(), capture_windows_.end(), is_root);
+    if (root == capture_windows_.end()) { repaint(); return false; }
+    source = &capture_windows_;
+    overlay_cursor = false;
+  }
   capture.width = static_cast<std::uint32_t>(root->width);
   capture.height = static_cast<std::uint32_t>(root->height);
   bool captured = false;
   if (renderer_ != nullptr && root->texture != nullptr) {
     renderer::FramePlan frame;
-    for (const auto& window : windows_) {
+    for (const auto& window : *source) {
       if (window.root_id != id || window.removed || window.popup || window.texture == nullptr ||
           window.width <= 0 || window.height <= 0) continue;
       renderer::DrawCall draw{window.id,
@@ -577,6 +636,12 @@ void NestedBackend::publish_dmabuf_importer() {
 }
 
 void NestedBackend::present(const ShmBufferView& buffer) {
+  if (buffer.capture_only) {
+    store_capture_window(buffer);
+    return;
+  }
+  if (buffer.pixels != nullptr || buffer.dmabuf != nullptr)
+    std::erase_if(capture_windows_, [&](const Window& item) { return item.id == buffer.surface_id; });
   if (buffer.overview_changed) {
     overview_ = buffer.overview;
     overview_first_tag_ = buffer.overview_first_tag;

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 #include <span>
@@ -135,6 +136,10 @@ class NestedBackend {
   std::uint32_t axis_source_ = 0;
   struct Window;
   std::vector<Window> windows_;
+  // Windows on hidden tags, kept only for toplevel capture.
+  std::vector<Window> capture_windows_;
+  std::unordered_map<std::uint64_t, std::uint64_t> capture_requests_;
+  void store_capture_window(const ShmBufferView& buffer);
   std::string last_error_;
   std::string cursor_theme_ = "default";
   std::string cursor_shape_ = "left_ptr";
