@@ -1026,6 +1026,21 @@ bool VulkanRenderer::prepare_shaders(const ShaderSources& sources) {
     return false;
   }
   auto& state = *state_;
+  const auto load_image = [&](const std::string& path, TextureRef* texture) {
+    std::vector<std::uint32_t> pixels;
+    std::uint32_t width = 0, height = 0;
+    std::string error;
+    if (!load_png(path, &pixels, &width, &height, state.device->limits().maxImageDimension2D, error)) {
+      last_error_ = error;
+      return false;
+    }
+    *texture = upload(nullptr, pixels.data(), width, height, width);
+    return *texture != nullptr;
+  };
+  // Loaded before compiling so a broken shader config still shows the wallpaper.
+  TextureRef wallpaper;
+  const bool wallpaper_loaded = load_image(default_wallpaper_path(), &wallpaper);
+  if (state.wallpaper == nullptr) state.wallpaper = wallpaper;
   for (const auto& source : sources.programs) {
     if (source.name.empty() || state.pending_custom_programs.contains(source.name)) {
       last_error_ = "shader names must be nonempty and unique";
@@ -1052,21 +1067,12 @@ bool VulkanRenderer::prepare_shaders(const ShaderSources& sources) {
     discard_shaders();
     return false;
   }
-  const auto load_image = [&](const std::string& path, TextureRef* texture) {
-    std::vector<std::uint32_t> pixels;
-    std::uint32_t width = 0, height = 0;
-    std::string error;
-    if (!load_png(path, &pixels, &width, &height, state.device->limits().maxImageDimension2D, error)) {
-      last_error_ = error;
-      return false;
-    }
-    *texture = upload(nullptr, pixels.data(), width, height, width);
-    return *texture != nullptr;
-  };
-  if (!sources.background.empty() && !load_image(default_wallpaper_path(), &state.pending_wallpaper)) {
+  // The wallpaper stays the default backdrop; only a background shader requires it.
+  if (!wallpaper_loaded && !sources.background.empty()) {
     discard_shaders();
     return false;
   }
+  state.pending_wallpaper = wallpaper;
   if (!sources.overview_backdrop_image.empty() &&
       !load_image(sources.overview_backdrop_image, &state.pending_overview_backdrop)) {
     discard_shaders();
@@ -1333,7 +1339,7 @@ bool VulkanRenderer::render(const FramePlan& frame, const TextureRef& target,
     return passes;
   };
 
-  if (frame.draw_background && !state.background_shader.empty() && state.wallpaper != nullptr) {
+  if (frame.draw_background && state.wallpaper != nullptr) {
     const float output_aspect = target_width / target_height;
     const float image_aspect = static_cast<float>(state.wallpaper->width()) / static_cast<float>(state.wallpaper->height());
     DrawData data;

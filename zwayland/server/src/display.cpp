@@ -500,7 +500,13 @@ void Display::set_global_filter(
   global_filter_ = std::move(filter);
 }
 
+void Display::restrict_global(std::uint32_t name, std::function<bool(const Client&)> allowed) {
+  global_restrictions_[name] = std::move(allowed);
+}
+
 bool Display::global_visible(const Client& client, const Global& global) const {
+  const auto restriction = global_restrictions_.find(global.name);
+  if (restriction != global_restrictions_.end() && !restriction->second(client)) return false;
   return !global_filter_ || global_filter_(client, global);
 }
 
@@ -509,6 +515,7 @@ void Display::remove_global(std::uint32_t name) {
                              [name](const Global& item) { return item.name == name; });
   if (global == globals_.end() || global->removed) return;
   global->removed = true;
+  global_restrictions_.erase(name);
   const Global removed = *global;
   for (auto& client : clients_) {
     if (!global_visible(*client, removed)) continue;

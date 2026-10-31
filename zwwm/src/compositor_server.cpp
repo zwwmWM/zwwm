@@ -165,7 +165,7 @@ SurfaceState::~SurfaceState() {
     auto* role = xwayland_surface;
     xwayland_surface = nullptr;
     role->surface = nullptr;
-    if (role->window != nullptr) { role->window->surface = nullptr; role->window = nullptr; }
+    detach_xwayland_role(role);
     if (role->resource == nullptr) {
       if (role->runtime != nullptr) role->runtime->remove_role(role);
       else delete role;
@@ -1991,6 +1991,9 @@ bool validate_surface_state(SurfaceState* surface, Buffer* buffer, const Viewpor
 void surface_commit(zwayland::server::Client*, zwayland::server::Resource* r) {
   auto* s = r->data<SurfaceState>();
   s->ever_committed = true;
+#ifdef ZWWM_XWAYLAND
+  commit_xwayland_surface(s->xwayland_surface);
+#endif
   if (s->lock_surface != nullptr) {
     auto* lock = s->lock_surface;
     if (lock->acked == 0) { lock->resource->post_error(protocol::EXT_SESSION_LOCK_SURFACE_V1_ERROR_COMMIT_BEFORE_FIRST_ACK, "lock configure not acknowledged"); return; }

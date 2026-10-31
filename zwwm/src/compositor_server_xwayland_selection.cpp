@@ -11,6 +11,9 @@
 
 namespace zwwm::detail {
 
+// Payloads above this use ICCCM INCR; one oversized request would kill the XWM connection.
+constexpr std::size_t kIncrementalChunk = 64U * 1024U;
+
 XwaylandSelection* xwayland_selection_for(XwaylandRuntime* runtime, xcb_atom_t atom) {
   if (runtime == nullptr) return nullptr;
   if (atom == runtime->clipboard_atom) return &runtime->clipboard;
@@ -26,7 +29,7 @@ xcb_atom_t xwayland_mime_atom(XwaylandRuntime* runtime, const std::string& mime)
 
 std::string xwayland_atom_mime(XwaylandRuntime* runtime, xcb_atom_t atom) {
   if (atom == runtime->utf8_string) return "text/plain;charset=utf-8";
-  if (atom == runtime->text_atom) return "text/plain";
+  if (atom == runtime->text_atom || atom == XCB_ATOM_STRING) return "text/plain";
   const auto cookie = xcb_get_atom_name(runtime->connection, atom);
   auto* reply = xcb_get_atom_name_reply(runtime->connection, cookie, nullptr);
   std::string result;
@@ -48,6 +51,32 @@ void xwayland_send_notify(XwaylandRuntime* runtime, const xcb_selection_request_
   xcb_send_event(runtime->connection, 0, request.requestor, XCB_EVENT_MASK_NO_EVENT,
                  reinterpret_cast<const char*>(&notify));
   xcb_flush(runtime->connection);
+}
+
+void remove_send(XwaylandRuntime* runtime, XwaylandSendTransfer* transfer) {
+  std::erase(runtime->sends, transfer);
+  delete transfer;
+}
+
+// The requestor deleting the property asks for the next chunk; a zero-length one ends it.
+void send_next_chunk(XwaylandRuntime* runtime, XwaylandSendTransfer* transfer) {
+  const auto size = std::min(kIncrementalChunk, transfer->data.size() - transfer->offset);
+  xcb_change_property(runtime->connection, XCB_PROP_MODE_REPLACE, transfer->request.requestor,
+                      transfer->request.property, transfer->request.target, 8, size,
+                      transfer->data.data() + transfer->offset);
+  xcb_flush(runtime->connection);
+  transfer->offset += size;
+  if (size == 0) remove_send(runtime, transfer);
+}
+
+void begin_incremental_send(XwaylandRuntime* runtime, XwaylandSendTransfer* transfer) {
+  const auto size = static_cast<std::uint32_t>(transfer->data.size());
+  transfer->incremental = true;
+  xcb_change_window_attributes(runtime->connection, transfer->request.requestor, XCB_CW_EVENT_MASK,
+                               &kXwaylandWindowEvents);
+  xcb_change_property(runtime->connection, XCB_PROP_MODE_REPLACE, transfer->request.requestor,
+                      transfer->request.property, runtime->incr_atom, 32, 1, &size);
+  xwayland_send_notify(runtime, transfer->request, true);
 }
 
 void remove_receive(XwaylandRuntime* runtime, XwaylandReceiveTransfer* transfer) {
@@ -226,6 +255,15 @@ bool handle_xwayland_selection_event(XwaylandRuntime* runtime, xcb_generic_event
       write_receive_property(*transfer);
       return true;
     }
+    const auto send = std::find_if(runtime->sends.begin(), runtime->sends.end(),
+        [event](const auto* candidate) {
+          return candidate->incremental && candidate->request.requestor == event->window &&
+                 candidate->request.property == event->atom;
+        });
+    if (send != runtime->sends.end() && event->state == XCB_PROPERTY_DELETE) {
+      send_next_chunk(runtime, *send);
+      return true;
+    }
   }
   if (type != XCB_SELECTION_REQUEST) return false;
   const auto* event = reinterpret_cast<xcb_selection_request_event_t*>(generic);
@@ -285,6 +323,12 @@ bool handle_xwayland_selection_event(XwaylandRuntime* runtime, xcb_generic_event
           const auto count = ::read(fd, buffer.data(), buffer.size());
           if (count > 0) { item->data.insert(item->data.end(), buffer.begin(), buffer.begin() + count); continue; }
           if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return true;
+          item->event_source = -1;
+          ::close(item->fd); item->fd = -1;
+          if (count == 0 && item->data.size() > kIncrementalChunk) {
+            begin_incremental_send(runtime, item);
+            return false;
+          }
           if (count < 0 || item->data.empty()) xwayland_send_notify(runtime, item->request, false);
           else {
             xcb_change_property(runtime->connection, XCB_PROP_MODE_REPLACE, item->request.requestor,
@@ -292,10 +336,7 @@ bool handle_xwayland_selection_event(XwaylandRuntime* runtime, xcb_generic_event
                                 item->data.size(), item->data.data());
             xwayland_send_notify(runtime, item->request, true);
           }
-          item->event_source = -1;
-          ::close(item->fd); item->fd = -1;
-          std::erase(runtime->sends, item);
-          delete item;
+          remove_send(runtime, item);
           return false;
         }
       });

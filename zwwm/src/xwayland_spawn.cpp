@@ -168,6 +168,10 @@ pid_t spawn_xwayland(const std::string& binary, const XwaylandDisplay& display,
   const std::string wayland_socket = std::to_string(wayland_fd);
   const std::string wm_socket = std::to_string(wm_fd);
   const std::string ready_socket = std::to_string(display_fd);
+  // signalfd sources block signals in the compositor; Xwayland must not inherit that.
+  sigset_t unblocked;
+  sigemptyset(&unblocked);
+  (void)::sigprocmask(SIG_SETMASK, &unblocked, nullptr);
   (void)::setenv("WAYLAND_SOCKET", wayland_socket.c_str(), 1);
   ::execl(binary.c_str(), binary.c_str(), display_name.c_str(), "-rootless", "-core", "-noreset",
           "-listenfd", listen_one.c_str(), "-listenfd", listen_two.c_str(),

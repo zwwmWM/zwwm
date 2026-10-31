@@ -38,6 +38,11 @@
 
       An Xwayland server that has bound this interface must not set the
       `WL_SURFACE_ID` atom on a window.
+
+      The interface names are the wire contract stock Xwayland binds, so they
+      must not change. zwwm hides this global from every client except the
+      Xwayland it spawned, applies set_serial on wl_surface.commit, and keeps
+      user floating state per X11 window, so a remap's new surface inherits it.
     </description>
 
     <request name="destroy" type="destructor">
