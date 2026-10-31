@@ -214,6 +214,8 @@ class Display {
   [[nodiscard]] const std::vector<Global>& globals() const { return globals_; }
   [[nodiscard]] EventLoop& event_loop() { return loop_; }
   void set_global_filter(std::function<bool(const Client&, const Global&)> filter);
+  // Limits one global to accepted clients, independently of the global filter.
+  void restrict_global(std::uint32_t name, std::function<bool(const Client&)> allowed);
   Signal destroy_signal;
 
   // Internal: used by Client for registry publication.
@@ -241,6 +243,7 @@ class Display {
 
   std::unordered_map<const Interface*, RequestHandler> handlers_;
   std::function<bool(const Client&, const Global&)> global_filter_;
+  std::unordered_map<std::uint32_t, std::function<bool(const Client&)>> global_restrictions_;
   std::vector<std::unique_ptr<Client>> clients_;
 };
 

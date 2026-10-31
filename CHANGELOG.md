@@ -25,6 +25,11 @@ All notable changes to zwwm are documented here.
   filled by batched uploads, and its shaders are compiled to SPIR-V at build time.
 - `zwwm-vlk` builds and installs standalone (pkg-config `zwwm-vlk`, flake package
   `zwwm-vlk`).
+- Xwayland: `set_serial` applies on commit, `xwayland_shell_v1` is hidden from
+  other clients, property changes refresh in per-window batches, floating state
+  survives remaps, and clipboard sends above 64 KiB use INCR. Crashes restart
+  with backoff, and the XWM adds `WM_STATE`, `_NET_FRAME_EXTENTS`, and
+  `_NET_CLOSE_WINDOW`.
 
 ### Mobile
 

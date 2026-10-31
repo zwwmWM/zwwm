@@ -11,11 +11,21 @@
 #include <xcb/xcb.h>
 #include <xcb/xfixes.h>
 
+#include <chrono>
 #include <optional>
 
 #include "zwwm/xwayland_spawn.hpp"
 
 namespace zwwm::detail {
+
+// Groups of X11 properties, so a change only re-reads the group it touched.
+enum XwaylandProperty : std::uint32_t {
+  xprop_title = 1U << 0U, xprop_class = 1U << 1U, xprop_protocols = 1U << 2U,
+  xprop_transient = 1U << 3U, xprop_type = 1U << 4U, xprop_role = 1U << 5U,
+  xprop_state = 1U << 6U, xprop_normal_hints = 1U << 7U, xprop_hints = 1U << 8U,
+  xprop_all = (1U << 9U) - 1U
+};
+inline constexpr std::uint32_t kXwaylandWindowEvents = XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE;
 
 struct XwaylandRuntime;
 struct XwaylandWindow {
@@ -29,7 +39,14 @@ struct XwaylandWindow {
   bool override_redirect = false;
   bool position_specified = false;
   bool supports_delete = false;
+  bool supports_take_focus = false;
+  bool accepts_input = true;
   bool modal = false;
+  std::uint32_t dirty = 0;
+  std::vector<xcb_atom_t> extra_states;
+  // Survive a remap, which gives the same X11 window a new wl_surface.
+  std::optional<bool> remembered_floating;
+  Rect remembered_bounds{0, 0, 0, 0};
   xcb_window_t transient_for = XCB_WINDOW_NONE;
   std::vector<xcb_atom_t> window_types;
   std::string window_role;
@@ -61,7 +78,7 @@ struct XwaylandSurfaceState {
 };
 struct XwaylandSelection { XwaylandRuntime* runtime = nullptr; xcb_atom_t atom = XCB_ATOM_NONE; xcb_window_t window = XCB_WINDOW_NONE; xcb_window_t owner = XCB_WINDOW_NONE; xcb_timestamp_t timestamp = XCB_CURRENT_TIME; DataSourceState* source = nullptr; bool primary = false; bool notify_on_focus = false; };
 struct XwaylandReceiveTransfer { XwaylandSelection* selection = nullptr; xcb_window_t window = XCB_WINDOW_NONE; int fd = -1; int event_source = -1; std::vector<std::uint8_t> data; std::size_t offset = 0; bool incremental = false; };
-struct XwaylandSendTransfer { XwaylandSelection* selection = nullptr; xcb_selection_request_event_t request{}; int fd = -1; int event_source = -1; std::vector<std::uint8_t> data; };
+struct XwaylandSendTransfer { XwaylandSelection* selection = nullptr; xcb_selection_request_event_t request{}; int fd = -1; int event_source = -1; std::vector<std::uint8_t> data; std::size_t offset = 0; bool incremental = false; };
 
 struct XwaylandRuntime {
   zwayland::server::Display* display = nullptr; zwayland::server::EventLoop* loop = nullptr; std::uint32_t shell = 0; zwayland::server::Client* client = nullptr;
@@ -87,14 +104,27 @@ struct XwaylandRuntime {
   xcb_atom_t clipboard_atom = XCB_ATOM_NONE, primary_atom = XCB_ATOM_NONE, targets_atom = XCB_ATOM_NONE;
   xcb_atom_t timestamp_atom = XCB_ATOM_NONE, wl_selection_atom = XCB_ATOM_NONE, text_atom = XCB_ATOM_NONE;
   xcb_atom_t incr_atom = XCB_ATOM_NONE; xcb_window_t wm_window = XCB_WINDOW_NONE; Observer* observer = nullptr;
+  xcb_atom_t wm_state = XCB_ATOM_NONE, wm_hints = XCB_ATOM_NONE, net_frame_extents = XCB_ATOM_NONE;
+  xcb_atom_t net_request_frame_extents = XCB_ATOM_NONE, net_close_window = XCB_ATOM_NONE;
+  std::chrono::steady_clock::time_point started_at{}; std::uint32_t restart_attempts = 0;
+  std::vector<pid_t> exiting_children;
   XwaylandSelection clipboard; XwaylandSelection primary;
   std::vector<XwaylandReceiveTransfer*> receives; std::vector<XwaylandSendTransfer*> sends;
   std::vector<XwaylandWindow*> windows; std::vector<XwaylandSurfaceState*> surfaces;
 
   static xcb_atom_t intern(xcb_connection_t* connection, const char* name);
   XwaylandWindow* window(xcb_window_t id) const;
+  bool is_own(xcb_window_t id) const;
+  XwaylandWindow* track(xcb_window_t id, std::int16_t x, std::int16_t y, std::uint16_t width,
+                        std::uint16_t height, bool override_redirect);
+  void forget(XwaylandWindow* item);
   void publish_clients() const;
-  void read_window_properties(XwaylandWindow* item);
+  void publish_wm_state(xcb_window_t id, std::uint32_t state) const;
+  void publish_frame_extents(xcb_window_t id) const;
+  std::uint32_t property_field(xcb_atom_t atom) const;
+  bool wm_owned_state(xcb_atom_t atom) const;
+  void read_window_properties(XwaylandWindow* item, std::uint32_t fields = xprop_all);
+  bool refresh_dirty();
   bool automatic_floating(const XwaylandWindow* item) const;
   bool reclassify(XwaylandWindow* item);
   void publish_state(XwaylandSurfaceState* role) const;
@@ -107,6 +137,8 @@ struct XwaylandRuntime {
   void process_event(xcb_generic_event_t* generic);
   int dispatch(std::uint32_t mask);
   void reset_server();
+  void schedule_restart();
+  void reap_children();
   bool initialize_xwm();
   bool start();
   static void surface_resource_destroyed(zwayland::server::Resource* resource);
@@ -122,6 +154,8 @@ void xwayland_receive_selection(DataSourceState* source, const char* mime, int f
 void xwayland_wayland_selection_changed(SeatState* seat, bool primary);
 void xwayland_keyboard_focus_changed(XwaylandRuntime* runtime);
 void xwayland_reset_selections(XwaylandRuntime* runtime);
+void commit_xwayland_surface(XwaylandSurfaceState* role);
+void detach_xwayland_role(XwaylandSurfaceState* role);
 void focus_xwayland_surface(SurfaceState* surface);
 void focus_xwayland_if_needed(SurfaceState* surface);
 void set_xwayland_floating(XwaylandSurfaceState* role, bool floating);
