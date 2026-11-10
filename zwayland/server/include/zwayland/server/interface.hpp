@@ -5,9 +5,7 @@
 
 namespace zwayland::server {
 
-// Modern replacement for `struct wl_interface` / `struct wl_message`. The
-// scanner will eventually emit these directly; for now the core defines the
-// built-in wl_display / wl_registry / wl_callback metadata below.
+// Replacement for wl_interface / wl_message.
 struct Message {
   const char* name;
   const char* signature;  // libwayland-style: "u?o", "n", "usun", ...

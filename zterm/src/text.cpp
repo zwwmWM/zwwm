@@ -22,6 +22,104 @@ void font_options(PangoContext* context, bool cell) {
   cairo_font_options_destroy(options);
 }
 
+struct Point { double x, y; };
+
+// Fillets the convex corners of a flattened outline. Each fillet is capped at half of the
+// smooth runs beside it, so stroke ends become round caps and no stroke is ever cut.
+void append_rounded_path(cairo_t* cairo, const cairo_path_t* path, double radius) {
+  std::vector<std::vector<Point>> contours;
+  for (int i = 0; i < path->num_data; i += path->data[i].header.length) {
+    const auto& header = path->data[i].header;
+    if (header.type == CAIRO_PATH_MOVE_TO) contours.emplace_back();
+    if ((header.type == CAIRO_PATH_MOVE_TO || header.type == CAIRO_PATH_LINE_TO) && !contours.empty()) {
+      const Point point{path->data[i + 1].point.x, path->data[i + 1].point.y};
+      auto& contour = contours.back();
+      if (contour.empty() || std::hypot(point.x - contour.back().x, point.y - contour.back().y) > 1e-4)
+        contour.push_back(point);
+    }
+  }
+  double outer = 0, largest = 0;
+  for (auto& contour : contours) {
+    while (contour.size() > 1 && std::hypot(contour.front().x - contour.back().x, contour.front().y - contour.back().y) <= 1e-4)
+      contour.pop_back();
+    double area = 0;
+    for (std::size_t i = 0; i < contour.size(); ++i) {
+      const auto& p = contour[i]; const auto& q = contour[(i + 1) % contour.size()];
+      area += p.x * q.y - q.x * p.y;
+    }
+    if (std::abs(area) > largest) { largest = std::abs(area); outer = area; }
+  }
+  constexpr double kCorner = 0.6;  // radians of turn that count as a corner
+  for (const auto& contour : contours) {
+    const std::size_t n = contour.size();
+    if (n < 3) {
+      for (std::size_t i = 0; i < n; ++i) i ? cairo_line_to(cairo, contour[i].x, contour[i].y) : cairo_move_to(cairo, contour[i].x, contour[i].y);
+      cairo_close_path(cairo);
+      continue;
+    }
+    const auto at = [&](std::ptrdiff_t i) -> const Point& { return contour[static_cast<std::size_t>((i % std::ptrdiff_t(n) + n) % n)]; };
+    const auto length = [&](std::ptrdiff_t i) { return std::hypot(at(i + 1).x - at(i).x, at(i + 1).y - at(i).y); };
+    std::vector<double> turn(n), cross(n);
+    for (std::size_t i = 0; i < n; ++i) {
+      const Point& p = at(std::ptrdiff_t(i) - 1); const Point& c = at(i); const Point& q = at(i + 1);
+      const double ax = c.x - p.x, ay = c.y - p.y, bx = q.x - c.x, by = q.y - c.y;
+      cross[i] = ax * by - ay * bx;
+      turn[i] = std::atan2(std::abs(cross[i]), ax * bx + ay * by);
+    }
+    const auto corner = [&](std::size_t i) { return turn[i] > kCorner; };
+    // Arc length from vertex i to the next corner, walking forward (+1) or backward (-1).
+    const auto run = [&](std::size_t i, int step) {
+      double total = 0;
+      for (std::size_t walked = 0; walked < n; ++walked) {
+        const std::ptrdiff_t from = std::ptrdiff_t(i) + std::ptrdiff_t(walked) * step;
+        total += length(step > 0 ? from : from - 1);
+        if (corner(static_cast<std::size_t>(((from + step) % std::ptrdiff_t(n) + n) % n))) break;
+      }
+      return total;
+    };
+    struct Fillet { Point start, end, start_dir, end_dir; double handle = 0; bool used = false; };
+    std::vector<Fillet> fillets(n);
+    std::vector<bool> trimmed(n, false);
+    // Point at distance d from vertex i along the outline, and the unit direction of travel there.
+    const auto walk = [&](std::size_t i, int step, double distance, Point& point, Point& direction) {
+      std::ptrdiff_t from = std::ptrdiff_t(i);
+      while (true) {
+        const std::ptrdiff_t to = from + step;
+        const double segment = std::hypot(at(to).x - at(from).x, at(to).y - at(from).y);
+        const double ux = (at(to).x - at(from).x) / segment, uy = (at(to).y - at(from).y) / segment;
+        direction = {ux * step, uy * step};
+        if (distance <= segment) { point = {at(from).x + ux * distance, at(from).y + uy * distance}; return; }
+        distance -= segment;
+        trimmed[static_cast<std::size_t>((to % std::ptrdiff_t(n) + n) % n)] = true;
+        from = to;
+      }
+    };
+    for (std::size_t i = 0; i < n; ++i) {
+      if (!corner(i) || (cross[i] > 0) != (outer > 0)) continue;
+      const double half = std::tan(turn[i] / 2);
+      const double tangent = std::min({radius * half, run(i, -1) / 2, run(i, 1) / 2});
+      if (tangent < 0.02) continue;
+      auto& fillet = fillets[i];
+      walk(i, -1, tangent, fillet.start, fillet.start_dir);
+      walk(i, 1, tangent, fillet.end, fillet.end_dir);
+      fillet.handle = 4.0 / 3.0 * std::tan(turn[i] / 4) * tangent / half;
+      fillet.used = true;
+    }
+    bool first = true;
+    const auto to = [&](const Point& p) { first ? cairo_move_to(cairo, p.x, p.y) : cairo_line_to(cairo, p.x, p.y); first = false; };
+    for (std::size_t i = 0; i < n; ++i) {
+      const auto& fillet = fillets[i];
+      if (fillet.used) {
+        to(fillet.start);
+        cairo_curve_to(cairo, fillet.start.x + fillet.start_dir.x * fillet.handle, fillet.start.y + fillet.start_dir.y * fillet.handle,
+                       fillet.end.x - fillet.end_dir.x * fillet.handle, fillet.end.y - fillet.end_dir.y * fillet.handle,
+                       fillet.end.x, fillet.end.y);
+      } else if (!trimmed[i]) to(contour[i]);
+    }
+    cairo_close_path(cairo);
+  }
+}
+
 }  // namespace
 
 Text::Text() {
@@ -165,7 +263,9 @@ Text::Bitmap Text::rasterize(std::string_view text, bool bold, bool italic, std:
   bitmap.x = ink.x - 1;
   bitmap.y = ink.y - 1 + baseline_ - PANGO_PIXELS(pango_layout_get_baseline(layout));
   bitmap.color = color;
-  bitmap.scale = color ? 1 : 2;
+  // Text maps 1:1 to output pixels; scaled icons and cell graphics keep 2x detail.
+  const bool icon = role == FontRole::Symbols && !cell;
+  bitmap.scale = color || !(cell || icon) ? 1 : 2;
   if (ink.width <= 0 || ink.height <= 0) { g_object_unref(layout); return bitmap; }
   bitmap.width = (ink.width + 2) * bitmap.scale;
   bitmap.height = (ink.height + 2) * bitmap.scale;
@@ -186,11 +286,23 @@ Text::Bitmap Text::rasterize(std::string_view text, bool bold, bool italic, std:
   auto* cairo = cairo_create(surface);
   cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR); cairo_paint(cairo);
   cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
-  cairo_scale(cairo, bitmap.scale * (cell ? width_ / reference.width : 1),
-                     bitmap.scale * (cell ? height_ / reference.height : 1));
   cairo_set_source_rgba(cairo, ((rgb >> 16U) & 255U) / 255., ((rgb >> 8U) & 255U) / 255., (rgb & 255U) / 255., 1);
-  cairo_move_to(cairo, cell ? -reference.x : 1 - ink.x, cell ? baseline - reference.y : 1 - ink.y);
-  pango_cairo_show_layout(cairo, layout);
+  if (!color && !cell && !icon && rounding_ > 0) {
+    // The outline stays hinted for the pixel grid; only its corners change.
+    cairo_move_to(cairo, 1 - ink.x, 1 - ink.y);
+    pango_cairo_layout_path(cairo, layout);
+    auto* path = cairo_copy_path_flat(cairo);
+    cairo_new_path(cairo);
+    append_rounded_path(cairo, path, rounding_ * height_ * 0.08);
+    cairo_path_destroy(path);
+    cairo_set_antialias(cairo, CAIRO_ANTIALIAS_BEST);
+    cairo_fill(cairo);
+  } else {
+    cairo_scale(cairo, bitmap.scale * (cell ? width_ / reference.width : 1),
+                       bitmap.scale * (cell ? height_ / reference.height : 1));
+    cairo_move_to(cairo, cell ? -reference.x : 1 - ink.x, cell ? baseline - reference.y : 1 - ink.y);
+    pango_cairo_show_layout(cairo, layout);
+  }
   const auto status = cairo_status(cairo);
   cairo_destroy(cairo); g_object_unref(layout); cairo_surface_flush(surface);
   if (status != CAIRO_STATUS_SUCCESS || cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {

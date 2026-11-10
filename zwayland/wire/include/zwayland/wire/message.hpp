@@ -45,7 +45,7 @@ static_assert(!std::is_constructible_v<NullableString, const char*>);
 static_assert(std::is_constructible_v<NullableString, std::string_view>);
 static_assert(std::is_constructible_v<NullableString, std::nullopt_t>);
 
-// Builds one message; FDs remain out-of-band for SCM_RIGHTS.
+// Builds one message in inline storage; spills to the heap only for large payloads.
 class MessageBuilder {
  public:
   explicit MessageBuilder(std::uint32_t object_id);
@@ -65,16 +65,37 @@ class MessageBuilder {
   void append_array(std::span<const std::byte> data);
   void add_fd(int fd);
 
-  // Serializes the aligned message and transfers it to the caller.
+  [[nodiscard]] std::uint32_t object_id() const { return object_id_; }
+  [[nodiscard]] std::uint32_t opcode() const { return opcode_; }
+
+  // Writes the header and returns a view valid until the builder changes.
+  [[nodiscard]] std::span<const std::byte> seal();
+  // Legacy copy-out path; prefer seal() with Connection::queue(span, ...).
   [[nodiscard]] std::vector<std::byte> finish();
   [[nodiscard]] std::vector<int> take_fds();
+  [[nodiscard]] std::span<const int> fds() const { return fds_; }
+  // Caller took ownership of fds(); the builder will not close them.
+  void release_fds() { fds_.clear(); }
 
  private:
-  std::vector<std::byte> buffer_;
+  static constexpr std::size_t kInline = 256;
+  std::byte* grow(std::size_t bytes);
+  [[nodiscard]] std::byte* data() { return heap_.empty() ? inline_ : heap_.data(); }
+
+  alignas(4) std::byte inline_[kInline];
+  std::vector<std::byte> heap_;
+  std::size_t size_ = 8;
   std::vector<int> fds_;
+  std::uint32_t object_id_ = 0;
   std::uint32_t opcode_ = 0;
-  void pad_to_alignment();
 };
+
+// Number of fd ('h') arguments in a signature.
+[[nodiscard]] constexpr std::size_t signature_fd_count(std::string_view signature) {
+  std::size_t count = 0;
+  for (char c : signature) count += c == 'h';
+  return count;
+}
 
 class FileDescriptor {
  public:

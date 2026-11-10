@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <compare>
 #include <deque>
@@ -79,6 +80,11 @@ class Terminal {
   std::uint64_t revision() const { return revision_; }
   std::uint64_t selection_revision() const { return selection_revision_; }
   std::string take_output();
+  // True while the app holds a synchronized update (mode 2026); renderers should
+  // not present until it ends or times out.
+  bool synchronized() const;
+  // Milliseconds until a held synchronized update times out, or -1.
+  int synchronized_timeout() const;
   bool dirty = true;
   std::function<void(const std::string&)> title;
 
@@ -97,7 +103,8 @@ class Terminal {
     int column = 0;
     auto operator<=>(const SelectionPoint&) const = default;
   };
-  enum class Parser { Ground, Escape, Csi, Osc, OscEscape, Charset, Ignore, IgnoreEscape };
+  enum class Parser { Ground, Escape, EscapeIntermediate, Csi, Osc, OscEscape, Charset, Ignore, IgnoreEscape };
+  struct Params { std::vector<int> values; std::vector<bool> sub; };
   enum class MouseTracking { None, Press, Clicks, Drag, All };
   Screen primary_, alternate_;
   int rows_, columns_, top_ = 0, bottom_, scroll_ = 0;
@@ -112,8 +119,13 @@ class Terminal {
   std::vector<bool> tabs_;
   bool alternate = false, application_cursor_ = false, origin_ = false,
        autowrap_ = true, insert_ = false, newline_ = false, cursor_visible_ = true,
-       focus_reporting_ = false, bracketed_paste_ = false, dec_graphics_ = false;
+       focus_reporting_ = false, bracketed_paste_ = false, osc_bel_ = false;
+  std::array<bool, 2> charset_graphics_{};  // G0/G1 designated as DEC special graphics
+  int active_charset_ = 0;
   char charset_target_ = 0;
+  char32_t last_graphic_ = 0;
+  bool synchronized_ = false;
+  std::chrono::steady_clock::time_point sync_deadline_{};
   Parser parser_ = Parser::Ground;
   std::string sequence_, output_;
   char32_t utf8_ = 0, utf8_min_ = 0;
@@ -150,9 +162,14 @@ class Terminal {
   void resize_alternate(int rows, int columns);
   void csi(char command);
   void osc();
-  void sgr(const std::vector<int>& parameters);
+  static Params parameters(std::string_view sequence);
+  void sgr(const Params& parameters);
   void mode(int parameter, bool enabled, bool private_mode);
+  int mode_state(int parameter, bool private_mode) const;
+  void tab_forward();
+  void tab_backward();
   void output(std::string_view bytes);
+  void reply(std::string_view bytes);
   void mouse_report(unsigned button, bool release, MousePosition position, unsigned modifiers);
   void changed() { dirty = true; ++revision_; }
 };

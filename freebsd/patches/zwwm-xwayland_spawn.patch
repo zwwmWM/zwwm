@@ -1,0 +1,67 @@
+--- a/zwwm/src/xwayland_spawn.cpp
++++ b/zwwm/src/xwayland_spawn.cpp
+@@ -101,17 +101,8 @@
+     std::memcpy(regular.sun_path, socket_path.c_str(), socket_path.size() + 1);
+     const auto regular_length = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + socket_path.size() + 1);
+ 
+-    sockaddr_un abstract{};
+-    abstract.sun_family = AF_UNIX;
+-    abstract.sun_path[0] = '\0';
+-    std::memcpy(abstract.sun_path + 1, socket_path.c_str(), socket_path.size());
+-    const auto abstract_length = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + socket_path.size());
+-
+-    const int abstract_fd = create_socket(abstract, abstract_length, nullptr);
+     const int regular_fd = create_socket(regular, regular_length, socket_path.c_str());
+-    if (abstract_fd < 0 || regular_fd < 0) {
+-      if (abstract_fd >= 0) ::close(abstract_fd);
+-      if (regular_fd >= 0) ::close(regular_fd);
++    if (regular_fd < 0) {
+       ::unlink(socket_path.c_str());
+       ::close(lock_fd);
+       ::unlink(lock_path.c_str());
+@@ -121,7 +112,6 @@
+     char pid[12]{};
+     const int length = std::snprintf(pid, sizeof(pid), "%010d\n", static_cast<int>(::getpid()));
+     if (length != 11 || ::write(lock_fd, pid, 11) != 11) {
+-      ::close(abstract_fd);
+       ::close(regular_fd);
+       ::unlink(socket_path.c_str());
+       ::close(lock_fd);
+@@ -130,7 +120,7 @@
+     }
+     display->number = number;
+     display->lock_fd = lock_fd;
+-    display->listen_fds = {abstract_fd, regular_fd};
++    display->listen_fds = {regular_fd, -1};
+     return true;
+   }
+   return false;
+@@ -154,17 +144,16 @@
+ pid_t spawn_xwayland(const std::string& binary, const XwaylandDisplay& display,
+                      int wayland_fd, int wm_fd, int display_fd) {
+   if (binary.empty() || display.number < 0 || display.listen_fds[0] < 0 ||
+-      display.listen_fds[1] < 0 || wayland_fd < 0 || wm_fd < 0 || display_fd < 0) return -1;
++      wayland_fd < 0 || wm_fd < 0 || display_fd < 0) return -1;
+   const pid_t child = ::fork();
+   if (child != 0) return child;
+ 
+-  for (const int fd : {display.listen_fds[0], display.listen_fds[1], wayland_fd, wm_fd, display_fd}) {
++  for (const int fd : {display.listen_fds[0], wayland_fd, wm_fd, display_fd}) {
+     const int flags = ::fcntl(fd, F_GETFD);
+     if (flags < 0 || ::fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) != 0) ::_exit(126);
+   }
+   const std::string display_name = ":" + std::to_string(display.number);
+   const std::string listen_one = std::to_string(display.listen_fds[0]);
+-  const std::string listen_two = std::to_string(display.listen_fds[1]);
+   const std::string wayland_socket = std::to_string(wayland_fd);
+   const std::string wm_socket = std::to_string(wm_fd);
+   const std::string ready_socket = std::to_string(display_fd);
+@@ -174,7 +163,7 @@
+   (void)::sigprocmask(SIG_SETMASK, &unblocked, nullptr);
+   (void)::setenv("WAYLAND_SOCKET", wayland_socket.c_str(), 1);
+   ::execl(binary.c_str(), binary.c_str(), display_name.c_str(), "-rootless", "-core", "-noreset",
+-          "-listenfd", listen_one.c_str(), "-listenfd", listen_two.c_str(),
++          "-listenfd", listen_one.c_str(),
+           "-displayfd", ready_socket.c_str(), "-wm", wm_socket.c_str(), nullptr);
+   ::_exit(127);
+ }

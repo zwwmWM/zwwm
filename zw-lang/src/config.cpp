@@ -1,7 +1,6 @@
 #include "zwwm/lang/config.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -9,43 +8,68 @@
 #include <iterator>
 #include <limits>
 #include <optional>
-#include <charconv>
 #include <string_view>
-#include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace zwwm::lang {
 namespace {
 
+constexpr std::size_t kMaxDiagnostics = 64;
+// An escaped "\$" is stored as NUL + '$' until resolution so it is never spliced.
+constexpr char kEscapedDollar = '\0';
+
+bool is_variable_name(std::string_view name) {
+  return !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char character) {
+    return std::isupper(character) || std::isdigit(character) || character == '_';
+  });
+}
+
+void append_utf8(std::string& text, std::uint32_t code) {
+  if (code < 0x80) {
+    text += static_cast<char>(code);
+  } else if (code < 0x800) {
+    text += static_cast<char>(0xc0 | (code >> 6));
+    text += static_cast<char>(0x80 | (code & 0x3f));
+  } else if (code < 0x10000) {
+    text += static_cast<char>(0xe0 | (code >> 12));
+    text += static_cast<char>(0x80 | ((code >> 6) & 0x3f));
+    text += static_cast<char>(0x80 | (code & 0x3f));
+  } else {
+    text += static_cast<char>(0xf0 | (code >> 18));
+    text += static_cast<char>(0x80 | ((code >> 12) & 0x3f));
+    text += static_cast<char>(0x80 | ((code >> 6) & 0x3f));
+    text += static_cast<char>(0x80 | (code & 0x3f));
+  }
+}
+
 class Parser {
  public:
-  explicit Parser(std::string_view input) : input_(input) {}
+  Parser(std::string_view input, std::string file) : input_(input) { location_.file = std::move(file); }
 
   ParseResult parse() {
     Config config;
     skip_ignored();
     while (!at_end()) {
+      const std::size_t start = position_;
       const SourceLocation location = location_;
       const auto key = parse_identifier();
       if (!key.has_value()) {
-        recover();
-        skip_ignored();
+        synchronize(0, start);
         continue;
       }
       if (!consume('=')) {
-        error("expected '=' after assignment name");
-        recover();
-        skip_ignored();
+        error("expected '=' after '" + *key + "'");
+        synchronize(0, start);
         continue;
       }
-      const auto value = parse_value_list();
+      auto value = parse_value_list();
       if (!value.has_value()) {
-        recover();
-        skip_ignored();
+        synchronize(0, start);
         continue;
       }
-      config.assignments.push_back({location, *key, *value});
+      config.assignments.push_back({location, *key, std::move(*value)});
       skip_ignored();
     }
     return {std::move(config), std::move(diagnostics_), {}};
@@ -54,7 +78,9 @@ class Parser {
  private:
   [[nodiscard]] bool at_end() const { return position_ >= input_.size(); }
 
-  [[nodiscard]] char peek() const { return at_end() ? '\0' : input_[position_]; }
+  [[nodiscard]] char peek(std::size_t ahead = 0) const {
+    return position_ + ahead < input_.size() ? input_[position_ + ahead] : '\0';
+  }
 
   char take() {
     const char character = peek();
@@ -76,7 +102,7 @@ class Parser {
         take();
         continue;
       }
-      if (peek() == '-' && position_ + 1 < input_.size() && input_[position_ + 1] == '-') {
+      if (peek() == '-' && peek(1) == '-') {
         while (!at_end() && take() != '\n') {
         }
         continue;
@@ -87,207 +113,441 @@ class Parser {
 
   bool consume(char expected) {
     skip_ignored();
-    if (peek() != expected) {
-      return false;
-    }
+    if (peek() != expected) return false;
     take();
+    if (expected == '[' || expected == '{') ++depth_;
+    if (expected == ']' || expected == '}') --depth_;
     skip_ignored();
     return true;
   }
 
-  [[nodiscard]] bool is_identifier_start(char character) const {
+  static bool is_identifier_start(char character) {
     return std::isalpha(static_cast<unsigned char>(character)) || character == '_';
   }
 
-  [[nodiscard]] bool is_identifier_character(char character) const {
+  static bool is_identifier_character(char character) {
     return std::isalnum(static_cast<unsigned char>(character)) || character == '_' || character == '-';
   }
 
   std::optional<std::string> parse_identifier() {
     skip_ignored();
     if (!is_identifier_start(peek())) {
-      error("expected identifier");
+      error(at_end() ? "unexpected end of file" : std::string("unexpected '") + peek() + "'");
       return std::nullopt;
     }
     std::string identifier;
-    while (is_identifier_character(peek())) {
-      identifier += take();
-    }
+    while (is_identifier_character(peek())) identifier += take();
     skip_ignored();
     return identifier;
   }
 
   std::optional<Value> parse_value_list() {
+    skip_ignored();
+    const SourceLocation location = location_;
     Value::List list;
     if (peek() == ',') {
-      list.values.emplace_back(std::string{});
+      list.values.emplace_back(std::string{}, location);
     } else {
-      const auto first = parse_value();
+      auto first = parse_value();
       if (!first.has_value()) return std::nullopt;
-      list.values.push_back(*first);
+      list.values.push_back(std::move(*first));
     }
     while (consume(',')) {
-      const auto next = parse_value();
-      if (!next.has_value()) {
-        return std::nullopt;
-      }
-      list.values.push_back(*next);
+      auto next = parse_value();
+      if (!next.has_value()) return std::nullopt;
+      list.values.push_back(std::move(*next));
     }
-    if (list.values.size() == 1) {
-      return list.values.front();
-    }
-    return Value{std::move(list)};
+    if (list.values.size() == 1) return std::move(list.values.front());
+    return Value{std::move(list), location};
   }
 
   std::optional<Value> parse_value() {
     skip_ignored();
-    if (peek() == '"') {
-      return parse_string();
-    }
+    const SourceLocation location = location_;
+    if (peek() == '"') return parse_string();
     if (peek() == '$') {
       take();
       const auto name = parse_identifier();
-      if (!name.has_value()) {
-        return std::nullopt;
-      }
-      return Value{VariableReference{*name}};
+      if (!name.has_value()) return std::nullopt;
+      return Value{VariableReference{*name}, location};
     }
-    if (peek() == '[') {
-      return parse_array();
-    }
-    if (peek() == '{') {
-      return parse_object();
-    }
+    if (peek() == '[') return parse_array();
+    if (peek() == '{') return parse_object();
     if (std::isdigit(static_cast<unsigned char>(peek())) ||
-        (peek() == '-' && position_ + 1 < input_.size() && std::isdigit(static_cast<unsigned char>(input_[position_ + 1])))) {
-      return parse_integer();
+        (peek() == '-' && std::isdigit(static_cast<unsigned char>(peek(1))))) {
+      return parse_number();
     }
     const auto identifier = parse_identifier();
-    if (!identifier.has_value()) {
-      return std::nullopt;
-    }
-    if (*identifier == "true") {
-      return Value{true};
-    }
-    if (*identifier == "false") {
-      return Value{false};
-    }
-    if (*identifier == "null") {
-      return Value{std::monostate{}};
-    }
-    return Value{*identifier};
+    if (!identifier.has_value()) return std::nullopt;
+    if (*identifier == "true") return Value{true, location};
+    if (*identifier == "false") return Value{false, location};
+    if (*identifier == "null") return Value{std::monostate{}, location};
+    return Value{*identifier, location};
   }
 
   std::optional<Value> parse_string() {
+    const SourceLocation location = location_;
     take();
     std::string value;
     while (!at_end() && peek() != '"') {
-      if (peek() == '\\') {
-        take();
-        if (at_end()) {
+      if (peek() == '\0') {
+        error("strings cannot contain NUL bytes");
+        return std::nullopt;
+      }
+      if (peek() != '\\') {
+        value += take();
+        continue;
+      }
+      take();
+      if (at_end()) break;
+      const char escaped = take();
+      switch (escaped) {
+        case 'n': value += '\n'; break;
+        case 't': value += '\t'; break;
+        case 'r': value += '\r'; break;
+        case 'e': value += '\x1b'; break;
+        case '"': value += '"'; break;
+        case '\\': value += '\\'; break;
+        case '$': value += kEscapedDollar; value += '$'; break;
+        case 'u': {
+          if (!parse_unicode_escape(value)) return std::nullopt;
           break;
         }
-        const char escaped = take();
-        if (escaped == 'n') {
-          value += '\n';
-        } else {
+        default:
+          // Unknown escapes stay literal, so regexes like "^foo\.bar$" keep working.
+          value += '\\';
           value += escaped;
-        }
-      } else {
-        value += take();
       }
     }
     if (at_end()) {
-      error("unterminated string");
+      diagnostics_.push_back({DiagnosticLevel::error, location, "unterminated string"});
       return std::nullopt;
     }
     take();
     skip_ignored();
-    return Value{std::move(value)};
+    return Value{std::move(value), location};
   }
 
-  std::optional<Value> parse_integer() {
-    const bool negative = peek() == '-';
-    if (negative) {
-      take();
+  bool parse_unicode_escape(std::string& value) {
+    if (peek() != '{') {
+      error("expected '{' after \\u, as in \\u{2192}");
+      return false;
     }
+    take();
+    std::uint32_t code = 0;
+    int digits = 0;
+    while (std::isxdigit(static_cast<unsigned char>(peek())) && digits < 6) {
+      const char digit = take();
+      code = code * 16 + static_cast<std::uint32_t>(std::isdigit(static_cast<unsigned char>(digit))
+                                                         ? digit - '0'
+                                                         : std::tolower(static_cast<unsigned char>(digit)) - 'a' + 10);
+      ++digits;
+    }
+    if (digits == 0 || peek() != '}' || code == 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+      error("invalid unicode escape; use \\u{1} to \\u{10FFFF}");
+      return false;
+    }
+    take();
+    append_utf8(value, code);
+    return true;
+  }
+
+  std::optional<Value> parse_number() {
+    const SourceLocation location = location_;
+    const bool negative = peek() == '-';
+    if (negative) take();
+    constexpr auto limit = std::numeric_limits<std::int64_t>::max();
     std::int64_t value = 0;
+    bool overflow = false;
     while (std::isdigit(static_cast<unsigned char>(peek()))) {
-      value = value * 10 + (take() - '0');
+      const int digit = take() - '0';
+      if (value > (limit - digit) / 10) overflow = true;
+      else value = value * 10 + digit;
+    }
+    bool decimal = false;
+    if (peek() == '.' && std::isdigit(static_cast<unsigned char>(peek(1)))) {
+      take();
+      decimal = true;
+      int places = 0;
+      std::int64_t fraction = 0;
+      while (std::isdigit(static_cast<unsigned char>(peek()))) {
+        const int digit = take() - '0';
+        if (++places <= 3) fraction = fraction * 10 + digit;
+      }
+      if (places > 3) {
+        diagnostics_.push_back({DiagnosticLevel::error, location, "decimals have at most 3 places"});
+        return std::nullopt;
+      }
+      for (; places < 3; ++places) fraction *= 10;
+      if (value > (limit - fraction) / 1000) overflow = true;
+      else value = value * 1000 + fraction;
+    }
+    if (overflow) {
+      diagnostics_.push_back({DiagnosticLevel::error, location, "number is out of range"});
+      return std::nullopt;
     }
     skip_ignored();
-    return Value{negative ? -value : value};
+    Value result{negative ? -value : value, location};
+    result.decimal = decimal;
+    return result;
   }
 
   std::optional<Value> parse_array() {
-    take();
-    skip_ignored();
+    const SourceLocation location = location_;
+    consume('[');
     Value::Array values;
-    if (consume(']')) {
-      return Value{std::move(values)};
-    }
+    if (consume(']')) return Value{std::move(values), location};
     while (true) {
-      const auto value = parse_value();
-      if (!value.has_value()) {
-        return std::nullopt;
-      }
-      values.values.push_back(*value);
-      if (consume(']')) {
-        return Value{std::move(values)};
-      }
+      auto value = parse_value();
+      if (!value.has_value()) return std::nullopt;
+      values.values.push_back(std::move(*value));
+      if (consume(']')) return Value{std::move(values), location};
       if (!consume(',')) {
         error("expected ',' or ']' in array");
         return std::nullopt;
       }
-      if (consume(']')) {
-        return Value{std::move(values)};
-      }
+      if (consume(']')) return Value{std::move(values), location};
     }
   }
 
   std::optional<Value> parse_object() {
-    take();
-    skip_ignored();
+    const SourceLocation location = location_;
+    consume('{');
+    const int depth = depth_;
     Value::Object fields;
+    std::unordered_set<std::string> seen;
     while (!consume('}')) {
       if (at_end()) {
-        error("unterminated object");
+        diagnostics_.push_back({DiagnosticLevel::error, location, "unterminated object"});
         return std::nullopt;
       }
+      const std::size_t start = position_;
+      const SourceLocation field_location = location_;
       std::optional<std::string> key;
       if (peek() == '"') {
         auto quoted = parse_string();
-        if (quoted.has_value()) key = *std::get_if<std::string>(&quoted->data);
+        if (quoted.has_value()) key = std::get<std::string>(quoted->data);
       } else {
         key = parse_identifier();
       }
-      if (!key.has_value()) {
-        return std::nullopt;
+      std::optional<Value> value;
+      if (key.has_value()) {
+        if (!consume('=')) error("expected '=' after '" + *key + "'");
+        else value = parse_value_list();
       }
-      if (!consume('=')) {
-        error("expected '=' after object field name");
-        return std::nullopt;
-      }
-      const auto value = parse_value_list();
+      // A broken field skips to the next line of this object instead of the whole object.
       if (!value.has_value()) {
-        return std::nullopt;
+        synchronize(depth, start);
+        continue;
       }
-      fields.add(*key, *value);
+      if (!seen.insert(*key).second)
+        diagnostics_.push_back({DiagnosticLevel::warning, field_location,
+                                "duplicate field '" + *key + "'; the last one is used"});
+      fields.add(*key, std::move(*value));
     }
-    return Value{std::move(fields)};
+    return Value{std::move(fields), location};
   }
 
-  void error(std::string message) { diagnostics_.push_back({DiagnosticLevel::error, location_, std::move(message)}); }
-
-  void recover() {
-    while (!at_end() && take() != '\n') {
+  // Brackets left open by the broken value are abandoned, then this skips to the next line
+  // at depth `target` or stops before the closer of the enclosing object.
+  void synchronize(int target, std::size_t start) {
+    depth_ = target;
+    while (!at_end()) {
+      const char character = peek();
+      if (character == '\n' && depth_ <= target && position_ > start) break;
+      if ((character == '}' || character == ']') && target > 0 && depth_ <= target && position_ > start) break;
+      if (character == '"') {
+        take();
+        while (!at_end() && peek() != '"' && peek() != '\n') {
+          if (peek() == '\\') take();
+          take();
+        }
+        if (peek() == '"') take();
+        continue;
+      }
+      if (character == '-' && peek(1) == '-') {
+        while (!at_end() && peek() != '\n') take();
+        continue;
+      }
+      if (character == '{' || character == '[') ++depth_;
+      if ((character == '}' || character == ']') && depth_ > 0) --depth_;
+      take();
     }
+    skip_ignored();
+  }
+
+  void error(std::string message) {
+    if (diagnostics_.size() < kMaxDiagnostics)
+      diagnostics_.push_back({DiagnosticLevel::error, location_, std::move(message)});
   }
 
   std::string_view input_;
   std::size_t position_ = 0;
+  int depth_ = 0;
   SourceLocation location_;
   std::vector<Diagnostic> diagnostics_;
+};
+
+std::string decimal_text(std::int64_t thousandths) {
+  std::string text = thousandths < 0 ? "-" : "";
+  const std::uint64_t magnitude = thousandths < 0 ? 0 - static_cast<std::uint64_t>(thousandths)
+                                                  : static_cast<std::uint64_t>(thousandths);
+  text += std::to_string(magnitude / 1000);
+  std::string fraction = std::to_string(1000 + magnitude % 1000).substr(1);
+  while (!fraction.empty() && fraction.back() == '0') fraction.pop_back();
+  return fraction.empty() ? text : text + "." + fraction;
+}
+
+// Substitutes variables in place. The last definition of a variable wins everywhere, so a
+// later override also reaches values from files imported before it.
+class Resolver {
+ public:
+  Resolver(Config& config, std::vector<Diagnostic>& diagnostics) : config_(config), diagnostics_(diagnostics) {}
+
+  void run() {
+    for (auto& assignment : config_.assignments)
+      if (is_variable_name(assignment.key)) variables_[assignment.key] = &assignment;
+    for (auto& assignment : config_.assignments) {
+      if (assignment.key == "import") continue;
+      if (is_variable_name(assignment.key)) {
+        if (variables_[assignment.key] == &assignment) define(assignment.key);
+        else resolve(assignment.value);
+        continue;
+      }
+      resolve(assignment.value);
+      settle_decimal(assignment.key, assignment.value);
+    }
+  }
+
+ private:
+  enum class State { pending, active, done };
+
+  // Resolves a variable's own value once; reports cycles instead of recursing forever.
+  const Value* define(const std::string& name) {
+    const auto found = variables_.find(name);
+    if (found == variables_.end()) return nullptr;
+    auto& state = states_[name];
+    if (state == State::active) {
+      error(found->second->location, "variable $" + name + " refers to itself");
+      return nullptr;
+    }
+    if (state == State::pending) {
+      state = State::active;
+      resolve(found->second->value);
+      state = State::done;
+    }
+    return &found->second->value;
+  }
+
+  void resolve(Value& value) {
+    if (auto* reference = std::get_if<VariableReference>(&value.data)) {
+      const std::string name = reference->name;
+      if (const Value* target = define(name)) {
+        value.data = target->data;
+        value.decimal = target->decimal;
+      } else if (variables_.contains(name)) {
+        value.data = std::string{};
+      } else if (const char* environment = std::getenv(name.c_str())) {
+        value.data = std::string(environment);
+      } else {
+        error(value.location, "undefined variable $" + name);
+        value.data = std::string{};
+      }
+      return;
+    }
+    if (auto* text = std::get_if<std::string>(&value.data)) {
+      splice(*text, value.location);
+      return;
+    }
+    const auto elements = [&](std::vector<Value>& values) {
+      for (auto& element : values) {
+        resolve(element);
+        if (element.decimal)
+          error(element.location, "decimals can only be setting values, not list or array items");
+      }
+    };
+    if (auto* array = std::get_if<Value::Array>(&value.data)) elements(array->values);
+    else if (auto* list = std::get_if<Value::List>(&value.data)) elements(list->values);
+    else if (auto* object = std::get_if<Value::Object>(&value.data)) {
+      for (std::size_t index = 0; index < object->values.size(); ++index) {
+        resolve(object->values[index]);
+        settle_decimal(object->names[index], object->values[index]);
+      }
+    }
+  }
+
+  // "name = 0.85" is stored as "name-per-mille = 850", the form consumers read.
+  void settle_decimal(std::string& name, const Value& value) {
+    if (!value.decimal) return;
+    if (name.ends_with("-per-mille")) {
+      error(value.location, name + " takes a whole number; write " +
+                                name.substr(0, name.size() - 10) + " = " +
+                                decimal_text(std::get<std::int64_t>(value.data)) + " instead");
+      return;
+    }
+    name += "-per-mille";
+  }
+
+  // Expands $NAME and ${NAME}. Unknown names stay literal so shell commands keep their own.
+  void splice(std::string& text, const SourceLocation& location) {
+    if (text.find('$') == std::string::npos) return;
+    std::string result;
+    for (std::size_t index = 0; index < text.size();) {
+      if (text[index] == kEscapedDollar && index + 1 < text.size() && text[index + 1] == '$') {
+        result += '$';
+        index += 2;
+        continue;
+      }
+      if (text[index] != '$') {
+        result += text[index++];
+        continue;
+      }
+      std::size_t end = index + 1;
+      std::string name;
+      if (end < text.size() && text[end] == '{') {
+        const auto close = text.find('}', end + 1);
+        if (close != std::string::npos) name = text.substr(end + 1, close - end - 1);
+        end = close == std::string::npos ? end : close + 1;
+      } else {
+        while (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_'))
+          ++end;
+        if (end > index + 1 && !std::isdigit(static_cast<unsigned char>(text[index + 1])))
+          name = text.substr(index + 1, end - index - 1);
+      }
+      const auto replacement = name.empty() ? std::nullopt : lookup_text(name, location);
+      if (replacement.has_value()) {
+        result += *replacement;
+        index = end;
+      } else {
+        result += text[index++];
+      }
+    }
+    text = std::move(result);
+  }
+
+  std::optional<std::string> lookup_text(const std::string& name, const SourceLocation& location) {
+    if (variables_.contains(name)) {
+      const Value* value = define(name);
+      if (value == nullptr) return std::string{};
+      if (const auto* text = std::get_if<std::string>(&value->data)) return *text;
+      if (const auto* integer = std::get_if<std::int64_t>(&value->data))
+        return value->decimal ? decimal_text(*integer) : std::to_string(*integer);
+      if (const auto* boolean = std::get_if<bool>(&value->data)) return *boolean ? "true" : "false";
+      error(location, "$" + name + " is not text, a number, or a boolean, so it cannot go inside a string");
+      return std::string{};
+    }
+    if (const char* environment = std::getenv(name.c_str())) return std::string(environment);
+    return std::nullopt;
+  }
+
+  void error(const SourceLocation& location, std::string message) {
+    diagnostics_.push_back({DiagnosticLevel::error, location, std::move(message)});
+  }
+
+  Config& config_;
+  std::vector<Diagnostic>& diagnostics_;
+  std::unordered_map<std::string, Assignment*> variables_;
+  std::unordered_map<std::string, State> states_;
 };
 
 bool has_errors(const std::vector<Diagnostic>& diagnostics) {
@@ -296,83 +556,29 @@ bool has_errors(const std::vector<Diagnostic>& diagnostics) {
   });
 }
 
-const Value* lookup_field(const Value::Object& object, std::string_view name) {
-  const auto entry = std::find(object.names.begin(), object.names.end(), name);
-  if (entry == object.names.end()) return nullptr;
-  return &object.values[static_cast<std::size_t>(entry - object.names.begin())];
-}
-
-bool is_bool(const Value& value) { return std::holds_alternative<bool>(value.data); }
-bool is_object(const Value& value) { return std::holds_alternative<Value::Object>(value.data); }
-
-bool is_nonnegative_integer(const Value& value) {
-  const auto* integer = std::get_if<std::int64_t>(&value.data);
-  return integer != nullptr && *integer >= 0 && *integer <= std::numeric_limits<std::int32_t>::max();
-}
-
-bool is_output_mode(const Value& value) {
-  const auto* text = std::get_if<std::string>(&value.data);
-  if (text == nullptr) return false;
-  if (*text == "preferred") return true;
-  const auto x = text->find('x');
-  const auto at = text->find('@', x == std::string::npos ? 0 : x + 1);
-  if (x == std::string::npos || at == std::string::npos || x == 0 || at <= x + 1 || at + 1 == text->size()) return false;
-  std::uint32_t width = 0, height = 0;
-  double refresh = 0.0;
-  const auto width_result = std::from_chars(text->data(), text->data() + x, width);
-  const auto height_result = std::from_chars(text->data() + x + 1, text->data() + at, height);
-  const auto refresh_result = std::from_chars(text->data() + at + 1, text->data() + text->size(), refresh);
-  return width_result.ec == std::errc{} && width_result.ptr == text->data() + x && width > 0 &&
-         height_result.ec == std::errc{} && height_result.ptr == text->data() + at && height > 0 &&
-         refresh_result.ec == std::errc{} && refresh_result.ptr == text->data() + text->size() && refresh > 0.0;
-}
-
-void warn_unknown_fields(const Value::Object& object, std::span<const std::string_view> known,
-                         std::vector<Diagnostic>& diagnostics, SourceLocation location,
-                         std::string_view object_name) {
-  for (const auto& name : object.names) {
-    if (std::find(known.begin(), known.end(), name) == known.end()) {
-      diagnostics.push_back({DiagnosticLevel::warning, location,
-                             "unknown " + std::string(object_name) + " setting: " + name});
-    }
-  }
-}
-
-bool is_uppercase_name(const std::string& name) {
-  return !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char character) {
-    return std::isupper(character) || std::isdigit(character) || character == '_';
-  });
-}
-
-void check_variables(const Value& value, const std::unordered_set<std::string>& variables,
-                     std::vector<Diagnostic>& diagnostics, SourceLocation location) {
+void check_variables(const Value& value, std::vector<Diagnostic>& diagnostics) {
   std::visit(
       [&](const auto& item) {
         using Item = std::decay_t<decltype(item)>;
         if constexpr (std::is_same_v<Item, VariableReference>) {
-          if (!variables.contains(item.name)) {
-            diagnostics.push_back({DiagnosticLevel::error, location, "undefined variable $" + item.name});
-          }
+          diagnostics.push_back({DiagnosticLevel::error, value.location, "undefined variable $" + item.name});
         } else if constexpr (std::is_same_v<Item, Value::Array> || std::is_same_v<Item, Value::List>) {
-          for (const Value& nested : item.values) {
-            check_variables(nested, variables, diagnostics, location);
-          }
+          for (const Value& nested : item.values) check_variables(nested, diagnostics);
         } else if constexpr (std::is_same_v<Item, Value::Object>) {
-          for (const auto& nested : item.values) {
-            check_variables(nested, variables, diagnostics, location);
-          }
+          for (const auto& nested : item.values) check_variables(nested, diagnostics);
         }
       },
       value.data);
 }
 
-void validation_error(std::vector<Diagnostic>& diagnostics, SourceLocation location, std::string message) {
-  diagnostics.push_back({DiagnosticLevel::error, location, std::move(message)});
-}
-
 std::optional<std::string> expand_environment(std::string_view value, std::string& error) {
   std::string expanded;
   for (std::size_t index = 0; index < value.size();) {
+    if (value[index] == kEscapedDollar && index + 1 < value.size() && value[index + 1] == '$') {
+      expanded += '$';
+      index += 2;
+      continue;
+    }
     if (value[index] != '$') {
       expanded += value[index++];
       continue;
@@ -423,22 +629,25 @@ std::optional<std::string> import_path(const Value& value, std::string& error) {
 
 ParseResult parse_config_file_recursive(const std::filesystem::path& requested,
                                         std::vector<std::filesystem::path>& stack,
-                                        SourceLocation location = {}) {
+                                        const SourceLocation& location = {}) {
   std::error_code error_code;
   auto path = std::filesystem::weakly_canonical(requested, error_code);
   if (error_code) path = std::filesystem::absolute(requested).lexically_normal();
+  const auto requested_path = std::filesystem::absolute(requested).lexically_normal().string();
   if (std::find(stack.begin(), stack.end(), path) != stack.end()) {
-    return {{}, {{DiagnosticLevel::error, location, "configuration import cycle at " + path.string()}}, {path.string(), std::filesystem::absolute(requested).lexically_normal().string()}};
+    return {{}, {{DiagnosticLevel::error, location, "configuration import cycle at " + path.string()}},
+            {path.string(), requested_path}};
   }
 
   std::ifstream file(path);
   if (!file) {
-    return {{}, {{DiagnosticLevel::error, location, "could not open configuration file: " + path.string()}}, {path.string(), std::filesystem::absolute(requested).lexically_normal().string()}};
+    return {{}, {{DiagnosticLevel::error, location, "could not open configuration file: " + path.string()}},
+            {path.string(), requested_path}};
   }
   const std::string input{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-  auto parsed = Parser(input).parse();
+  auto parsed = Parser(input, requested_path).parse();
   parsed.source_paths.push_back(path.string());
-  parsed.source_paths.push_back(std::filesystem::absolute(requested).lexically_normal().string());
+  parsed.source_paths.push_back(requested_path);
   if (!parsed.ok()) return parsed;
 
   stack.push_back(path);
@@ -459,12 +668,12 @@ ParseResult parse_config_file_recursive(const std::filesystem::path& requested,
       std::string import_error;
       const auto imported_path = import_path(*value, import_error);
       if (!imported_path) {
-        parsed.diagnostics.push_back({DiagnosticLevel::error, assignment.location, std::move(import_error)});
+        parsed.diagnostics.push_back({DiagnosticLevel::error, value->location, std::move(import_error)});
         continue;
       }
       std::filesystem::path child(*imported_path);
       if (child.is_relative()) child = path.parent_path() / child;
-      auto imported = parse_config_file_recursive(child, stack, assignment.location);
+      auto imported = parse_config_file_recursive(child, stack, value->location);
       parsed.source_paths.insert(parsed.source_paths.end(), imported.source_paths.begin(), imported.source_paths.end());
       parsed.diagnostics.insert(parsed.diagnostics.end(),
                                 std::make_move_iterator(imported.diagnostics.begin()),
@@ -487,20 +696,26 @@ bool ValidationResult::ok() const { return !has_errors(diagnostics); }
 ValidationContext::ValidationContext(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
 
 void ValidationContext::warning(SourceLocation location, std::string message) {
-  diagnostics_.push_back({DiagnosticLevel::warning, location, std::move(message)});
+  diagnostics_.push_back({DiagnosticLevel::warning, std::move(location), std::move(message)});
 }
 
 void ValidationContext::error(SourceLocation location, std::string message) {
-  diagnostics_.push_back({DiagnosticLevel::error, location, std::move(message)});
+  diagnostics_.push_back({DiagnosticLevel::error, std::move(location), std::move(message)});
 }
 
-ParseResult parse_config(const std::string& input) { return Parser(input).parse(); }
+ParseResult parse_config(const std::string& input) {
+  auto result = Parser(input, {}).parse();
+  if (result.ok()) Resolver(result.config, result.diagnostics).run();
+  return result;
+}
 
 ParseResult parse_config_file(const std::string& path) {
   std::vector<std::filesystem::path> stack;
   auto result = parse_config_file_recursive(path, stack);
-  std::sort(result.source_paths.begin(),result.source_paths.end());
-  result.source_paths.erase(std::unique(result.source_paths.begin(),result.source_paths.end()),result.source_paths.end());
+  if (result.ok()) Resolver(result.config, result.diagnostics).run();
+  std::sort(result.source_paths.begin(), result.source_paths.end());
+  result.source_paths.erase(std::unique(result.source_paths.begin(), result.source_paths.end()),
+                            result.source_paths.end());
   return result;
 }
 
@@ -508,427 +723,38 @@ ValidationResult validate_config(const Config& config) { return validate_config(
 
 ValidationResult validate_config(const Config& config, std::span<const ValidationRule> rules) {
   ValidationResult result;
-  std::unordered_set<std::string> variables;
-  for (const Assignment& assignment : config.assignments) {
-    if (is_uppercase_name(assignment.key)) {
-      variables.insert(assignment.key);
-    }
-  }
-
   ValidationContext context(result.diagnostics);
-  const auto validate_output = [&](const Value::Object& object, SourceLocation location,
-                                   std::string_view prefix) {
-    if (const Value* value = lookup_field(object, "mode"); value != nullptr && !is_output_mode(*value))
-      validation_error(result.diagnostics, location,
-                       std::string(prefix) + "mode must be \"preferred\" or WIDTHxHEIGHT@HZ");
-    if (const Value* value = lookup_field(object, "scale-per-mille"); value != nullptr) {
-      const auto* scale = std::get_if<std::int64_t>(&value->data);
-      if (scale == nullptr || *scale < 250 || *scale > 8000)
-        validation_error(result.diagnostics, location,
-                         std::string(prefix) + "scale-per-mille must be an integer from 250 to 8000");
-    }
-    if (const Value* value = lookup_field(object, "bit-depth"); value != nullptr) {
-      const auto* depth = std::get_if<std::int64_t>(&value->data);
-      if (depth == nullptr || (*depth != 8 && *depth != 10))
-        validation_error(result.diagnostics, location,
-                         std::string(prefix) + "bit-depth must be 8 or 10");
-    }
-    if (const Value* value = lookup_field(object, "transform"); value != nullptr) {
-      const auto* transform = std::get_if<std::string>(&value->data);
-      if (transform == nullptr || (*transform != "normal" && *transform != "90" &&
-                                   *transform != "180" && *transform != "270"))
-        validation_error(result.diagnostics, location,
-                         std::string(prefix) +
-                             "transform must be \"normal\", \"90\", \"180\", or \"270\"");
-    }
-    constexpr std::array<std::string_view, 4> fields = {
-        "mode", "scale-per-mille", "bit-depth", "transform"};
-    warn_unknown_fields(object, fields, result.diagnostics, location,
-                        prefix.substr(0, prefix.size() - 1));
-  };
   for (const Assignment& assignment : config.assignments) {
-    if (assignment.key != "import") {
-      check_variables(assignment.value, variables, result.diagnostics, assignment.location);
-    }
-    for (const ValidationRule& rule : rules) {
-      rule(assignment, context);
-    }
-    if (is_uppercase_name(assignment.key)) {
-      continue;
-    }
     if (assignment.key == "import") {
       const auto valid_path = [](const Value& value) {
         return std::holds_alternative<std::string>(value.data) ||
                std::holds_alternative<VariableReference>(value.data);
       };
       if (const auto* array = std::get_if<Value::Array>(&assignment.value.data)) {
-        if (!std::all_of(array->values.begin(), array->values.end(), valid_path)) {
-          validation_error(result.diagnostics, assignment.location,
-                           "import paths must be strings or environment variable references");
-        }
+        if (!std::all_of(array->values.begin(), array->values.end(), valid_path))
+          context.error(assignment.location, "import paths must be strings or environment variable references");
       } else if (!valid_path(assignment.value)) {
-        validation_error(result.diagnostics, assignment.location,
-                         "import must be a path or an array of paths");
+        context.error(assignment.location, "import must be a path or an array of paths");
       }
-      continue;
+    } else {
+      check_variables(assignment.value, result.diagnostics);
     }
-    if (assignment.key == "exec-sh-on-startup") {
-      if (!std::holds_alternative<Value::Array>(assignment.value.data)) {
-        validation_error(result.diagnostics, assignment.location, "exec-sh-on-startup must be an array");
-      }
-      continue;
-    }
-    if (assignment.key == "plugins") {
-      const auto* paths = std::get_if<Value::Array>(&assignment.value.data);
-      if (paths == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "plugins must be an array");
-      } else for (const auto& path : paths->values) {
-        if (!std::holds_alternative<std::string>(path.data) &&
-            !std::holds_alternative<VariableReference>(path.data))
-          validation_error(result.diagnostics, assignment.location, "plugin paths must be strings or variable references");
-      }
-      continue;
-    }
-    if (assignment.key == "plugin-settings") {
-      const auto* settings = std::get_if<Value::Object>(&assignment.value.data);
-      if (settings == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "plugin-settings must be an object");
-      } else for (std::size_t index = 0; index < settings->names.size(); ++index) {
-        if (settings->names[index].empty() || !is_object(settings->values[index]))
-          validation_error(result.diagnostics, assignment.location,
-                           "plugin-settings entries must have a nonempty name and an object value");
-      }
-      continue;
-    }
-    if (assignment.key == "bind") {
-      const auto* list = std::get_if<Value::List>(&assignment.value.data);
-      if (list == nullptr || (list->values.size() != 4 && list->values.size() != 5)) {
-        validation_error(result.diagnostics, assignment.location,
-                         "bind must contain modifier, key, action, argument, and optional flags");
-      }
-      continue;
-    }
-    if (assignment.key == "shaders") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "shaders must be an object");
-        continue;
-      }
-      for (const auto& value : object->values) {
-        if (!is_object(value))
-          validation_error(result.diagnostics, assignment.location, "each shader must be an object");
-      }
-      continue;
-    }
-    if (assignment.key == "layout") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "layout must be an object");
-        continue;
-      }
-      if (const Value* value = lookup_field(*object, "default"); value != nullptr) {
-        const auto* name = std::get_if<std::string>(&value->data);
-        if (name == nullptr || (*name != "master-stack" && *name != "focus-fibonacci" &&
-                                *name != "endless-canvas"))
-          validation_error(result.diagnostics, assignment.location,
-                            "layout.default must be \"master-stack\", \"focus-fibonacci\", or \"endless-canvas\"");
-      }
-      if (const Value* value = lookup_field(*object, "master-count"); value != nullptr) {
-        const auto* count = std::get_if<std::int64_t>(&value->data);
-        if (count == nullptr || *count <= 0 || *count > std::numeric_limits<std::int32_t>::max()) {
-          validation_error(result.diagnostics, assignment.location, "layout.master-count must be a positive integer");
-        }
-      }
-      if (const Value* value = lookup_field(*object, "master-ratio"); value != nullptr) {
-        const auto* ratio = std::get_if<std::int64_t>(&value->data);
-        if (ratio == nullptr || *ratio < 10 || *ratio > 90) {
-          validation_error(result.diagnostics, assignment.location,
-                           "layout.master-ratio must be an integer percent from 10 to 90");
-        }
-      }
-      for (const char* name : {"outer-gap", "inner-gap", "gaps", "min-zoom-per-mille",
-                               "max-zoom-per-mille"}) {
-        if (const Value* value = lookup_field(*object, name); value != nullptr && !is_nonnegative_integer(*value)) {
-          validation_error(result.diagnostics, assignment.location,
-                           std::string("layout.") + name + " must be a nonnegative integer");
-        }
-      }
-      if (const Value* value = lookup_field(*object, "smart-gaps"); value != nullptr && !is_bool(*value)) {
-        validation_error(result.diagnostics, assignment.location, "layout.smart-gaps must be a boolean");
-      }
-      constexpr std::array<std::string_view, 9> fields = {
-          "default", "master-count", "master-ratio", "outer-gap", "inner-gap", "gaps",
-          "min-zoom-per-mille", "max-zoom-per-mille", "smart-gaps"};
-      warn_unknown_fields(*object, fields, result.diagnostics, assignment.location, "layout");
-      continue;
-    }
-    if (assignment.key == "input") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "input must be an object");
-        continue;
-      }
-      if (const Value* value = lookup_field(*object, "focus-mode"); value != nullptr) {
-        const auto* mode = std::get_if<std::string>(&value->data);
-        if (mode == nullptr || (*mode != "hover" && *mode != "by-click" && *mode != "click"))
-          validation_error(result.diagnostics, assignment.location,
-                           "input.focus-mode must be \"hover\" or \"by-click\"");
-      }
-      if (const Value* value = lookup_field(*object, "reverse-mouse-scrolling");
-          value != nullptr && !is_bool(*value))
-        validation_error(result.diagnostics, assignment.location,
-                         "input.reverse-mouse-scrolling must be a boolean");
-      constexpr std::array<std::string_view, 2> input_fields = {
-          "focus-mode", "reverse-mouse-scrolling"};
-      warn_unknown_fields(*object, input_fields, result.diagnostics, assignment.location, "input");
-      continue;
-    }
-    if (assignment.key == "keyboard") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "keyboard must be an object");
-        continue;
-      }
-      for (const char* name : {"rules", "model", "layout", "variant", "options"}) {
-        if (const Value* value = lookup_field(*object, name);
-            value != nullptr && !std::holds_alternative<std::string>(value->data)) {
-          validation_error(result.diagnostics, assignment.location,
-                           std::string("keyboard.") + name + " must be a string");
-        }
-      }
-      constexpr std::array<std::string_view, 5> keyboard_fields = {
-          "rules", "model", "layout", "variant", "options"};
-      warn_unknown_fields(*object, keyboard_fields, result.diagnostics, assignment.location, "keyboard");
-      continue;
-    }
-    if (assignment.key == "mobile") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "mobile must be an object");
-        continue;
-      }
-      if (const auto* value = lookup_field(*object, "windows"); value != nullptr && !is_bool(*value))
-        validation_error(result.diagnostics, assignment.location, "mobile.windows must be a boolean");
-      for (const auto& [name, low, high] : {std::tuple{"edge-swipe-size", 0, 256}, std::tuple{"hold-ms", 50, 5000}}) {
-        const auto* value = lookup_field(*object, name);
-        if (value == nullptr) continue;
-        const auto* integer = std::get_if<std::int64_t>(&value->data);
-        if (integer == nullptr || *integer < low || *integer > high)
-          validation_error(result.diagnostics, assignment.location,
-                           "mobile." + std::string(name) + " must be " + std::to_string(low) + ".." + std::to_string(high));
-      }
-      constexpr std::array<std::string_view, 3> fields = {"windows", "edge-swipe-size", "hold-ms"};
-      warn_unknown_fields(*object, fields, result.diagnostics, assignment.location, "mobile");
-      continue;
-    }
-    if (assignment.key == "overview") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "overview must be an object");
-        continue;
-      }
-      for (const auto* name : {"backdrop-blur-radius", "backdrop-blur-passes"}) {
-        const auto* value = lookup_field(*object, name);
-        if (value == nullptr) continue;
-        const auto* integer = std::get_if<std::int64_t>(&value->data);
-        const bool passes = std::string_view(name) == "backdrop-blur-passes";
-        if (integer == nullptr || *integer < (passes ? 1 : 0) || *integer > (passes ? 8 : 128))
-          validation_error(result.diagnostics, assignment.location, "invalid overview." + std::string(name));
-      }
-      if (const auto* value = lookup_field(*object, "scene-radius")) {
-        const auto* integer = std::get_if<std::int64_t>(&value->data);
-        if (integer == nullptr || *integer < 0 || *integer > 512)
-          validation_error(result.diagnostics, assignment.location, "overview.scene-radius must be 0..512");
-      }
-      if (const auto* value = lookup_field(*object, "master-ratio")) {
-        const auto* integer = std::get_if<std::int64_t>(&value->data);
-        if (integer == nullptr || *integer < 10 || *integer > 90)
-          validation_error(result.diagnostics, assignment.location, "overview.master-ratio must be 10..90");
-      }
-      constexpr std::array<std::string_view, 6> fields = {"backdrop-image", "backdrop-blur-radius", "backdrop-blur-passes", "scene-radius", "layout", "master-ratio"};
-      warn_unknown_fields(*object, fields, result.diagnostics, assignment.location, "overview");
-      continue;
-    }
-    if (assignment.key == "animations") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "animations must be an object");
-        continue;
-      }
-      for (const char* name : {"enabled", "open-window", "resize", "close"}) {
-        if (const Value* value = lookup_field(*object, name); value != nullptr && !is_bool(*value)) {
-          validation_error(result.diagnostics, assignment.location,
-                           std::string("animations.") + name + " must be a boolean");
-        }
-      }
-      if (const Value* value = lookup_field(*object, "duration-ms"); value != nullptr && !is_nonnegative_integer(*value)) {
-        validation_error(result.diagnostics, assignment.location,
-                         "animations.duration-ms must be a nonnegative integer");
-      }
-      const auto ranged_animation = [&](const char* name, std::int64_t minimum, std::int64_t maximum) {
-        const Value* value = lookup_field(*object, name);
-        if (value == nullptr) return;
-        const auto* integer = std::get_if<std::int64_t>(&value->data);
-        if (integer == nullptr || *integer < minimum || *integer > maximum) {
-          validation_error(result.diagnostics, assignment.location,
-                           std::string("animations.") + name + " must be an integer from " +
-                               std::to_string(minimum) + " to " + std::to_string(maximum));
-        }
-      };
-      ranged_animation("open-scale-per-mille", 500, 1000);
-      ranged_animation("close-scale-per-mille", 500, 1000);
-      ranged_animation("open-offset-px", 0, 4096);
-      ranged_animation("close-offset-px", 0, 4096);
-      ranged_animation("tag-scale-per-mille", 500, 1000);
-      ranged_animation("tag-parallax-per-mille", 0, 1000);
-      ranged_animation("tag-fade-per-mille", 0, 1000);
-      ranged_animation("tag-duration-ms", 0, 10000);
-      ranged_animation("overview-duration-ms", 0, 10000);
-      ranged_animation("open-duration-ms", 0, 10000);
-      ranged_animation("close-duration-ms", 0, 10000);
-      ranged_animation("move-duration-ms", 0, 10000);
-      ranged_animation("fade-duration-ms", 0, 10000);
-      if (const Value* value = lookup_field(*object, "tag-transition-axis"); value != nullptr) {
-        const auto* axis = std::get_if<std::string>(&value->data);
-        if (axis == nullptr || (*axis != "horizontal" && *axis != "vertical"))
-          validation_error(result.diagnostics, assignment.location,
-                           "animations.tag-transition-axis must be horizontal or vertical");
-      }
-      if (const Value* value = lookup_field(*object, "spring"); value != nullptr) {
-        const auto* spring = std::get_if<Value::Object>(&value->data);
-        if (spring == nullptr) {
-          validation_error(result.diagnostics, assignment.location, "animations.spring must be an object");
-        } else {
-          for (const char* name : {"stiffness", "damping", "mass-per-mille"}) {
-            const Value* parameter = lookup_field(*spring, name);
-            const auto* integer = parameter == nullptr ? nullptr : std::get_if<std::int64_t>(&parameter->data);
-            const bool invalid = integer == nullptr || *integer < (std::string_view(name) == "damping" ? 0 : 1) ||
-                                 *integer > std::numeric_limits<std::int32_t>::max();
-            if (parameter != nullptr && invalid) {
-              validation_error(result.diagnostics, assignment.location,
-                               std::string("animations.spring.") + name +
-                                   (std::string_view(name) == "damping" ? " must be a nonnegative integer"
-                                                                        : " must be a positive integer"));
-            }
-          }
-          constexpr std::array<std::string_view, 3> spring_fields = {"stiffness", "damping", "mass-per-mille"};
-          warn_unknown_fields(*spring, spring_fields, result.diagnostics, assignment.location, "animations.spring");
-        }
-      }
-      if (const Value* value = lookup_field(*object, "cubic-bezier"); value != nullptr) {
-        const auto* bezier = std::get_if<Value::Object>(&value->data);
-        if (bezier == nullptr) {
-          validation_error(result.diagnostics, assignment.location, "animations.cubic-bezier must be an object");
-        } else {
-          for (const char* name : {"x1", "y1", "x2", "y2"}) {
-            const Value* point = lookup_field(*bezier, name);
-            const auto* integer = point == nullptr ? nullptr : std::get_if<std::int64_t>(&point->data);
-            if (point != nullptr && (integer == nullptr || *integer < 0 || *integer > 1000)) {
-              validation_error(result.diagnostics, assignment.location,
-                               std::string("animations.cubic-bezier.") + name + " must be an integer from 0 to 1000");
-            }
-          }
-          constexpr std::array<std::string_view, 4> bezier_fields = {"x1", "y1", "x2", "y2"};
-          warn_unknown_fields(*bezier, bezier_fields, result.diagnostics, assignment.location,
-                              "animations.cubic-bezier");
-        }
-      }
-      constexpr std::array<std::string_view, 21> animation_fields = {
-          "enabled", "duration-ms", "open-duration-ms", "close-duration-ms", "move-duration-ms", "fade-duration-ms",
-          "tag-duration-ms", "spring", "cubic-bezier", "open-window",
-          "resize", "close", "open-scale-per-mille", "close-scale-per-mille", "open-offset-px",
-          "close-offset-px", "tag-scale-per-mille", "tag-parallax-per-mille", "tag-fade-per-mille",
-          "tag-transition-axis", "overview-duration-ms"};
-      warn_unknown_fields(*object, animation_fields, result.diagnostics, assignment.location, "animations");
-      continue;
-    }
-    if (assignment.key == "output") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "output must be an object");
-        continue;
-      }
-      validate_output(*object, assignment.location, "output.");
-      continue;
-    }
-    if (assignment.key == "outputs") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "outputs must be an object");
-        continue;
-      }
-      for (std::size_t index = 0; index < object->names.size(); ++index) {
-        if (object->names[index].empty()) {
-          validation_error(result.diagnostics, assignment.location, "outputs connector names must not be empty");
-          continue;
-        }
-        const auto* configured = std::get_if<Value::Object>(&object->values[index].data);
-        if (configured == nullptr) {
-          validation_error(result.diagnostics, assignment.location,
-                           "outputs." + object->names[index] + " must be an object");
-          continue;
-        }
-        validate_output(*configured, assignment.location,
-                        "outputs." + object->names[index] + ".");
-      }
-      continue;
-    }
-    if (assignment.key == "environment") {
-      const auto* object = std::get_if<Value::Object>(&assignment.value.data);
-      if (object == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "environment must be an object");
-        continue;
-      }
-      for (std::size_t index = 0; index < object->names.size(); ++index) {
-        const auto& name = object->names[index];
-        const auto& value = object->values[index];
-        const bool valid_name = !name.empty() && (std::isalpha(static_cast<unsigned char>(name.front())) || name.front() == '_') &&
-            std::all_of(std::next(name.begin()), name.end(), [](unsigned char character) {
-              return std::isalnum(character) || character == '_';
-            });
-        if (!valid_name) validation_error(result.diagnostics, assignment.location, "environment variable names must be shell identifiers");
-        if (!std::holds_alternative<std::string>(value.data) && !std::holds_alternative<VariableReference>(value.data))
-          validation_error(result.diagnostics, assignment.location, "environment values must be strings or variable references");
-      }
-      continue;
-    }
-    if (assignment.key == "rule") {
-      const auto* rule = std::get_if<Value::Object>(&assignment.value.data);
-      if (rule == nullptr) {
-        validation_error(result.diagnostics, assignment.location, "rule must be an object");
-        continue;
-      }
-      const Value* match = lookup_field(*rule, "match");
-      const Value* set = lookup_field(*rule, "set");
-      if (match == nullptr || !is_object(*match)) {
-        validation_error(result.diagnostics, assignment.location, "rule.match must be an object");
-      }
-      if (set == nullptr || !is_object(*set)) {
-        validation_error(result.diagnostics, assignment.location, "rule.set must be an object");
-        continue;
-      }
-      const auto& actions = std::get<Value::Object>(set->data);
-      for (const char* name : {"floating", "centered", "always-on-top", "glass"}) {
-        if (const Value* value = lookup_field(actions, name); value != nullptr && !is_bool(*value)) {
-          validation_error(result.diagnostics, assignment.location, std::string("rule.set.") + name + " must be a boolean");
-        }
-      }
-      continue;
-    }
-    result.diagnostics.push_back({DiagnosticLevel::warning, assignment.location,
-                                  "unknown top-level setting: " + assignment.key});
+    for (const ValidationRule& rule : rules) rule(assignment, context);
   }
   return result;
 }
 
 const Value* find_assignment(const Config& config, std::string_view key) {
-  const auto assignment = std::find_if(config.assignments.begin(), config.assignments.end(), [key](const Assignment& item) {
-    return item.key == key;
-  });
-  return assignment == config.assignments.end() ? nullptr : &assignment->value;
+  const auto assignment = std::find_if(config.assignments.rbegin(), config.assignments.rend(),
+                                       [key](const Assignment& item) { return item.key == key; });
+  return assignment == config.assignments.rend() ? nullptr : &assignment->value;
 }
 
-const Value* find_field(const Value::Object& object, std::string_view key) { return lookup_field(object, key); }
+const Value* find_field(const Value::Object& object, std::string_view key) {
+  const auto entry = std::find(object.names.rbegin(), object.names.rend(), key);
+  if (entry == object.names.rend()) return nullptr;
+  return &object.values[static_cast<std::size_t>(object.names.rend() - entry - 1)];
+}
 
 const std::string* as_string(const Value& value) { return std::get_if<std::string>(&value.data); }
 const bool* as_boolean(const Value& value) { return std::get_if<bool>(&value.data); }

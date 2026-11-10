@@ -236,6 +236,8 @@ struct RuntimeConfigResult {
 };
 
 [[nodiscard]] RuntimeConfigResult compile_runtime_config(const lang::Config& config);
+// zw-lang validation plus zwwm's own rules for each top-level setting.
+[[nodiscard]] lang::ValidationResult validate_runtime_config(const lang::Config& config);
 
 struct LoadedRuntimeConfig {
   std::shared_ptr<const RuntimeConfig> config;

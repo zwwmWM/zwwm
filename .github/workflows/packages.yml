@@ -1,0 +1,100 @@
+name: packages
+
+# Runs for release tags such as 0.2.0-alpha.2; the manual trigger builds without publishing.
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: arch
+            image: archlinux:base-devel
+            format: pacman
+            setup: |
+              pacman -Syu --noconfirm --needed clang meson ninja cmake pkgconf python git \
+                libxml2 vulkan-headers vulkan-icd-loader glslang spirv-tools libdrm mesa libpng \
+                libxkbcommon libxcb libxcursor pipewire qt6-base seatd libinput fontconfig \
+                freetype2 systemd-libs
+          - name: fedora
+            image: fedora:latest
+            format: rpm
+            setup: |
+              dnf -y install clang gcc-c++ meson ninja-build cmake python3 git rpm-build \
+                glslang-devel spirv-tools-devel qt6-qtbase-devel \
+                'pkgconfig(vulkan)' 'pkgconfig(libdrm)' 'pkgconfig(gbm)' 'pkgconfig(libpng)' \
+                'pkgconfig(libxml-2.0)' 'pkgconfig(xkbcommon)' 'pkgconfig(xcb)' \
+                'pkgconfig(xcb-composite)' 'pkgconfig(xcb-xfixes)' 'pkgconfig(xcursor)' \
+                'pkgconfig(libpipewire-0.3)' 'pkgconfig(libseat)' 'pkgconfig(libinput)' \
+                'pkgconfig(libudev)' 'pkgconfig(fontconfig)' 'pkgconfig(freetype2)'
+          - name: debian13
+            image: debian:13
+            format: deb
+            setup: |
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                clang meson ninja-build cmake pkg-config python3 git ca-certificates dpkg-dev \
+                libxml2-dev libvulkan-dev glslang-dev spirv-tools libdrm-dev libgbm-dev libpng-dev \
+                libxkbcommon-dev libxcb1-dev libxcb-composite0-dev libxcb-xfixes0-dev libxcursor-dev \
+                libpipewire-0.3-dev qt6-base-dev libseat-dev libinput-dev libfontconfig-dev \
+                libfreetype-dev libudev-dev
+    steps:
+      - name: Install build dependencies
+        run: ${{ matrix.setup }}
+      - uses: actions/checkout@v4
+      - name: Check the tag matches .version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          version=$(tr -d '[:space:]' < .version)
+          if [[ "$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match .version ($version)"
+            exit 1
+          fi
+      - name: Build package
+        shell: bash
+        env:
+          PKG_LABEL: ${{ matrix.name }}
+        run: bash build-aux/package.sh ${{ matrix.format }} dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zwwm-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: build
+    # Publishes whichever distributions built, even if another one failed.
+    if: ${{ !cancelled() && github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach packages to the release
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            prerelease=()
+            [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
+            gh release create "$TAG" --title "$TAG" --notes "See CHANGELOG.md." "${prerelease[@]}"
+          fi
+          gh release upload "$TAG" dist/* --clobber

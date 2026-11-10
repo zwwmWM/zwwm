@@ -1,0 +1,28 @@
+--- a/zwwm/src/runtime_config.cpp
++++ b/zwwm/src/runtime_config.cpp
+@@ -12,7 +12,6 @@
+ #include <filesystem>
+ #include <fstream>
+ #include <fnmatch.h>
+-#include <sys/epoll.h>
+ #include <sys/inotify.h>
+ #include <unistd.h>
+ #include <limits>
+@@ -1234,7 +1233,7 @@
+     return false;
+   }
+   try {
+-    source_ = event_loop_->add_fd(fd_.get(), EPOLLIN | EPOLLERR | EPOLLHUP,
++    source_ = event_loop_->add_fd(fd_.get(), zwayland::server::kEventReadable | zwayland::server::kEventError | zwayland::server::kEventHangup,
+                                   [this](int fd, int mask) {
+                                     return on_inotify(fd, static_cast<std::uint32_t>(mask), this) != 0;
+                                   });
+@@ -1250,7 +1249,7 @@
+ 
+ int ConfigReloader::on_inotify(int fd, std::uint32_t mask, void* data) {
+   auto* reloader = static_cast<ConfigReloader*>(data);
+-  if ((mask & (EPOLLERR | EPOLLHUP)) != 0) { reloader->last_error_ = "configuration watcher stopped"; return 0; }
++  if ((mask & (zwayland::server::kEventError | zwayland::server::kEventHangup)) != 0) { reloader->last_error_ = "configuration watcher stopped"; return 0; }
+   alignas(inotify_event) char bytes[4096];
+   bool relevant = false;
+   for (ssize_t count; (count = read(fd, bytes, sizeof(bytes))) > 0;) {

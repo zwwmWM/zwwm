@@ -1,0 +1,37 @@
+--- a/zwwm/src/compositor_server_xwayland.cpp
++++ b/zwwm/src/compositor_server_xwayland.cpp
+@@ -14,7 +14,6 @@
+ #include <span>
+ #include <string>
+ #include <sys/socket.h>
+-#include <sys/epoll.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ #include <utility>
+@@ -623,7 +622,7 @@
+ int XwaylandRuntime::dispatch(std::uint32_t mask) {
+     // Clearing the handle removes the fd now, so a dead socket cannot spin during the backoff.
+     const auto lost_server = [this] { xwm_source = -1; schedule_restart(); return 0; };
+-    if ((mask & (EPOLLHUP | EPOLLERR)) != 0 || xcb_connection_has_error(connection) != 0)
++    if ((mask & (zwayland::server::kEventHangup | zwayland::server::kEventError)) != 0 || xcb_connection_has_error(connection) != 0)
+       return lost_server();
+     // Property replies can queue events the socket no longer signals, so drain until both settle.
+     do {
+@@ -809,7 +808,7 @@
+     create_selection(&primary, primary_atom, true);
+     const int fd = xcb_get_file_descriptor(connection);
+     try {
+-      xwm_source = loop->add_fd(fd, EPOLLIN | EPOLLHUP | EPOLLERR,
++      xwm_source = loop->add_fd(fd, zwayland::server::kEventReadable | zwayland::server::kEventHangup | zwayland::server::kEventError,
+           [this](int, int event_mask) {
+             dispatch(static_cast<std::uint32_t>(event_mask));
+             return xwm_source >= 0;
+@@ -855,7 +854,7 @@
+     const std::string name = ":" + std::to_string(xdisplay.number);
+     (void)::setenv("DISPLAY", name.c_str(), 1);
+     try {
+-      ready_source = loop->add_fd(ready_fd, EPOLLIN | EPOLLHUP | EPOLLERR,
++      ready_source = loop->add_fd(ready_fd, zwayland::server::kEventReadable | zwayland::server::kEventHangup | zwayland::server::kEventError,
+         [this](int fd, int) {
+           char buffer[64];
+           const auto count = ::read(fd, buffer, sizeof(buffer));

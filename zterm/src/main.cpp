@@ -173,7 +173,7 @@ class App final : public Session {
     }
     if (resize_ && configured_) resize();
     if (grid_resize_pending_ && std::chrono::steady_clock::now() >= grid_resize_deadline_) apply_grid_resize();
-    if (configured_ && terminal_.dirty && frame_ == nullptr && buffer_available_) render();
+    if (configured_ && terminal_.dirty && !terminal_.synchronized() && frame_ == nullptr && buffer_available_) render();
     output_ += terminal_.take_output();
     if (output_.size() > 4 * 1024 * 1024) throw std::runtime_error("PTY write queue is full");
     if (!display_->flush()) running_ = false;
@@ -191,7 +191,9 @@ class App final : public Session {
     const int resize = grid_resize_pending_ ? std::max(0, static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
       grid_resize_deadline_ - std::chrono::steady_clock::now()).count()) + 1) : -1;
     const int config = config_watch_.timeout();
-    return resize < 0 ? config : config < 0 ? resize : std::min(resize,config);
+    int result = resize < 0 ? config : config < 0 ? resize : std::min(resize,config);
+    if (const int sync = terminal_.synchronized_timeout(); sync >= 0) result = result < 0 ? sync : std::min(result, sync);
+    return result;
   }
 
   bool running() const override { return running_; }

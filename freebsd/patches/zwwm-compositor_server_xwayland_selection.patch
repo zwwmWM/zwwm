@@ -1,0 +1,32 @@
+--- a/zwwm/src/compositor_server_xwayland_selection.cpp
++++ b/zwwm/src/compositor_server_xwayland_selection.cpp
+@@ -6,7 +6,6 @@
+ #include <cstdlib>
+ #include <fcntl.h>
+ #include <new>
+-#include <sys/epoll.h>
+ #include <unistd.h>
+ 
+ namespace zwwm::detail {
+@@ -134,10 +133,10 @@
+   std::free(reply);
+   const int flags = ::fcntl(transfer->fd, F_GETFL);
+   if (flags >= 0) (void)::fcntl(transfer->fd, F_SETFL, flags | O_NONBLOCK);
+-  flush_receive(transfer->fd, EPOLLOUT, transfer);
++  flush_receive(transfer->fd, zwayland::server::kEventWritable, transfer);
+   if (std::find(runtime->receives.begin(), runtime->receives.end(), transfer) != runtime->receives.end() &&
+       !transfer->data.empty() && transfer->event_source < 0)
+-    transfer->event_source = runtime->loop->add_fd(transfer->fd, EPOLLOUT,
++    transfer->event_source = runtime->loop->add_fd(transfer->fd, zwayland::server::kEventWritable,
+         [transfer](int fd, int mask) {
+           return flush_receive(fd, static_cast<std::uint32_t>(mask), transfer) != 0;
+         });
+@@ -314,7 +313,7 @@
+   runtime->sends.push_back(transfer);
+   send_source_data(source, mime.c_str(), pipe_fds[1]);
+   ::close(pipe_fds[1]);
+-  transfer->event_source = runtime->loop->add_fd(transfer->fd, EPOLLIN,
++  transfer->event_source = runtime->loop->add_fd(transfer->fd, zwayland::server::kEventReadable,
+       [transfer](int fd, int) {
+         auto* item = transfer;
+         auto* runtime = item->selection->runtime;

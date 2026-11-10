@@ -1,0 +1,72 @@
+--- a/zwwm/src/portal_capture.cpp
++++ b/zwwm/src/portal_capture.cpp
+@@ -15,8 +15,8 @@
+ #include <algorithm>
+ #include <csignal>
+ #include <cstring>
+-#include <sys/epoll.h>
+ #include <sys/socket.h>
++#include <sys/un.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ #include <time.h>
+@@ -412,14 +412,14 @@
+ 
+   static int readable(int, std::uint32_t mask, void* data) {
+     auto* self = static_cast<Impl*>(data);
+-    if ((mask & (EPOLLHUP | EPOLLERR)) != 0) {
++    if ((mask & (zwayland::server::kEventHangup | zwayland::server::kEventError)) != 0) {
+       self->close_channel(true);
+       return 0;
+     }
+ 
+     Message message{};
+     iovec io{.iov_base = &message, .iov_len = sizeof(message)};
+-    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(ucred))]{};
++    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(SOCKCRED2SIZE(CMGROUP_MAX))]{};
+     msghdr header{};
+     header.msg_iov = &io;
+     header.msg_iovlen = 1;
+@@ -431,15 +431,19 @@
+       return 0;
+     }
+     int received_fd = -1;
+-    const ucred* credentials = nullptr;
++    sockcred2 credential_data{};
++    const sockcred2* credentials = nullptr;
+     for (auto* cmsg = CMSG_FIRSTHDR(&header); cmsg != nullptr; cmsg = CMSG_NXTHDR(&header, cmsg)) {
+       if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
+           cmsg->cmsg_len == CMSG_LEN(sizeof(int))) std::memcpy(&received_fd, CMSG_DATA(cmsg), sizeof(received_fd));
+-      if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS &&
+-          cmsg->cmsg_len == CMSG_LEN(sizeof(ucred))) credentials = reinterpret_cast<const ucred*>(CMSG_DATA(cmsg));
++      if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDS2 &&
++          cmsg->cmsg_len >= CMSG_LEN(SOCKCRED2SIZE(0))) {
++        std::memcpy(&credential_data, CMSG_DATA(cmsg), SOCKCRED2SIZE(0));
++        credentials = &credential_data;
++      }
+     }
+-    const bool child_credentials = credentials != nullptr && credentials->pid == self->child &&
+-                                   credentials->uid == getuid() && credentials->gid == getgid();
++    const bool child_credentials = credentials != nullptr && credentials->sc_pid == self->child &&
++                                   credentials->sc_uid == getuid() && credentials->sc_gid == getgid();
+     UniqueFd passed_fd(received_fd);
+     if (!child_credentials) {
+       self->close_channel(true);
+@@ -488,7 +492,7 @@
+       return false;
+     }
+     int enabled = 1;
+-    if (setsockopt(sockets[0], SOL_SOCKET, SO_PASSCRED, &enabled, sizeof(enabled)) != 0) {
++    if (setsockopt(sockets[0], SOL_LOCAL, LOCAL_CREDS_PERSISTENT, &enabled, sizeof(enabled)) != 0) {
+       close(sockets[0]);
+       close(sockets[1]);
+       error = "could not enable portal credential passing";
+@@ -517,7 +521,7 @@
+           child_exited(signal, this);
+           return true;
+         });
+-      source = event_loop->add_fd(socket.get(), EPOLLIN | EPOLLHUP | EPOLLERR, [this](int fd, int mask) {
++      source = event_loop->add_fd(socket.get(), zwayland::server::kEventReadable | zwayland::server::kEventHangup | zwayland::server::kEventError, [this](int fd, int mask) {
+         readable(fd, static_cast<std::uint32_t>(mask), this);
+         return source >= 0;
+       });

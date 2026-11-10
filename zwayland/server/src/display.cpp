@@ -4,12 +4,13 @@
 
 #include <cstring>
 #include <fcntl.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#if defined(__FreeBSD__)
+#include <sys/ucred.h>
+#endif
 #include <unistd.h>
 
 #include <algorithm>
@@ -26,8 +27,23 @@ namespace protocol = zwayland::generated;
 
 // ---- Client ----------------------------------------------------------------
 
+namespace {
+// Freed server ids wait in FIFO order until this many are queued.
+constexpr std::size_t kServerIdQuarantine = 64;
+}  // namespace
+
 Client::Client(Display& display, int fd)
     : display_(display), connection_(std::make_unique<wire::Connection>(fd)) {
+#if defined(__FreeBSD__)
+  struct xucred credentials {};
+  socklen_t size = sizeof(credentials);
+  if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, &credentials, &size) == 0 &&
+      credentials.cr_version == XUCRED_VERSION) {
+    pid_ = credentials.cr_pid;
+    uid_ = credentials.cr_uid;
+    gid_ = credentials.cr_ngroups > 0 ? credentials.cr_groups[0] : 0;
+  }
+#else
   struct ucred credentials {};
   socklen_t size = sizeof(credentials);
   if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &size) == 0) {
@@ -35,6 +51,8 @@ Client::Client(Display& display, int fd)
     uid_ = credentials.uid;
     gid_ = credentials.gid;
   }
+#endif
+  connection_->set_max_output(display_.max_client_buffer_);
   // Bootstrap the wl_display object at id 1, as libwayland does.
   create_resource(&protocol::wl_display_interface, 1, 1);
 }
@@ -46,39 +64,56 @@ Client::Client(Display& display, std::unique_ptr<wire::Connection> connection)
 
 Client::~Client() = default;
 
+void Client::reap() {
+  if (dispatch_depth_ == 0) graveyard_.clear();
+}
+
 bool Client::dispatch_available() {
+  if (dead_) return false;
   const bool got_input = connection_->read_available();
   if (!got_input)
     return connection_->healthy() && !connection_->peer_closed();
 
-  for (;;) {
+  ++dispatch_depth_;
+  bool ok = true;
+  while (ok) {
     auto message = connection_->next_message();
     if (!message) break;
 
-    const auto resource_found = resources_.find(message->object_id);
-    if (resource_found == resources_.end()) {
+    Resource* resource = resources_.find(message->object_id);
+    if (resource == nullptr) {
       connection_->consume(message->size, 0);
       post_error(1, 0, "invalid object");
-      return false;
+      ok = false;
+      break;
     }
-    const std::shared_ptr<Resource> resource_owner = resource_found->second;
-    Resource* resource = resource_owner.get();
-
     const Interface* iface = resource->interface;
     const std::uint32_t resource_id = resource->id;
     if (message->opcode >= iface->method_count) {
       connection_->consume(message->size, 0);
       post_error(resource_id, 1, "invalid method");
-      return false;
+      ok = false;
+      break;
     }
-
-    if (iface->methods[message->opcode].since > resource->version) {
+    const Message& method = iface->methods[message->opcode];
+    if (method.since > resource->version) {
       connection_->consume(message->size, 0);
       post_error(resource_id, 1, "request requires a newer object version");
-      return false;
+      ok = false;
+      break;
+    }
+    // The signature, not the handler, decides how many FDs this message owns.
+    const std::size_t fd_count = wire::signature_fd_count(method.signature);
+    if (message->fds.size() < fd_count) {
+      connection_->consume(message->size, 0);
+      post_error(resource_id, 1, "request is missing a file descriptor");
+      ok = false;
+      break;
     }
 
-    wire::MessageParser parser(message->body, message->fds);
+    wire::MessageParser parser(message->body, message->fds.first(fd_count));
+    std::string failure;
+    bool failed = false;
     try {
       if (resource->handler) {
         resource->handler(*this, *resource, message->opcode, parser);
@@ -89,22 +124,36 @@ bool Client::dispatch_available() {
       }
       if (!parser.at_end()) throw std::runtime_error("request has trailing data");
     } catch (const std::exception& exception) {
-      connection_->consume(message->size, parser.consumed_fds());
-      post_error(resource_id, 1, exception.what());
-      return false;
+      failed = true;
+      failure = exception.what();
     }
-    connection_->consume(message->size, parser.consumed_fds());
-    if (dead_) return false;
+    for (std::size_t i = parser.consumed_fds(); i < fd_count; ++i) close(message->fds[i]);
+    connection_->consume(message->size, fd_count);
+    if (failed) {
+      post_error(resource_id, 1, failure);
+      ok = false;
+    }
+    if (dead_) ok = false;
   }
-  return connection_->healthy() && !connection_->peer_closed();
+  --dispatch_depth_;
+  reap();
+  return ok && connection_->healthy() && !connection_->peer_closed();
 }
 
 void Client::flush() { (void)connection_->flush(); }
 
 std::uint32_t Client::alloc_id() {
-  for (std::uint32_t attempts = 0; attempts < 0x01000000U; ++attempts) {
-    if (next_server_id_ < 0xff000000U) next_server_id_ = 0xff000000U;
-    const std::uint32_t id = next_server_id_++;
+  while (free_server_ids_.size() > kServerIdQuarantine) {
+    const std::uint32_t id = free_server_ids_.front();
+    free_server_ids_.pop_front();
+    if (!resources_.contains(id)) return id;
+  }
+  if (next_server_id_ >= wire::kServerIdStart && next_server_id_ != 0xffffffffU)
+    return next_server_id_++;
+  // Id space exhausted: fall back to any quarantined id.
+  while (!free_server_ids_.empty()) {
+    const std::uint32_t id = free_server_ids_.front();
+    free_server_ids_.pop_front();
     if (!resources_.contains(id)) return id;
   }
   return 0;
@@ -114,7 +163,7 @@ Resource* Client::create_resource(const Interface* interface, std::uint32_t id,
                                    std::uint32_t version, std::any userdata) {
   if (id == 0) id = alloc_id();
   if (interface == nullptr || id == 0 || version == 0) return nullptr;
-  auto resource = std::make_shared<Resource>();
+  auto resource = std::make_unique<Resource>();
   resource->id = id;
   resource->version = std::min(version, interface->version);
   resource->interface = interface;
@@ -122,43 +171,59 @@ Resource* Client::create_resource(const Interface* interface, std::uint32_t id,
   resource->display = &display_;
   resource->client = this;
   Resource* result = resource.get();
-  const bool inserted = resources_.emplace(id, resource).second;
-  if (!inserted) return nullptr;
-  return result;
+  return resources_.insert(id, std::move(resource)) ? result : nullptr;
 }
 
 bool Client::valid_new_id(std::uint32_t id) const {
-  return id > 0 && id < 0xff000000U && !resources_.contains(id);
+  return id > 0 && id < wire::kServerIdStart && !resources_.contains(id);
 }
 
-Resource* Client::find_resource(std::uint32_t id) {
-  auto it = resources_.find(id);
-  return it == resources_.end() ? nullptr : it->second.get();
-}
+Resource* Client::find_resource(std::uint32_t id) { return resources_.find(id); }
 
 void Client::destroy_resource(std::uint32_t id) {
-  auto it = resources_.find(id);
-  if (it == resources_.end()) return;
-  const std::shared_ptr<Resource> owner = it->second;
+  // Unlinking first makes re-entrant destroys of the same id a no-op.
+  std::unique_ptr<Resource> owner = resources_.take(id);
+  if (!owner) return;
   Resource& resource = *owner;
   resource.destroy_signal.emit_final(&resource);
   if (resource.destroy_handler) resource.destroy_handler(resource);
-  if (id < 0xff000000u && !dead_) {
-    wire::MessageBuilder builder(1);  // wl_display.delete_id
-    builder.set_opcode(1);
-    builder.append_uint(id);
-    connection_->queue(builder.finish(), builder.take_fds());
-    display_.client_output_changed(*this);
+  if (id < wire::kServerIdStart) {
+    if (!dead_) {
+      wire::MessageBuilder builder(1);  // wl_display.delete_id
+      builder.set_opcode(1);
+      builder.append_uint(id);
+      send_event(builder);
+    }
+  } else {
+    free_server_ids_.push_back(id);
   }
-  resources_.erase(it);
+  if (dispatch_depth_ > 0) graveyard_.push_back(std::move(owner));
+}
+
+void Client::queued_output(bool ok) {
+  if (ok) {
+    display_.client_output_changed(*this);
+  } else if (!dead_) {
+    // Backlog cap hit or allocation failed: the client is not keeping up.
+    dead_ = true;
+    display_.schedule_destroy_client(this);
+  }
+}
+
+void Client::send_event(wire::MessageBuilder& message) {
+  if (dead_) return;
+  std::vector<int> fds = message.take_fds();
+  queued_output(connection_->queue(message.seal(), fds));
 }
 
 void Client::send_event([[maybe_unused]] std::uint32_t object_id,
                         [[maybe_unused]] std::uint32_t opcode,
                         std::vector<std::byte> bytes, std::vector<int> fds) {
-  if (dead_) return;
-  connection_->queue(std::move(bytes), std::move(fds));
-  display_.client_output_changed(*this);
+  if (dead_) {
+    for (int fd : fds) close(fd);
+    return;
+  }
+  queued_output(connection_->queue(std::span<const std::byte>(bytes), std::span<const int>(fds)));
 }
 
 void Client::post_error(std::uint32_t code, std::string_view message) {
@@ -169,14 +234,13 @@ void Client::post_error(std::uint32_t object_id, std::uint32_t code,
                         std::string_view message) {
   if (dead_) return;
   dead_ = true;
-  Resource* display_resource = find_resource(1);
-  if (display_resource == nullptr) return;
+  if (find_resource(1) == nullptr) return;
   wire::MessageBuilder builder(1);
   builder.set_opcode(0);  // wl_display.error
   builder.append_object(object_id);
   builder.append_uint(code);
   builder.append_string(message);
-  connection_->queue(builder.finish(), builder.take_fds());
+  (void)connection_->queue(builder.seal(), {});
   (void)connection_->flush();
 }
 
@@ -186,15 +250,7 @@ void Client::destroy() {
   if (destroying_) return;
   destroying_ = true;
   destroy_signal.emit_final(this);
-  // Emit each resource's destroy_signal, then remove the resources. Copy the
-  // ids first because destroying a resource erases it from the map.
-  std::vector<std::uint32_t> ids;
-  ids.reserve(resources_.size());
-  for (const auto& kv : resources_) ids.push_back(kv.first);
-  std::sort(ids.begin(), ids.end());
-  for (std::uint32_t id : ids) {
-    if (resources_.count(id)) destroy_resource(id);
-  }
+  for (std::uint32_t id : resources_.ids()) destroy_resource(id);
   flush();
   dead_ = true;
   display_.schedule_remove_client(this);
@@ -295,10 +351,12 @@ Display::Display(const std::string& socket_name) {
   }
 
   try {
-    loop_.add_fd(listen_fd_, EPOLLIN, [this](int, int) {
+    loop_.add_fd(listen_fd_, kEventReadable, [this](int, int) {
       accept_client();
       return true;
     });
+    // One flush per client per loop iteration, however many events were sent.
+    loop_.add_prepare([this] { flush_dirty_clients(); });
   } catch (...) {
     cleanup_socket();
     throw;
@@ -317,7 +375,7 @@ Display::Display(const std::string& socket_name) {
       wire::MessageBuilder done(id);
       done.set_opcode(0);
       done.append_uint(next_serial_);
-      client.send_event(id, 0, done.finish(), done.take_fds());
+      client.send_event(done);
       cb->destroy();
     } else if (opcode == 1) {  // get_registry
       const uint32_t id = parser.read_new_id();
@@ -373,8 +431,7 @@ Display::~Display() {
 Client* Display::add_loopback_client(std::unique_ptr<wire::Connection> connection) {
   auto client = std::make_unique<Client>(*this, std::move(connection));
   Client* raw = client.get();
-  // Synchronous in-process dispatch: when the peer pushes data, process it and
-  // flush any replies back through the same link.
+  // Process loopback data synchronously and flush replies over the same link.
   raw->connection().set_data_ready([raw]() {
     if (raw->dispatch_available()) raw->flush();
     else raw->destroy();
@@ -386,15 +443,14 @@ Client* Display::add_loopback_client(std::unique_ptr<wire::Connection> connectio
 Client* Display::add_client(int fd) {
   auto client = std::make_unique<Client>(*this, fd);
   Client* raw = client.get();
-  loop_.add_fd(fd, EPOLLIN, [this, raw](int source_fd, int mask) {
-    if ((mask & (EPOLLERR | EPOLLHUP)) != 0 ||
-        ((mask & EPOLLIN) != 0 && !raw->dispatch_available())) {
+  loop_.add_fd(fd, kEventReadable, [this, raw](int, int mask) {
+    if ((mask & (kEventError | kEventHangup)) != 0 ||
+        ((mask & kEventReadable) != 0 && !raw->dispatch_available())) {
       raw->destroy();
       return false;
     }
-    raw->flush();
-    loop_.update_fd(source_fd,
-                    EPOLLIN | (raw->connection().has_output() ? static_cast<std::uint32_t>(EPOLLOUT) : 0U));
+    // Replies are flushed by the prepare hook; only drain a backlog here.
+    if ((mask & kEventWritable) != 0) flush_client(*raw);
     return true;
   });
   clients_.push_back(std::move(client));
@@ -437,7 +493,7 @@ void Display::notify_registry(Client& client, std::uint32_t registry_id) {
     builder.append_uint(global.name);
     builder.append_string(global.interface->name);
     builder.append_uint(global.version);
-    client.send_event(registry_id, 0, builder.finish(), builder.take_fds());
+    client.send_event(builder);
   }
 }
 
@@ -449,7 +505,7 @@ void Display::notify_global(Client& client, const Global& global) {
     builder.append_uint(global.name);
     builder.append_string(global.interface->name);
     builder.append_uint(global.version);
-    client.send_event(registry_id, 0, builder.finish(), builder.take_fds());
+    client.send_event(builder);
   }
 }
 
@@ -461,6 +517,7 @@ void Display::accept_client() {
 }
 
 void Display::remove_client(Client* client) {
+  std::erase(dirty_clients_, client);
   for (auto it = clients_.begin(); it != clients_.end(); ++it) {
     if (it->get() == client) {
       int fd = client->fd();
@@ -475,23 +532,68 @@ void Display::schedule_remove_client(Client* client) {
   loop_.add_idle([this, client]() { remove_client(client); });
 }
 
+void Display::schedule_destroy_client(Client* client) {
+  loop_.add_idle([this, client]() {
+    const bool live = std::any_of(clients_.begin(), clients_.end(),
+                                  [client](const auto& entry) { return entry.get() == client; });
+    if (live) client->destroy();
+  });
+}
+
 void Display::client_output_changed(Client& client) {
+  // In-process peers expect synchronous delivery (roundtrips rely on it).
   if (client.connection().loopback()) {
     client.flush();
     return;
   }
-  if (client.fd() >= 0)
-    loop_.update_fd(client.fd(), EPOLLIN | EPOLLOUT);
+  if (!client.dirty_) {
+    client.dirty_ = true;
+    dirty_clients_.push_back(&client);
+  }
+}
+
+void Display::flush_client(Client& client) {
+  if (client.dead_) return;
+  if (!client.connection().flush() || !client.connection().healthy()) {
+    client.dead_ = true;
+    schedule_destroy_client(&client);
+    return;
+  }
+  // Writable is armed only while the socket is backed up.
+  const bool backlog = client.connection().has_output();
+  if (backlog != client.write_armed_ && client.fd() >= 0) {
+    loop_.update_fd(client.fd(), kEventReadable | (backlog ? kEventWritable : 0));
+    client.write_armed_ = backlog;
+  }
+}
+
+void Display::flush_dirty_clients() {
+  if (dirty_clients_.empty()) return;
+  std::vector<Client*> dirty;
+  dirty.swap(dirty_clients_);
+  for (Client* client : dirty) {
+    client->dirty_ = false;
+    flush_client(*client);
+  }
+  // Keep the vector's capacity for the next iteration.
+  if (dirty_clients_.empty()) {
+    dirty.clear();
+    dirty_clients_.swap(dirty);
+  }
+}
+
+void Display::set_max_client_buffer(std::size_t bytes) {
+  max_client_buffer_ = bytes;
+  for (auto& client : clients_)
+    if (!client->connection().loopback()) client->connection().set_max_output(bytes);
 }
 
 void Display::run() { loop_.run(); }
 
 void Display::flush_clients() {
   for (auto& client : clients_) {
-    client->flush();
-    if (client->fd() >= 0)
-      loop_.update_fd(client->fd(), EPOLLIN |
-          (client->connection().has_output() ? static_cast<std::uint32_t>(EPOLLOUT) : 0U));
+    if (client->connection().loopback()) client->flush();
+    else flush_client(*client);
   }
 }
 
@@ -523,7 +625,7 @@ void Display::remove_global(std::uint32_t name) {
       wire::MessageBuilder builder(registry_id);
       builder.set_opcode(1);  // wl_registry.global_remove
       builder.append_uint(name);
-      client->send_event(registry_id, 1, builder.finish(), builder.take_fds());
+      client->send_event(builder);
     }
   }
 }

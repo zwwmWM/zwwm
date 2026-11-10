@@ -7,14 +7,12 @@
 
 namespace zwayland::server {
 
-// Listener modeled on `struct wl_listener`. The notify callback receives a
-// pointer to this listener and an opaque data pointer supplied by `Signal::emit`.
+// Modeled on wl_listener.
 struct Listener {
   void (*notify)(Listener* self, void* data) = nullptr;
 };
 
-// A signal modeled on `struct wl_signal`. Listeners are plain objects whose
-// address is registered; they must outlive the signal or be removed first.
+// Listeners must outlive the signal; removals during emit leave tombstones.
 class Signal {
  public:
   void add(Listener& l) {
@@ -23,30 +21,34 @@ class Signal {
   }
 
   void remove(Listener& l) {
-    for (auto it = listeners_.begin(); it != listeners_.end(); ++it) {
-      if (*it == &l) {
-        listeners_.erase(it);
-        return;
-      }
+    const auto it = std::find(listeners_.begin(), listeners_.end(), &l);
+    if (it == listeners_.end()) return;
+    if (emitting_ > 0) {
+      *it = nullptr;
+      tombstones_ = true;
+    } else {
+      listeners_.erase(it);
     }
   }
 
-  // Notify every registered listener. The listener list is copied first so a
-  // listener may safely add or remove other listeners (including itself)
-  // without invalidating the iteration.
+  // Listeners added during emission are not notified until the next emit.
   void emit(void* data) {
-    auto snapshot = listeners_;
-    for (Listener* l : snapshot) {
-      if (l != nullptr &&
-          std::find(listeners_.begin(), listeners_.end(), l) != listeners_.end() &&
-          l->notify != nullptr)
-        l->notify(l, data);
+    const std::size_t end = listeners_.size();
+    ++emitting_;
+    for (std::size_t i = 0; i < end && i < listeners_.size(); ++i) {
+      Listener* l = listeners_[i];
+      if (l != nullptr && l->notify != nullptr) l->notify(l, data);
+    }
+    if (--emitting_ == 0 && tombstones_) {
+      std::erase(listeners_, nullptr);
+      tombstones_ = false;
     }
   }
 
   void emit_final(void* data) {
     auto snapshot = std::move(listeners_);
     listeners_.clear();
+    tombstones_ = false;
     for (Listener* listener : snapshot) {
       if (listener != nullptr && listener->notify != nullptr)
         listener->notify(listener, data);
@@ -55,6 +57,8 @@ class Signal {
 
  private:
   std::vector<Listener*> listeners_;
+  std::size_t emitting_ = 0;
+  bool tombstones_ = false;
 };
 
 }  // namespace zwayland::server

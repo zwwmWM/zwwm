@@ -20,6 +20,44 @@ data_cpp = [
   '-DZWWM_SOURCE_DATA_DIR="' + (meson.project_source_root() / 'zwwm' / 'data') + '"',
 ]
 root_inc = include_directories('.')
+
+platform = get_option('platform')
+if platform == 'auto'
+  platform = host_machine.system() == 'freebsd' ? 'freebsd' : 'linux'
+endif
+freebsd = platform == 'freebsd'
+if freebsd != (host_machine.system() == 'freebsd')
+  error('platform=@0@ does not match host system @1@'.format(platform, host_machine.system()))
+endif
+
+freebsd_patched = {}
+if freebsd
+  patch_prog = find_program('patch')
+  foreach src : [
+    'zwwm-vlk/src/device.cpp',
+    'zwwm-vlk/src/image.cpp',
+    'zwwm-vlk/src/window.cpp',
+    'zwwm/src/runtime_config.cpp',
+    'zwwm/src/compositor_server_buffers.cpp',
+    'zwwm/src/compositor_server_input.cpp',
+    'zwwm/src/compositor_server_xwayland.cpp',
+    'zwwm/src/compositor_server_xwayland_selection.cpp',
+    'zwwm/src/xwayland_spawn.cpp',
+    'zwwm/src/nested_backend.cpp',
+    'zwwm/src/runtime_backend.cpp',
+    'zwwm/src/portal_capture.cpp',
+    'xdg-desktop-portal-zwwm/src/capture_client.cpp',
+    'xdg-desktop-portal-zwwm/src/pipewire_stream.cpp',
+  ]
+    name = src.replace('/src/', '-').replace('/', '-').replace('.cpp', '')
+    freebsd_patched += {src: custom_target(
+      'freebsd-' + name,
+      input: [src, 'freebsd/patches' / name + '.patch'],
+      output: name + '.cpp',
+      command: [patch_prog, '-s', '-f', '-o', '@OUTPUT@', '@INPUT0@', '-i', '@INPUT1@'],
+    )}
+  endforeach
+endif
 python = import('python').find_installation()
 
 libxml = dependency('libxml-2.0')
@@ -199,15 +237,14 @@ endif
 vulkan_cpp = strict_cpp + ['-Wno-missing-designated-field-initializers']
 
 zwwm_vlk_inc = include_directories('zwwm-vlk/include')
+zwwm_vlk_sources = []
+foreach src : ['zwwm-vlk/src/device.cpp', 'zwwm-vlk/src/dmabuf.cpp', 'zwwm-vlk/src/image.cpp', 'zwwm-vlk/src/window.cpp']
+  zwwm_vlk_sources += freebsd_patched.get(src, src)
+endforeach
 zwwm_vlk = static_library(
   'zwwm-vlk',
-  [
-    'zwwm-vlk/src/device.cpp',
-    'zwwm-vlk/src/dmabuf.cpp',
-    'zwwm-vlk/src/image.cpp',
-    'zwwm-vlk/src/window.cpp',
-  ],
-  include_directories: zwwm_vlk_inc,
+  zwwm_vlk_sources,
+  include_directories: [zwwm_vlk_inc] + (freebsd ? [include_directories('zwwm-vlk/src')] : []),
   dependencies: [zwayland_client_dep, vulkan, libdrm],
   cpp_args: vulkan_cpp,
 )
@@ -238,6 +275,11 @@ zwwm_renderer_dep = declare_dependency(
 )
 
 zwwm_inc = include_directories('zwwm/include')
+zwwm_src_inc = freebsd ? [include_directories('zwwm/src')] : []
+inotify = []
+if freebsd and not cpp_compiler.has_function('inotify_init1', prefix: '#include <sys/inotify.h>')
+  inotify = dependency('libinotify')
+endif
 xkbcommon = dependency('xkbcommon')
 zwwm_master_stack = static_library(
   'zwwm_master_stack',
@@ -267,9 +309,10 @@ zwwm_animation_dep = declare_dependency(
 
 zwwm_runtime_config = static_library(
   'zwwm_runtime_config',
-  'zwwm/src/runtime_config.cpp',
-  include_directories: zwwm_inc,
-  dependencies: [zwayland_server_dep, xkbcommon, zw_lang_dep, zwwm_master_stack_dep, zwwm_animation_dep],
+  freebsd_patched.get('zwwm/src/runtime_config.cpp', 'zwwm/src/runtime_config.cpp'),
+  'zwwm/src/config_validation.cpp',
+  include_directories: [zwwm_inc] + zwwm_src_inc,
+  dependencies: [zwayland_server_dep, xkbcommon, zw_lang_dep, zwwm_master_stack_dep, zwwm_animation_dep, inotify],
   cpp_args: strict_cpp + data_cpp,
 )
 zwwm_runtime_config_dep = declare_dependency(
@@ -313,7 +356,7 @@ zwwm_camera_dep = declare_dependency(
   include_directories: zwwm_inc,
 )
 
-compositor_sources = files(
+compositor_sources = [
   'zwwm/src/compositor_server.cpp',
   'zwwm/src/compositor_server_buffers.cpp',
   'zwwm/src/compositor_server_data_device.cpp',
@@ -329,7 +372,7 @@ compositor_sources = files(
   'zwwm/src/compositor_server_decoration.cpp',
   'zwwm/src/compositor_server_session_lock.cpp',
   'zwwm/src/compositor_server_surface_extensions.cpp',
-)
+]
 compositor_deps = [
   zwayland_server_dep,
   protocol_server_dep,
@@ -343,18 +386,22 @@ compositor_deps = [
 ]
 compositor_args = strict_cpp
 if get_option('xwayland')
-  compositor_sources += files(
+  compositor_sources += [
     'zwwm/src/compositor_server_xwayland.cpp',
     'zwwm/src/compositor_server_xwayland_selection.cpp',
     'zwwm/src/xwayland_spawn.cpp',
-  )
+  ]
   compositor_deps += [dependency('xcb'), dependency('xcb-composite'), dependency('xcb-xfixes')]
   compositor_args += ['-DZWWM_XWAYLAND=1']
 endif
+compositor_build_sources = []
+foreach src : compositor_sources
+  compositor_build_sources += freebsd_patched.get(src, src)
+endforeach
 zwwm_compositor = static_library(
   'zwwm_compositor',
-  compositor_sources,
-  include_directories: [zwwm_inc, root_inc],
+  compositor_build_sources,
+  include_directories: [zwwm_inc, root_inc] + zwwm_src_inc,
   dependencies: compositor_deps,
   cpp_args: compositor_args,
 )
@@ -385,20 +432,25 @@ portal_helper = executable(
   [
     'xdg-desktop-portal-zwwm/src/main.cpp',
     'xdg-desktop-portal-zwwm/src/access_portal.cpp',
-    'xdg-desktop-portal-zwwm/src/capture_client.cpp',
+    freebsd_patched.get('xdg-desktop-portal-zwwm/src/capture_client.cpp', 'xdg-desktop-portal-zwwm/src/capture_client.cpp'),
     'xdg-desktop-portal-zwwm/src/file_chooser_portal.cpp',
     'xdg-desktop-portal-zwwm/src/image_writer.cpp',
     'xdg-desktop-portal-zwwm/src/screenshot_portal.cpp',
     'xdg-desktop-portal-zwwm/src/screencast_portal.cpp',
     'xdg-desktop-portal-zwwm/src/settings_portal.cpp',
-    'xdg-desktop-portal-zwwm/src/pipewire_stream.cpp',
+    freebsd_patched.get('xdg-desktop-portal-zwwm/src/pipewire_stream.cpp', 'xdg-desktop-portal-zwwm/src/pipewire_stream.cpp'),
     portal_moc,
   ],
-  include_directories: [root_inc, include_directories('xdg-desktop-portal-zwwm/vendor', is_system: true)],
+  include_directories: [root_inc, include_directories('xdg-desktop-portal-zwwm/vendor', is_system: true)]
+    + (freebsd ? [include_directories('xdg-desktop-portal-zwwm/src')] : []),
   dependencies: [pipewire, spa, libdrm, dependency('gbm'), zwayland_client_dep, protocol_client_dep, qt6_dep],
   cpp_args: strict_cpp,
   install: true,
 )
+
+if freebsd and not cpp_compiler.has_header('linux/input-event-codes.h', dependencies: dependency('libinput'))
+  error('linux/input-event-codes.h not found; install devel/evdev-proto')
+endif
 
 zwwm = executable(
   'zwwm',
@@ -410,12 +462,12 @@ zwwm = executable(
     'zwwm/src/client_connection_protocol.cpp',
     'zwwm/src/window_manager_protocol.cpp',
     'zwwm/src/layout_manager_protocol.cpp',
-    'zwwm/src/nested_backend.cpp',
+    freebsd_patched.get('zwwm/src/nested_backend.cpp', 'zwwm/src/nested_backend.cpp'),
     'zwwm/src/nested_backend_touch.cpp',
-    'zwwm/src/runtime_backend.cpp',
-    'zwwm/src/portal_capture.cpp',
+    freebsd_patched.get('zwwm/src/runtime_backend.cpp', 'zwwm/src/runtime_backend.cpp'),
+    freebsd_patched.get('zwwm/src/portal_capture.cpp', 'zwwm/src/portal_capture.cpp'),
   ],
-  include_directories: [zwwm_inc, root_inc],
+  include_directories: [zwwm_inc, root_inc] + zwwm_src_inc,
   dependencies: [
     zwayland_server_dep,
     zwayland_client_dep,

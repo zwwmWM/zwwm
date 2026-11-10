@@ -33,6 +33,7 @@ extern "C" {
 #include <cmath>
 #include <chrono>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -51,6 +52,8 @@ namespace protocol = zwayland::generated;
 
 namespace zwwm {
 namespace {
+
+constexpr std::array<float, 4> kBackgroundClear{0.125F, 0.141F, 0.169F, 1.0F};
 
 std::uint64_t monotonic_ms() {
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -291,6 +294,33 @@ struct RuntimeBackend::DrmOutput {
   renderer::TextureRef capture_texture;
   renderer::TextureRef capture_cursor_texture;
   std::int32_t cursor_width = 0, cursor_height = 0, cursor_hotspot_x = 0, cursor_hotspot_y = 0;
+  std::vector<std::uint32_t> cursor_pixels;
+  std::uint64_t cursor_serial = 0;
+  struct CursorState {
+    bool visible = false;
+    std::int32_t x = 0, y = 0;
+    int buffer = 0;
+    bool operator==(const CursorState&) const = default;
+  };
+  struct CursorBuffer { std::uint32_t handle = 0, framebuffer = 0; std::uint32_t* pixels = nullptr; };
+  // The KMS cursor plane; the cursor is composited whenever this cannot show it.
+  struct CursorPlane {
+    std::uint32_t id = 0;
+    std::uint32_t fb = 0, crtc = 0, src_x = 0, src_y = 0, src_w = 0, src_h = 0;
+    std::uint32_t crtc_x = 0, crtc_y = 0, crtc_w = 0, crtc_h = 0;
+    std::uint32_t width = 0, height = 0, stride = 0;
+    std::size_t bytes = 0;
+    std::array<CursorBuffer, 2> buffers;
+    CursorState committed;
+    int staged = -1;
+    std::uint64_t staged_serial = 0;
+    renderer::Size staged_size{};
+    bool failed = false;
+  } cursor;
+  bool cursor_dirty = false;
+  bool cursor_composited = false;
+  // The pending flip only moved the cursor, so the scanout buffers keep their roles.
+  bool cursor_flip = false;
   bool capture_ready = false;
   bool retired = false;
   bool powered_off = false;
@@ -300,6 +330,90 @@ struct RuntimeBackend::DrmOutput {
   std::uint64_t direct_failed_buffer = 0;
 
   explicit DrmOutput(AnimationConfig config) : animations(config) {}
+
+  void set_cursor_image(const XcursorImage& image, renderer::TextureRef texture) {
+    cursor_texture = std::move(texture);
+    cursor_width = static_cast<std::int32_t>(image.width);
+    cursor_height = static_cast<std::int32_t>(image.height);
+    cursor_hotspot_x = static_cast<std::int32_t>(image.xhot);
+    cursor_hotspot_y = static_cast<std::int32_t>(image.yhot);
+    cursor_pixels.assign(image.pixels, image.pixels + static_cast<std::size_t>(image.width) * image.height);
+    ++cursor_serial;
+  }
+
+  // Physical pixels the cursor covers, matching where composition would draw it.
+  renderer::Rect cursor_bounds(const OutputConfig& config, double x, double y) const {
+    return config.physical_bounds(
+        {{static_cast<std::int32_t>(std::lround(x)) - cursor_hotspot_x - output.logical_x,
+          static_cast<std::int32_t>(std::lround(y)) - cursor_hotspot_y - output.logical_y},
+         {static_cast<std::uint32_t>(cursor_width), static_cast<std::uint32_t>(cursor_height)}},
+        {static_cast<std::uint32_t>(mode.hdisplay), static_cast<std::uint32_t>(mode.vdisplay)});
+  }
+
+  bool hardware_cursor(const OutputConfig& config) const {
+    if (cursor.id == 0 || cursor.failed || cursor_pixels.empty() || cursor_width <= 0 || cursor_height <= 0 ||
+        config.transform != OutputTransform::normal) return false;
+    const auto size = cursor_bounds(config, 0, 0).size;
+    return size.width <= cursor.width && size.height <= cursor.height;
+  }
+
+  // Only call with no flip pending: the buffer not on screen is redrawn here.
+  CursorState stage_cursor(const OutputConfig& config, double x, double y, bool visible) {
+    if (!visible || !hardware_cursor(config)) return {};
+    const auto bounds = cursor_bounds(config, x, y);
+    if (static_cast<std::int64_t>(bounds.origin.x) + bounds.size.width <= 0 ||
+        static_cast<std::int64_t>(bounds.origin.y) + bounds.size.height <= 0 ||
+        bounds.origin.x >= mode.hdisplay || bounds.origin.y >= mode.vdisplay) return {};
+    const auto size = bounds.size;
+    if (cursor.staged < 0 || cursor.staged_serial != cursor_serial ||
+        cursor.staged_size.width != size.width || cursor.staged_size.height != size.height) {
+      const int target = cursor.committed.visible && cursor.committed.buffer == 0 ? 1 : 0;
+      auto* out = cursor.buffers[static_cast<std::size_t>(target)].pixels;
+      std::memset(out, 0, cursor.bytes);
+      const double step_x = static_cast<double>(cursor_width) / size.width;
+      const double step_y = static_cast<double>(cursor_height) / size.height;
+      for (std::uint32_t row = 0; row < size.height; ++row) {
+        const double sy = std::clamp((row + 0.5) * step_y - 0.5, 0.0, cursor_height - 1.0);
+        const auto y0 = static_cast<std::size_t>(sy);
+        const auto y1 = std::min(y0 + 1, static_cast<std::size_t>(cursor_height) - 1);
+        const double fy = sy - static_cast<double>(y0);
+        for (std::uint32_t column = 0; column < size.width; ++column) {
+          const double sx = std::clamp((column + 0.5) * step_x - 0.5, 0.0, cursor_width - 1.0);
+          const auto x0 = static_cast<std::size_t>(sx);
+          const auto x1 = std::min(x0 + 1, static_cast<std::size_t>(cursor_width) - 1);
+          const double fx = sx - static_cast<double>(x0);
+          std::uint32_t pixel = 0;
+          for (std::uint32_t shift = 0; shift < 32; shift += 8) {
+            const auto channel = [&](std::size_t px, std::size_t py) {
+              return static_cast<double>(
+                  (cursor_pixels[py * static_cast<std::size_t>(cursor_width) + px] >> shift) & 0xffU);
+            };
+            const double top = channel(x0, y0) * (1.0 - fx) + channel(x1, y0) * fx;
+            const double bottom = channel(x0, y1) * (1.0 - fx) + channel(x1, y1) * fx;
+            pixel |= static_cast<std::uint32_t>(std::lround(top * (1.0 - fy) + bottom * fy)) << shift;
+          }
+          out[static_cast<std::size_t>(row) * cursor.stride + column] = pixel;
+        }
+      }
+      cursor.staged = target;
+      cursor.staged_serial = cursor_serial;
+      cursor.staged_size = size;
+    }
+    return {true, bounds.origin.x, bounds.origin.y, cursor.staged};
+  }
+
+  void release_cursor_plane(int fd) {
+    for (auto& buffer : cursor.buffers) {
+      if (buffer.pixels != nullptr) (void)munmap(buffer.pixels, cursor.bytes);
+      if (buffer.framebuffer != 0) drmModeRmFB(fd, buffer.framebuffer);
+      if (buffer.handle != 0) {
+        drm_mode_destroy_dumb destroy{};
+        destroy.handle = buffer.handle;
+        (void)drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+      }
+    }
+    cursor = {};
+  }
 };
 
 struct RuntimeBackend::DrmDevice {
@@ -414,7 +528,6 @@ bool RuntimeBackend::start() {
   if (!active_)
     std::fprintf(stderr, "zwwm: seat is inactive; waiting for the login session to become active\n");
   discover_drm_devices();
-  schedule_output_probe();
   return true;
 }
 
@@ -422,10 +535,6 @@ void RuntimeBackend::stop() {
   if (error_timer_ >= 0) {
     event_loop_->remove(error_timer_);
     error_timer_ = -1;
-  }
-  if (probe_timer_ >= 0) {
-    event_loop_->remove(probe_timer_);
-    probe_timer_ = -1;
   }
   for (auto& device : devices_) {
     close_drm_device(*device);
@@ -551,7 +660,7 @@ void RuntimeBackend::set_dmabuf_target(CompositorServer* compositor) {
 void RuntimeBackend::set_cursor_shape(const char* xcursor_name) {
   if (xcursor_name == nullptr) {
     cursor_visible_ = false;
-    for (auto& device : devices_) for (auto& output : device->outputs) repaint(*output);
+    for (auto& device : devices_) for (auto& output : device->outputs) update_cursor(*output);
     return;
   }
   cursor_visible_ = true;
@@ -565,15 +674,9 @@ void RuntimeBackend::set_cursor_shape(const char* xcursor_name) {
     }
     const XcursorImage* image = cursor->images[0];
     auto texture = device->renderer->upload(nullptr, image->pixels, image->width, image->height, image->width);
-    if (texture != nullptr) {
-      output->cursor_texture = std::move(texture);
-      output->cursor_width = static_cast<std::int32_t>(image->width);
-      output->cursor_height = static_cast<std::int32_t>(image->height);
-      output->cursor_hotspot_x = static_cast<std::int32_t>(image->xhot);
-      output->cursor_hotspot_y = static_cast<std::int32_t>(image->yhot);
-    }
+    if (texture != nullptr) output->set_cursor_image(*image, std::move(texture));
     XcursorImagesDestroy(cursor);
-    repaint(*output);
+    update_cursor(*output);
   }
 }
 bool RuntimeBackend::set_cursor_theme(const std::string& theme, std::uint32_t size,
@@ -601,7 +704,29 @@ bool RuntimeBackend::set_cursor_theme(const std::string& theme, std::uint32_t si
 void RuntimeBackend::set_cursor_position(std::int32_t x, std::int32_t y) {
   cursor_x_ = x;
   cursor_y_ = y;
-  for (auto& device : devices_) for (auto& output : device->outputs) repaint(*output);
+  for (auto& device : devices_) for (auto& output : device->outputs) update_cursor(*output);
+}
+
+// Moves the cursor plane without composing a frame; falls back to a repaint.
+void RuntimeBackend::update_cursor(DrmOutput& card) {
+  if (!active_ || card.retired || card.powered_off) return;
+  const auto& output_config = config_->output_for(card.output.connector);
+  if (card.cursor_composited || (cursor_visible_ && !card.hardware_cursor(output_config))) {
+    repaint(card);
+    return;
+  }
+  if (card.flip_pending) { card.cursor_dirty = true; return; }
+  card.cursor_dirty = false;
+  if (card.stage_cursor(output_config, cursor_x_, cursor_y_, cursor_visible_) == card.cursor.committed) return;
+  const std::uint32_t framebuffer = card.direct_front ? card.direct_front->framebuffer :
+      card.front_buffer >= 0 ? card.scanout[static_cast<std::size_t>(card.front_buffer)].framebuffer : 0;
+  if (framebuffer == 0 || card.needs_modeset) { repaint(card); return; }
+  card.flip_pending = true;
+  card.cursor_flip = true;
+  if (!commit_atomic_output(card, framebuffer, false)) {
+    card.flip_pending = false;
+    card.cursor_flip = false;
+  }
 }
 
 bool RuntimeBackend::capture_output(OutputCapture& capture, bool overlay_cursor) {
@@ -1134,11 +1259,7 @@ void RuntimeBackend::enable_seat(libseat*, void* data) {
   }
   backend->active_ = true;
   backend->resume_drm_devices();
-  if (backend->udev_ != nullptr) {
-    backend->discover_drm_devices();
-  }
-  backend->probe_attempts_ = 0;
-  backend->schedule_output_probe();
+  if (backend->udev_ != nullptr) backend->probe_outputs();
 }
 
 void RuntimeBackend::disable_seat(libseat* seat, void* data) {
@@ -1649,13 +1770,15 @@ void RuntimeBackend::repaint(DrmOutput& card) {
                              1.0F, {1.0F, 1.0F, 1.0F, 1.0F}, device.error_popup_texture});
   }
   renderer::FramePlan cursor_frame;
-  if (cursor_visible_ && card.cursor_texture != nullptr && card.cursor_width > 0 && card.cursor_height > 0) {
+  if (cursor_visible_ && !card.hardware_cursor(output_config) && card.cursor_texture != nullptr &&
+      card.cursor_width > 0 && card.cursor_height > 0) {
     cursor_frame.draws.push_back({std::numeric_limits<std::uint64_t>::max(),
                            {{static_cast<std::int32_t>(std::lround(cursor_x_)) - card.cursor_hotspot_x,
                              static_cast<std::int32_t>(std::lround(cursor_y_)) - card.cursor_hotspot_y},
                             {static_cast<std::uint32_t>(card.cursor_width), static_cast<std::uint32_t>(card.cursor_height)}},
                            1.0F, {1.0F, 1.0F, 1.0F, 1.0F}, card.cursor_texture});
   }
+  card.cursor_composited = !cursor_frame.draws.empty();
   const bool continue_animation = card.animations.active(now);
   const renderer::Point logical_origin{card.output.logical_x, card.output.logical_y};
   transform_frame(frame, output_config, physical, logical_origin);
@@ -1678,7 +1801,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     return;
   }
   const bool recorded = renderer.begin() &&
-      renderer.render(frame, card.capture_texture, std::array<float, 4>{0.125F, 0.141F, 0.169F, 1.0F}) &&
+      renderer.render(frame, card.capture_texture, kBackgroundClear) &&
       renderer.copy(card.capture_texture, buffer.image) &&
       (cursor_frame.draws.empty() || renderer.render(cursor_frame, buffer.image));
   // Submit even partial work so imported buffers return to their owners.
@@ -1690,12 +1813,12 @@ void RuntimeBackend::repaint(DrmOutput& card) {
   }
   card.capture_ready = true;
   if (card.needs_modeset) {
+    card.needs_repaint = false;
     if (!commit_atomic_output(card, buffer.framebuffer, true)) return;
     card.front_buffer = next;
     card.needs_modeset = false;
-    card.needs_repaint = false;
     if (input_target_ != nullptr) input_target_->notify_frame_presented(card.output.id);
-    if (continue_animation) repaint(card);
+    if (continue_animation || card.needs_repaint) repaint(card);
     return;
   }
   card.pending_buffer = next;
@@ -1710,12 +1833,16 @@ void RuntimeBackend::repaint(DrmOutput& card) {
 void RuntimeBackend::page_flip_complete(DrmOutput& card) {
   auto& device = *card.device;
   if (!card.flip_pending) return;
-  // The frame that just left the screen can go back to its client.
-  if (card.direct_front) release_direct_frame(card, card.direct_front->framebuffer, card.direct_front->buffer_id);
-  card.direct_front = card.direct_pending;
-  card.direct_pending.reset();
-  card.front_buffer = card.pending_buffer;
-  card.pending_buffer = -1;
+  if (card.cursor_flip) {
+    card.cursor_flip = false;
+  } else {
+    // The frame that just left the screen can go back to its client.
+    if (card.direct_front) release_direct_frame(card, card.direct_front->framebuffer, card.direct_front->buffer_id);
+    card.direct_front = card.direct_pending;
+    card.direct_pending.reset();
+    card.front_buffer = card.pending_buffer;
+    card.pending_buffer = -1;
+  }
   card.flip_pending = false;
   if (card.retired) {
     auto* retired = &card;
@@ -1735,6 +1862,7 @@ void RuntimeBackend::page_flip_complete(DrmOutput& card) {
   }
   if (input_target_ != nullptr) input_target_->notify_frame_presented(card.output.id);
   if (card.needs_repaint) repaint(card);
+  if (card.cursor_dirty) update_cursor(card);
 }
 
 void RuntimeBackend::release_direct_frame(DrmOutput& card, std::uint32_t framebuffer, std::uint64_t buffer_id) {
@@ -1787,11 +1915,11 @@ bool RuntimeBackend::try_direct_scanout(DrmOutput& card) {
   // The framebuffer holds its own reference to the buffer.
   if (bo != nullptr) gbm_bo_destroy(bo);
   const bool imported = framebuffer != 0;
+  card.needs_repaint = false;
   if (imported && commit_atomic_output(card, framebuffer, false)) {
     card.direct_pending = DrmOutput::DirectFrame{framebuffer, candidate->buffer_id};
     card.pending_buffer = -1;
     card.flip_pending = true;
-    card.needs_repaint = false;
     card.capture_ready = false;
     return true;
   }
@@ -1845,23 +1973,6 @@ void RuntimeBackend::probe_outputs() {
   publish_outputs();
   publish_dmabuf_importer();
   for (auto& drm_device : devices_) for (auto& output : drm_device->outputs) repaint(*output);
-}
-
-// Retries with backoff while the seat is active but no output has appeared yet.
-void RuntimeBackend::schedule_output_probe() {
-  const bool lit = std::any_of(devices_.begin(), devices_.end(), [](const auto& device) { return !device->outputs.empty(); });
-  if (lit || !active_ || probe_timer_ >= 0 || probe_attempts_ >= 20) {
-    if (lit) probe_attempts_ = 0;
-    return;
-  }
-  const auto delay = std::min<std::uint32_t>(2000U, 100U << std::min<std::uint32_t>(probe_attempts_, 4U));
-  ++probe_attempts_;
-  probe_timer_ = event_loop_->add_timer(delay, [this] {
-    probe_timer_ = -1;
-    if (!active_) return;
-    probe_outputs();
-    schedule_output_probe();
-  });
 }
 
 void RuntimeBackend::add_drm_device(const char* path) {
@@ -2018,6 +2129,76 @@ bool RuntimeBackend::initialize_atomic_output(DrmOutput& output,
   return true;
 }
 
+// Optional: without a usable cursor plane the output keeps composing its cursor.
+void RuntimeBackend::create_cursor_plane(DrmOutput& output, const std::vector<std::uint32_t>& reserved_planes) {
+  auto& device = *output.device;
+  auto& cursor = output.cursor;
+  std::uint32_t found = 0;
+  auto* planes = drmModeGetPlaneResources(device.fd);
+  if (planes == nullptr) return;
+  for (std::uint32_t index = 0; index < planes->count_planes && found == 0; ++index) {
+    const auto id = planes->planes[index];
+    if (std::find(reserved_planes.begin(), reserved_planes.end(), id) != reserved_planes.end()) continue;
+    const auto taken = [id](const auto& item) { return item != nullptr && item->cursor.id == id; };
+    if (std::any_of(device.outputs.begin(), device.outputs.end(), taken) ||
+        std::any_of(device.retired_outputs.begin(), device.retired_outputs.end(), taken)) continue;
+    const auto type = kms_property(device.fd, id, DRM_MODE_OBJECT_PLANE, "type");
+    if (type.id == 0 || type.value != DRM_PLANE_TYPE_CURSOR) continue;
+    auto* plane = drmModeGetPlane(device.fd, id);
+    if (plane == nullptr) continue;
+    if (output.crtc_index < 32 && (plane->possible_crtcs & (1U << output.crtc_index)) != 0 &&
+        std::find(plane->formats, plane->formats + plane->count_formats, DRM_FORMAT_ARGB8888) !=
+            plane->formats + plane->count_formats) found = id;
+    drmModeFreePlane(plane);
+  }
+  drmModeFreePlaneResources(planes);
+  if (found == 0) return;
+  const auto property = [&](const char* name) {
+    return kms_property(device.fd, found, DRM_MODE_OBJECT_PLANE, name).id;
+  };
+  cursor.fb = property("FB_ID"); cursor.crtc = property("CRTC_ID");
+  cursor.src_x = property("SRC_X"); cursor.src_y = property("SRC_Y");
+  cursor.src_w = property("SRC_W"); cursor.src_h = property("SRC_H");
+  cursor.crtc_x = property("CRTC_X"); cursor.crtc_y = property("CRTC_Y");
+  cursor.crtc_w = property("CRTC_W"); cursor.crtc_h = property("CRTC_H");
+  if (cursor.fb == 0 || cursor.crtc == 0 || cursor.src_x == 0 || cursor.src_y == 0 || cursor.src_w == 0 ||
+      cursor.src_h == 0 || cursor.crtc_x == 0 || cursor.crtc_y == 0 || cursor.crtc_w == 0 || cursor.crtc_h == 0) {
+    cursor = {};
+    return;
+  }
+  std::uint64_t width = 0, height = 0;
+  if (drmGetCap(device.fd, DRM_CAP_CURSOR_WIDTH, &width) != 0 || width == 0) width = 64;
+  if (drmGetCap(device.fd, DRM_CAP_CURSOR_HEIGHT, &height) != 0 || height == 0) height = 64;
+  cursor.width = static_cast<std::uint32_t>(width);
+  cursor.height = static_cast<std::uint32_t>(height);
+  bool created = true;
+  for (auto& buffer : cursor.buffers) {
+    drm_mode_create_dumb create{};
+    create.width = cursor.width;
+    create.height = cursor.height;
+    create.bpp = 32;
+    if (drmIoctl(device.fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) != 0) { created = false; break; }
+    buffer.handle = create.handle;
+    cursor.stride = create.pitch / 4U;
+    cursor.bytes = static_cast<std::size_t>(create.size);
+    const std::uint32_t handles[4]{create.handle}, pitches[4]{create.pitch}, offsets[4]{};
+    drm_mode_map_dumb map{};
+    map.handle = create.handle;
+    if (drmModeAddFB2(device.fd, cursor.width, cursor.height, DRM_FORMAT_ARGB8888, handles, pitches, offsets,
+                      &buffer.framebuffer, 0) != 0 ||
+        drmIoctl(device.fd, DRM_IOCTL_MODE_MAP_DUMB, &map) != 0) { created = false; break; }
+    void* pixels = mmap(nullptr, cursor.bytes, PROT_READ | PROT_WRITE, MAP_SHARED, device.fd,
+                        static_cast<off_t>(map.offset));
+    if (pixels == MAP_FAILED) { created = false; break; }
+    buffer.pixels = static_cast<std::uint32_t*>(pixels);
+  }
+  if (!created) {
+    output.release_cursor_plane(device.fd);
+    return;
+  }
+  cursor.id = found;
+}
+
 std::uint32_t RuntimeBackend::add_framebuffer(DrmDevice& device, gbm_bo* bo) {
   std::uint32_t fb = 0;
   std::uint32_t handles[4]{}, strides[4]{}, offsets[4]{};
@@ -2100,6 +2281,9 @@ bool RuntimeBackend::create_scanout(DrmOutput& output) {
       gbm_bo_destroy(buffer.bo);
       return false;
     }
+    // Fresh scanout memory holds whatever the GPU last left there; never let that reach the screen.
+    if (device.renderer != nullptr && device.renderer->ready())
+      (void)device.renderer->render({}, buffer.image, kBackgroundClear);
     output.scanout.push_back(std::move(buffer));
   }
   return true;
@@ -2108,49 +2292,83 @@ bool RuntimeBackend::create_scanout(DrmOutput& output) {
 bool RuntimeBackend::commit_atomic_output(DrmOutput& output, std::uint32_t framebuffer, bool modeset) {
   auto& device = *output.device;
   const auto& p = output.atomic;
-  auto* request = drmModeAtomicAlloc();
-  if (request == nullptr) return false;
-  bool valid = true;
-  const auto add = [&](std::uint32_t object, std::uint32_t property, std::uint64_t value) {
-    if (property == 0 || drmModeAtomicAddProperty(request, object, property, value) < 0) valid = false;
-  };
-  add(output.plane_id, p.plane_fb, framebuffer);
-  add(output.plane_id, p.plane_crtc, output.crtc_id);
-  if (modeset) {
-    add(output.connector_id, p.connector_crtc, output.crtc_id);
-    if (p.max_bpc != 0) add(output.connector_id, p.max_bpc, output.max_bpc_value);
-    add(output.crtc_id, p.crtc_mode, output.mode_blob);
-    add(output.crtc_id, p.crtc_active, 1);
-    add(output.plane_id, p.src_x, 0); add(output.plane_id, p.src_y, 0);
-    add(output.plane_id, p.src_w, static_cast<std::uint64_t>(output.mode.hdisplay) << 16U);
-    add(output.plane_id, p.src_h, static_cast<std::uint64_t>(output.mode.vdisplay) << 16U);
-    add(output.plane_id, p.crtc_x, 0); add(output.plane_id, p.crtc_y, 0);
-    add(output.plane_id, p.crtc_w, output.mode.hdisplay);
-    add(output.plane_id, p.crtc_h, output.mode.vdisplay);
-    const auto rotation = kms_property(device.fd, output.plane_id, DRM_MODE_OBJECT_PLANE, "rotation");
-    if (rotation.id != 0) add(output.plane_id, rotation.id, DRM_MODE_ROTATE_0);
-    // Clear planes a previous seat owner left on this CRTC; zwwm composes into the primary.
-    auto* planes = drmModeGetPlaneResources(device.fd);
-    if (planes != nullptr) {
-      for (std::uint32_t index = 0; index < planes->count_planes; ++index) {
-        const auto id = planes->planes[index];
-        if (id == output.plane_id) continue;
-        const auto crtc = kms_property(device.fd, id, DRM_MODE_OBJECT_PLANE, "CRTC_ID");
-        if (crtc.value != output.crtc_id) continue;
-        add(id, crtc.id, 0);
-        add(id, kms_property(device.fd, id, DRM_MODE_OBJECT_PLANE, "FB_ID").id, 0);
+  auto& cursor = output.cursor;
+  int saved_errno = 0;
+  const auto commit = [&](const DrmOutput::CursorState& shown) {
+    auto* request = drmModeAtomicAlloc();
+    if (request == nullptr) { saved_errno = ENOMEM; return false; }
+    bool valid = true;
+    const auto add = [&](std::uint32_t object, std::uint32_t property, std::uint64_t value) {
+      if (property == 0 || drmModeAtomicAddProperty(request, object, property, value) < 0) valid = false;
+    };
+    add(output.plane_id, p.plane_fb, framebuffer);
+    add(output.plane_id, p.plane_crtc, output.crtc_id);
+    if (cursor.id != 0) {
+      add(cursor.id, cursor.fb, shown.visible ? cursor.buffers[static_cast<std::size_t>(shown.buffer)].framebuffer : 0);
+      add(cursor.id, cursor.crtc, shown.visible ? output.crtc_id : 0);
+      if (shown.visible) {
+        add(cursor.id, cursor.src_x, 0); add(cursor.id, cursor.src_y, 0);
+        add(cursor.id, cursor.src_w, static_cast<std::uint64_t>(cursor.width) << 16U);
+        add(cursor.id, cursor.src_h, static_cast<std::uint64_t>(cursor.height) << 16U);
+        add(cursor.id, cursor.crtc_x, static_cast<std::uint64_t>(static_cast<std::int64_t>(shown.x)));
+        add(cursor.id, cursor.crtc_y, static_cast<std::uint64_t>(static_cast<std::int64_t>(shown.y)));
+        add(cursor.id, cursor.crtc_w, cursor.width);
+        add(cursor.id, cursor.crtc_h, cursor.height);
       }
-      drmModeFreePlaneResources(planes);
     }
+    if (modeset) {
+      add(output.connector_id, p.connector_crtc, output.crtc_id);
+      if (p.max_bpc != 0) add(output.connector_id, p.max_bpc, output.max_bpc_value);
+      add(output.crtc_id, p.crtc_mode, output.mode_blob);
+      add(output.crtc_id, p.crtc_active, 1);
+      add(output.plane_id, p.src_x, 0); add(output.plane_id, p.src_y, 0);
+      add(output.plane_id, p.src_w, static_cast<std::uint64_t>(output.mode.hdisplay) << 16U);
+      add(output.plane_id, p.src_h, static_cast<std::uint64_t>(output.mode.vdisplay) << 16U);
+      add(output.plane_id, p.crtc_x, 0); add(output.plane_id, p.crtc_y, 0);
+      add(output.plane_id, p.crtc_w, output.mode.hdisplay);
+      add(output.plane_id, p.crtc_h, output.mode.vdisplay);
+      const auto rotation = kms_property(device.fd, output.plane_id, DRM_MODE_OBJECT_PLANE, "rotation");
+      if (rotation.id != 0) add(output.plane_id, rotation.id, DRM_MODE_ROTATE_0);
+      // Clear planes a previous seat owner left on this CRTC; zwwm composes into the primary.
+      auto* planes = drmModeGetPlaneResources(device.fd);
+      if (planes != nullptr) {
+        for (std::uint32_t index = 0; index < planes->count_planes; ++index) {
+          const auto id = planes->planes[index];
+          if (id == output.plane_id || id == cursor.id) continue;
+          const auto crtc = kms_property(device.fd, id, DRM_MODE_OBJECT_PLANE, "CRTC_ID");
+          if (crtc.value != output.crtc_id) continue;
+          add(id, crtc.id, 0);
+          add(id, kms_property(device.fd, id, DRM_MODE_OBJECT_PLANE, "FB_ID").id, 0);
+        }
+        drmModeFreePlaneResources(planes);
+      }
+    }
+    const std::uint32_t flags = modeset ? DRM_MODE_ATOMIC_ALLOW_MODESET :
+        DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
+    bool success = valid;
+    if (success && modeset)
+      success = drmModeAtomicCommit(device.fd, request, DRM_MODE_ATOMIC_TEST_ONLY | flags, nullptr) == 0;
+    if (success) success = drmModeAtomicCommit(device.fd, request, flags, modeset ? nullptr : &output) == 0;
+    saved_errno = errno;
+    drmModeAtomicFree(request);
+    return success;
+  };
+  const auto wanted = output.stage_cursor(config_->output_for(output.output.connector), cursor_x_, cursor_y_,
+                                          cursor_visible_);
+  bool success = commit(wanted);
+  const int refused = saved_errno;
+  if (success) {
+    cursor.committed = wanted;
+  } else if (wanted.visible && commit({})) {
+    // The driver refused the cursor plane; compose the cursor from here on.
+    success = true;
+    cursor.failed = true;
+    cursor.committed = {};
+    output.needs_repaint = true;
+    std::fprintf(stderr, "zwwm: DRM %s: cursor plane rejected on connector %u (%s); composing the cursor\n",
+                 device.path.c_str(), output.connector_id, std::strerror(refused));
   }
-  const std::uint32_t flags = modeset ? DRM_MODE_ATOMIC_ALLOW_MODESET :
-      DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
-  bool success = valid;
-  if (success && modeset)
-    success = drmModeAtomicCommit(device.fd, request, DRM_MODE_ATOMIC_TEST_ONLY | flags, nullptr) == 0;
-  if (success) success = drmModeAtomicCommit(device.fd, request, flags, modeset ? nullptr : &output) == 0;
-  const int saved_errno = errno;
-  drmModeAtomicFree(request);
+  if (success) output.cursor_dirty = false;
   if (!success) {
     last_error_ = std::string(modeset ? "atomic modeset failed: " : "atomic page flip failed: ") +
                   std::strerror(saved_errno);
@@ -2172,8 +2390,10 @@ bool RuntimeBackend::disable_atomic_output(DrmOutput& output) {
   add(output.plane_id, p.plane_fb); add(output.plane_id, p.plane_crtc);
   add(output.connector_id, p.connector_crtc);
   add(output.crtc_id, p.crtc_active); add(output.crtc_id, p.crtc_mode);
+  if (output.cursor.id != 0) { add(output.cursor.id, output.cursor.fb); add(output.cursor.id, output.cursor.crtc); }
   const bool success = valid && drmModeAtomicCommit(device.fd, request, DRM_MODE_ATOMIC_ALLOW_MODESET, nullptr) == 0;
   drmModeAtomicFree(request);
+  if (success) output.cursor.committed = {};
   return success;
 }
 
@@ -2318,6 +2538,7 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
       (*existing)->output.modes = candidate.modes;
       (*existing)->output.bit_depth = device.scanout_bit_depth;
       reserved_planes.push_back((*existing)->plane_id);
+      if ((*existing)->cursor.id != 0) reserved_planes.push_back((*existing)->cursor.id);
       next.push_back(std::move(*existing));
       continue;
     }
@@ -2331,6 +2552,9 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
     output->scanout_bit_depth = device.scanout_bit_depth;
     if (!initialize_atomic_output(*output, reserved_planes)) continue;
     if (!create_scanout(*output)) { close_drm_output(*output); continue; }
+    reserved_planes.push_back(output->plane_id);
+    create_cursor_plane(*output, reserved_planes);
+    if (output->cursor.id != 0) reserved_planes.push_back(output->cursor.id);
     const auto& configured = config_->output_for(candidate.name);
     const auto logical = configured.logical_size({static_cast<std::uint32_t>(candidate.mode.hdisplay),
                                                    static_cast<std::uint32_t>(candidate.mode.vdisplay)});
@@ -2341,7 +2565,6 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
         .refresh_millihz = mode_refresh_millihz(candidate.mode),
         .scale_per_mille = configured.scale_per_mille, .transform = configured.transform,
         .bit_depth = device.scanout_bit_depth, .modes = std::move(candidate.modes)};
-    reserved_planes.push_back(output->plane_id);
     next.push_back(std::move(output));
   }
   if (next.empty() && !device.outputs.empty()) device.dmabuf_textures.clear();
@@ -2357,11 +2580,8 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
   for (auto& output : device.outputs) if (output->cursor_texture == nullptr && device.renderer != nullptr &&
       cursor != nullptr && cursor->nimage > 0 && cursor->images[0] != nullptr) {
     const auto* image = cursor->images[0];
-    output->cursor_texture = device.renderer->upload(nullptr, image->pixels, image->width, image->height, image->width);
-    output->cursor_width = static_cast<std::int32_t>(image->width);
-    output->cursor_height = static_cast<std::int32_t>(image->height);
-    output->cursor_hotspot_x = static_cast<std::int32_t>(image->xhot);
-    output->cursor_hotspot_y = static_cast<std::int32_t>(image->yhot);
+    output->set_cursor_image(
+        *image, device.renderer->upload(nullptr, image->pixels, image->width, image->height, image->width));
   }
   if (cursor != nullptr) XcursorImagesDestroy(cursor);
 }
@@ -2424,6 +2644,8 @@ void RuntimeBackend::close_drm_output(DrmOutput& output) {
   output.direct_pending.reset();
   output.shm_textures.clear();
   output.cursor_texture.reset();
+  output.release_cursor_plane(device.fd);
+  output.cursor_flip = output.cursor_dirty = false;
   output.capture_texture.reset();
   output.capture_cursor_texture.reset();
   if (output.mode_blob != 0) drmModeDestroyPropertyBlob(device.fd, output.mode_blob);

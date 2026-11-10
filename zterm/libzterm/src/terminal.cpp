@@ -4,6 +4,7 @@
 #include <climits>
 #include <cwchar>
 #include <cwctype>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <utility>
@@ -44,21 +45,34 @@ void validate_size(int rows, int columns) {
     throw std::invalid_argument("terminal dimensions exceed limits");
 }
 
-std::vector<int> parameters(std::string_view sequence) {
-  std::vector<int> result;
-  int value = 0;
-  for (const char character : sequence) {
-    if (character >= '0' && character <= '9') value = std::min(1000000, value * 10 + character - '0');
-    else if (character == ';' || character == ':') {
-      if (result.size() >= 64) break;
-      result.push_back(value); value = 0;
-    }
-  }
-  result.push_back(value);
-  return result;
+constexpr std::size_t kMaxReplyBacklog = 1024 * 1024;
+constexpr auto kSyncTimeout = std::chrono::milliseconds(150);
+
+// rgb:rrrr/gggg/bbbb as used by OSC color reports.
+std::string color_spec(Color color) {
+  char text[32];
+  std::snprintf(text, sizeof(text), "rgb:%04x/%04x/%04x", color.red * 257U, color.green * 257U, color.blue * 257U);
+  return text;
 }
 
 }  // namespace
+
+// `sub[i]` marks values that followed ':' and belong to the previous parameter.
+Terminal::Params Terminal::parameters(std::string_view sequence) {
+  Terminal::Params result;
+  int value = 0;
+  bool sub = false;
+  for (const char character : sequence) {
+    if (character >= '0' && character <= '9') value = std::min(1000000, value * 10 + character - '0');
+    else if (character == ';' || character == ':') {
+      if (result.values.size() >= 64) break;
+      result.values.push_back(value); result.sub.push_back(sub);
+      value = 0; sub = character == ':';
+    }
+  }
+  result.values.push_back(value); result.sub.push_back(sub);
+  return result;
+}
 
 Terminal::Terminal(int rows, int columns, std::size_t history_limit)
     : rows_(rows), columns_(columns), bottom_(rows - 1), history_limit_(std::min(history_limit, std::size_t{100000})) {
@@ -87,7 +101,8 @@ void Terminal::reset() {
   tabs_.assign(columns_, false);
   for (int col = 8; col < columns_; col += 8) tabs_[col] = true;
   history_.clear(); history_base_ = 0; clear_selection(); top_ = scroll_ = 0; bottom_ = rows_ - 1;
-  application_cursor_ = origin_ = insert_ = newline_ = focus_reporting_ = bracketed_paste_ = dec_graphics_ = false;
+  application_cursor_ = origin_ = insert_ = newline_ = focus_reporting_ = bracketed_paste_ = osc_bel_ = false;
+  charset_graphics_.fill(false); active_charset_ = 0; last_graphic_ = 0; synchronized_ = false;
   cursor_visible_ = autowrap_ = true;
   cursor_override_.reset(); alternate_scroll_override_.reset(); mouse_tracking_ = MouseTracking::None;
   mouse_sgr_ = mouse_utf8_ = mouse_urxvt_ = mouse_pixels_ = false;
@@ -99,6 +114,11 @@ void Terminal::reset() {
 void Terminal::output(std::string_view bytes) {
   if (output_.size() + bytes.size() > 4 * 1024 * 1024) throw std::runtime_error("terminal output queue is full");
   output_.append(bytes);
+}
+
+// Answers to app queries are dropped, not thrown, when the app stops reading.
+void Terminal::reply(std::string_view bytes) {
+  if (output_.size() + bytes.size() <= kMaxReplyBacklog) output_.append(bytes);
 }
 
 void Terminal::push_history(const Cell* cells, bool wrapped) {
@@ -183,6 +203,7 @@ void Terminal::put(char32_t character) {
   }
   if (state.cells[index].width == 0 && state.cursor.col > 0) state.cells[index - 1] = blank();
   if (state.cells[index].width == 2 && state.cursor.col + 1 < columns_) state.cells[index + 1] = blank();
+  last_graphic_ = character;
   Cell cell = state.pen; cell.chars.fill(0); cell.chars[0] = character; cell.width = width; cell.natural_width = natural_width;
   state.cells[index] = cell;
   if (width == 2) { state.cells[index + 1] = blank(); state.cells[index + 1].width = 0; }
@@ -202,16 +223,23 @@ void Terminal::erase(int first, int last) {
   for (int row = (first + columns_ - 1) / columns_; row < last / columns_; ++row) screen().wrapped[row] = false;
 }
 
-void Terminal::sgr(const std::vector<int>& parameters) {
+void Terminal::sgr(const Params& parameters) {
   auto& pen = screen().pen;
-  for (size_t i = 0; i < parameters.size(); ++i) {
-    const int value = parameters[i];
+  const auto& v = parameters.values;
+  const size_t count = v.size();
+  for (size_t i = 0; i < count;) {
+    size_t group_end = i + 1;  // colon subparameters belong to this parameter
+    while (group_end < count && parameters.sub[group_end]) ++group_end;
+    const bool grouped = group_end > i + 1;
+    size_t next = group_end;
+    const int value = v[i];
     switch (value) {
       case 0: pen = default_cell(); break;
       case 1: pen.attrs.bold = true; break;
       case 2: pen.attrs.dim = true; break;
       case 3: pen.attrs.italic = true; break;
-      case 4: case 21: pen.attrs.underline = true; break;
+      case 4: pen.attrs.underline = !grouped || v[i + 1] != 0; break;  // 4:0 is "no underline"
+      case 21: pen.attrs.underline = true; break;
       case 7: pen.attrs.reverse = true; break;
       case 8: pen.attrs.hidden = true; break;
       case 9: pen.attrs.strike = true; break;
@@ -223,27 +251,37 @@ void Terminal::sgr(const std::vector<int>& parameters) {
       case 29: pen.attrs.strike = false; break;
       case 39: pen.fg = default_foreground_; pen.fg_index = -1; break;
       case 49: pen.bg = default_background_; pen.bg_index = -1; break;
-      case 38: case 48:
-        if (i + 2 < parameters.size() && parameters[i + 1] == 5) {
-          const int index = std::clamp(parameters[i + 2], 0, 255);
-          (value == 38 ? pen.fg : pen.bg) = palette(index, &palette_);
-          (value == 38 ? pen.fg_index : pen.bg_index) = index;
-          i += 2;
-        } else if (i + 4 < parameters.size() && parameters[i + 1] == 2) {
-          size_t start = i + 2;
-          if (sequence_.find(':') != std::string::npos && parameters.size() > i + 5 && parameters[start] == 0) ++start;
-          (value == 38 ? pen.fg : pen.bg) = {static_cast<std::uint8_t>(std::clamp(parameters[start], 0, 255)),
-            static_cast<std::uint8_t>(std::clamp(parameters[start + 1], 0, 255)), static_cast<std::uint8_t>(std::clamp(parameters[start + 2], 0, 255))};
-          (value == 38 ? pen.fg_index : pen.bg_index) = -2;
-          i = start + 2;
+      case 38: case 48: case 58: {
+        // Colon form (38:2:[cs]:r:g:b, 38:5:n) or legacy semicolon form.
+        std::optional<Color> color;
+        int index = -2;
+        const auto channel = [&](size_t at) { return static_cast<std::uint8_t>(std::clamp(v[at], 0, 255)); };
+        const size_t length = grouped ? group_end - i : count - i;
+        if (length >= 3 && v[i + 1] == 5) {
+          index = std::clamp(v[i + 2], 0, 255);
+          color = palette(index, &palette_);
+          if (!grouped) next = i + 3;
+        } else if (length >= 5 && v[i + 1] == 2) {
+          const size_t base = grouped && length >= 6 ? i + 3 : i + 2;
+          color = Color{channel(base), channel(base + 1), channel(base + 2)};
+          if (!grouped) next = i + 5;
+        } else if (!grouped && length >= 2) {
+          next = count;  // truncated color: never reinterpret its arguments as SGR codes
+        }
+        if (color && value != 58) {  // underline color is parsed but not rendered
+          (value == 38 ? pen.fg : pen.bg) = *color;
+          (value == 38 ? pen.fg_index : pen.bg_index) = static_cast<std::int16_t>(index);
         }
         break;
+      }
+      case 59: break;
       default:
         if (value >= 30 && value <= 37) { pen.fg_index = value - 30; pen.fg = palette(pen.fg_index, &palette_); }
         if (value >= 40 && value <= 47) { pen.bg_index = value - 40; pen.bg = palette(pen.bg_index, &palette_); }
         if (value >= 90 && value <= 97) { pen.fg_index = value - 90 + 8; pen.fg = palette(pen.fg_index, &palette_); }
         if (value >= 100 && value <= 107) { pen.bg_index = value - 100 + 8; pen.bg = palette(pen.bg_index, &palette_); }
     }
+    i = next;
   }
 }
 
@@ -292,32 +330,119 @@ void Terminal::mode(int parameter, bool enabled, bool private_mode) {
       break;
     case 1004: focus_reporting_ = enabled; break;
     case 2004: bracketed_paste_ = enabled; break;
+    case 2026:
+      synchronized_ = enabled;
+      if (enabled) sync_deadline_ = std::chrono::steady_clock::now() + kSyncTimeout;
+      break;
   }
 }
 
-void Terminal::csi(char command) {
-  const bool private_mode = !sequence_.empty() && sequence_.front() == '?';
-  if (!sequence_.empty() && (sequence_.front() == '>' || sequence_.front() == '<' || sequence_.front() == '=')) {
-    if (sequence_.front() == '>' && command == 'c') output("\x1b[>0;1;0c");
-    return;
+// DECRPM values: 1 set, 2 reset, 0 not recognized.
+int Terminal::mode_state(int parameter, bool private_mode) const {
+  const auto state = [](bool enabled) { return enabled ? 1 : 2; };
+  if (!private_mode) return parameter == 4 ? state(insert_) : parameter == 20 ? state(newline_) : 0;
+  switch (parameter) {
+    case 1: return state(application_cursor_);
+    case 6: return state(origin_);
+    case 7: return state(autowrap_);
+    case 25: return state(cursor_visible_);
+    case 9: return state(mouse_tracking_ == MouseTracking::Press);
+    case 1000: return state(mouse_tracking_ == MouseTracking::Clicks);
+    case 1002: return state(mouse_tracking_ == MouseTracking::Drag);
+    case 1003: return state(mouse_tracking_ == MouseTracking::All);
+    case 1004: return state(focus_reporting_);
+    case 1005: return state(mouse_utf8_);
+    case 1006: return state(mouse_sgr_);
+    case 1007: return state(alternate_scroll_override_.value_or(default_alternate_scroll_));
+    case 1015: return state(mouse_urxvt_);
+    case 1016: return state(mouse_pixels_);
+    case 47: case 1047: case 1049: return state(alternate);
+    case 2004: return state(bracketed_paste_);
+    case 2026: return state(synchronized_);
+    default: return 0;
   }
-  if (private_mode && command != 'h' && command != 'l' && command != 'n' && command != 'c') return;
-  const auto params = parameters(sequence_);
+}
+
+void Terminal::tab_forward() {
+  auto& cursor = screen().cursor;
+  do { ++cursor.col; } while (cursor.col < columns_ - 1 && !tabs_[cursor.col]);
+  cursor.col = std::min(columns_ - 1, cursor.col);
+}
+
+void Terminal::tab_backward() {
+  auto& cursor = screen().cursor;
+  while (cursor.col > 0) if (tabs_[--cursor.col]) break;
+}
+
+bool Terminal::synchronized() const {
+  return synchronized_ && std::chrono::steady_clock::now() < sync_deadline_;
+}
+
+int Terminal::synchronized_timeout() const {
+  if (!synchronized()) return -1;
+  const auto left = std::chrono::ceil<std::chrono::milliseconds>(sync_deadline_ - std::chrono::steady_clock::now());
+  return static_cast<int>(left.count()) + 1;
+}
+
+void Terminal::csi(char command) {
+  // Layout: [prefix ?<=>] parameters [intermediates 0x20-0x2f] final.
+  std::string_view body = sequence_;
+  char prefix = 0;
+  if (!body.empty() && (body.front() == '?' || body.front() == '>' || body.front() == '<' || body.front() == '=')) {
+    prefix = body.front(); body.remove_prefix(1);
+  }
+  const auto split = std::find_if(body.begin(), body.end(), [](char c) { return c >= 0x20 && c <= 0x2f; });
+  const std::string_view intermediates(split, body.end());
+  const auto parsed = parameters(std::string_view(body.begin(), split));
+  const auto& params = parsed.values;
   const auto parameter = [&](size_t index, int fallback = 1) {
     return index >= params.size() || params[index] == 0 ? fallback : params[index];
   };
   auto& state = screen(); auto& cursor = state.cursor;
+
+  if (prefix == '<' || prefix == '=') return;
+  if (prefix == '>') {
+    if (!intermediates.empty()) return;
+    if (command == 'c') reply("\x1b[>0;1;0c");
+    else if (command == 'q') reply("\x1bP>|zterm 0.1.0\x1b\\");  // XTVERSION
+    return;
+  }
+  if (!intermediates.empty()) {
+    // Unknown intermediates must not fall through to the plain function.
+    if (intermediates == " " && command == 'q' && !prefix && params[0] <= 6) {
+      const int style = parameter(0);
+      if (params[0] == 0) cursor_override_.reset();
+      else cursor_override_ = CursorStyle{style <= 2 ? CursorShape::Block : style <= 4 ? CursorShape::Underline : CursorShape::Beam,
+                                           style % 2 == 1};
+    } else if (intermediates == "!" && command == 'p' && !prefix) {
+      state.pen = default_cell(); top_ = 0; bottom_ = rows_ - 1;
+      application_cursor_ = origin_ = insert_ = false; autowrap_ = cursor_visible_ = true;
+      charset_graphics_.fill(false); active_charset_ = 0; state.wrap_pending = false;
+    } else if (intermediates == "$" && command == 'p') {
+      const bool private_mode = prefix == '?';
+      reply(std::string(private_mode ? "\x1b[?" : "\x1b[") + std::to_string(params[0]) + ";" +
+            std::to_string(mode_state(params[0], private_mode)) + "$y");
+    }
+    return;
+  }
+  const bool private_mode = prefix == '?';
+  if (private_mode && command != 'h' && command != 'l' && command != 'n') return;
+
   const int first = origin_ ? top_ : 0, last = origin_ ? bottom_ : rows_ - 1;
+  // Relative motion stops at a margin only when the cursor starts inside it.
+  const int up_limit = cursor.row >= top_ ? top_ : 0, down_limit = cursor.row <= bottom_ ? bottom_ : rows_ - 1;
   const int index = cursor.row * columns_ + cursor.col;
   const int count = std::min(parameter(0), columns_ - cursor.col);
   switch (command) {
-    case 'A': cursor.row = std::max(first, cursor.row - parameter(0)); break;
-    case 'B': case 'e': cursor.row = std::min(last, cursor.row + parameter(0)); break;
+    case 'A': cursor.row = std::max(up_limit, cursor.row - parameter(0)); break;
+    case 'B': case 'e': cursor.row = std::min(down_limit, cursor.row + parameter(0)); break;
     case 'C': case 'a': cursor.col = std::min(columns_ - 1, cursor.col + parameter(0)); break;
     case 'D': cursor.col = std::max(0, cursor.col - parameter(0)); break;
-    case 'E': cursor.col = 0; cursor.row = std::min(last, cursor.row + parameter(0)); break;
-    case 'F': cursor.col = 0; cursor.row = std::max(first, cursor.row - parameter(0)); break;
+    case 'E': cursor.col = 0; cursor.row = std::min(down_limit, cursor.row + parameter(0)); break;
+    case 'F': cursor.col = 0; cursor.row = std::max(up_limit, cursor.row - parameter(0)); break;
     case 'G': case '`': cursor.col = std::clamp(parameter(0) - 1, 0, columns_ - 1); break;
+    case 'I': for (int n = std::min(parameter(0), columns_); n > 0; --n) tab_forward(); break;
+    case 'Z': for (int n = std::min(parameter(0), columns_); n > 0; --n) tab_backward(); break;
     case 'd': cursor.row = std::clamp(parameter(0) - 1 + first, first, last); break;
     case 'H': case 'f': cursor = {std::clamp(parameter(0) - 1 + first, first, last), std::clamp(parameter(1) - 1, 0, columns_ - 1)}; break;
     case 'J':
@@ -338,59 +463,72 @@ void Terminal::csi(char command) {
       std::move(state.cells.begin() + index + count, state.cells.begin() + (cursor.row + 1) * columns_, state.cells.begin() + index);
       erase((cursor.row + 1) * columns_ - count, (cursor.row + 1) * columns_); repair_line(cursor.row); break;
     case 'X': erase(index, index + count); break;
-    case 'L': if (cursor.row >= top_ && cursor.row <= bottom_) scroll_down(cursor.row, bottom_, parameter(0)); break;
-    case 'M': if (cursor.row >= top_ && cursor.row <= bottom_) scroll_up(cursor.row, bottom_, parameter(0), false); break;
-    case 'S': scroll_up(top_, bottom_, parameter(0), true); break;
-    case 'T': if (!private_mode) scroll_down(top_, bottom_, parameter(0)); break;
-    case 'r':
-      if (!private_mode) {
-        const int top = parameter(0) - 1, bottom = parameter(1, rows_) - 1;
-        if (top >= 0 && bottom < rows_ && top < bottom) { top_ = top; bottom_ = bottom; cursor = {origin_ ? top_ : 0, 0}; }
-      }
+    case 'b':  // REP: ncurses emits it for xterm-256color
+      if (last_graphic_) for (int n = std::min(parameter(0), rows_ * columns_); n > 0; --n) put(last_graphic_);
       break;
+    case 'L': if (cursor.row >= top_ && cursor.row <= bottom_) { scroll_down(cursor.row, bottom_, parameter(0)); cursor.col = 0; } break;
+    case 'M': if (cursor.row >= top_ && cursor.row <= bottom_) { scroll_up(cursor.row, bottom_, parameter(0), false); cursor.col = 0; } break;
+    case 'S': scroll_up(top_, bottom_, parameter(0), true); break;
+    case 'T': scroll_down(top_, bottom_, parameter(0)); break;
+    case 'r': {
+      const int top = parameter(0) - 1, bottom = parameter(1, rows_) - 1;
+      if (top >= 0 && bottom < rows_ && top < bottom) { top_ = top; bottom_ = bottom; cursor = {origin_ ? top_ : 0, 0}; }
+      break;
+    }
     case 's': state.saved = cursor; state.saved_pen = state.pen; state.saved_wrap_pending = state.wrap_pending; break;
     case 'u': cursor = state.saved; state.pen = state.saved_pen; state.wrap_pending = state.saved_wrap_pending; break;
-    case 'm': sgr(params); break;
+    case 'm': sgr(parsed); break;
     case 'h': case 'l': for (int param : params) mode(param, command == 'h', private_mode); break;
     case 'g': if (params[0] == 3) std::fill(tabs_.begin(), tabs_.end(), false); else if (params[0] == 0) tabs_[cursor.col] = false; break;
     case 'n':
-      if (params[0] == 5) output("\x1b[0n");
-      else if (params[0] == 6) output(std::string(private_mode ? "\x1b[?" : "\x1b[") + std::to_string(cursor.row - first + 1) + ";" + std::to_string(cursor.col + 1) + "R");
+      if (params[0] == 5) reply("\x1b[0n");
+      else if (params[0] == 6) reply(std::string(private_mode ? "\x1b[?" : "\x1b[") + std::to_string(cursor.row - first + 1) + ";" + std::to_string(cursor.col + 1) + "R");
       break;
-    case 'c': output(!sequence_.empty() && sequence_[0] == '>' ? "\x1b[>0;1;0c" : "\x1b[?1;2c"); break;
+    case 'c': if (params[0] == 0) reply("\x1b[?1;2c"); break;
     case 't':
-      if (params[0] == 18) output("\x1b[8;" + std::to_string(rows_) + ";" + std::to_string(columns_) + "t");
-      else if (params[0] == 14) output("\x1b[4;" + std::to_string(rows_ * cell_pixel_height_) + ";" + std::to_string(columns_ * cell_pixel_width_) + "t");
-      else if (params[0] == 16) output("\x1b[6;" + std::to_string(cell_pixel_height_) + ";" + std::to_string(cell_pixel_width_) + "t");
-      break;
-    case 'q':
-      if (sequence_.find(' ') != std::string::npos && params[0] <= 6) {
-        const int style = parameter(0);
-        if (params[0] == 0) cursor_override_.reset();
-        else cursor_override_ = CursorStyle{style <= 2 ? CursorShape::Block : style <= 4 ? CursorShape::Underline : CursorShape::Beam,
-                                             style % 2 == 1};
-      }
-      break;
-    case 'p':
-      if (sequence_ == "!") { state.pen = default_cell(); top_ = 0; bottom_ = rows_ - 1; application_cursor_ = origin_ = insert_ = false; autowrap_ = cursor_visible_ = true; }
+      if (params[0] == 18) reply("\x1b[8;" + std::to_string(rows_) + ";" + std::to_string(columns_) + "t");
+      else if (params[0] == 14) reply("\x1b[4;" + std::to_string(rows_ * cell_pixel_height_) + ";" + std::to_string(columns_ * cell_pixel_width_) + "t");
+      else if (params[0] == 16) reply("\x1b[6;" + std::to_string(cell_pixel_height_) + ";" + std::to_string(cell_pixel_width_) + "t");
       break;
   }
   if (command != 'm' && command != 'n' && command != 'c' && command != 't' && command != 's' && command != 'u' &&
-      command != 'h' && command != 'l' && command != 'q') screen().wrap_pending = false;
+      command != 'h' && command != 'l' && command != 'b') screen().wrap_pending = false;
 }
 
 void Terminal::osc() {
   const auto separator = sequence_.find(';');
   if (separator == std::string::npos) return;
   const auto command = sequence_.substr(0, separator);
-  if ((command == "0" || command == "2") && title) title(sequence_.substr(separator + 1));
+  const std::string_view rest = std::string_view(sequence_).substr(separator + 1);
+  const char* terminator = osc_bel_ ? "\a" : "\x1b\\";  // answer in the form the query used
+  if ((command == "0" || command == "2") && title) title(std::string(rest));
+  else if ((command == "10" || command == "11") && rest == "?") {
+    reply("\x1b]" + command + ";" + color_spec(command == "10" ? default_foreground_ : default_background_) + terminator);
+  } else if (command == "4") {
+    // Pairs of index;spec; only "?" queries are answered.
+    for (std::size_t at = 0; at < rest.size();) {
+      const auto index_end = rest.find(';', at);
+      if (index_end == std::string_view::npos) break;
+      const auto spec_end = std::min(rest.find(';', index_end + 1), rest.size());
+      const auto index = rest.substr(at, index_end - at);
+      const auto spec = rest.substr(index_end + 1, spec_end - index_end - 1);
+      int number = -1;
+      if (!index.empty() && index.size() <= 3 && std::all_of(index.begin(), index.end(), [](char c) { return c >= '0' && c <= '9'; }))
+        number = std::stoi(std::string(index));
+      if (spec == "?" && number >= 0 && number <= 255)
+        reply("\x1b]4;" + std::to_string(number) + ";" + color_spec(palette(number, &palette_)) + terminator);
+      at = spec_end + 1;
+    }
+  }
 }
 
 void Terminal::feed(std::string_view bytes) {
   if (!bytes.empty()) { if (!alternate) primary_resize_tail_.clear(); alternate_resize_source_.reset(); }
   for (const unsigned char byte : bytes) {
     if (parser_ == Parser::Osc || parser_ == Parser::OscEscape) {
-      if (byte == 7 || (parser_ == Parser::OscEscape && byte == '\\')) { osc(); sequence_.clear(); parser_ = Parser::Ground; }
+      if (byte == 7 || (parser_ == Parser::OscEscape && byte == '\\')) {
+        osc_bel_ = byte == 7; osc(); sequence_.clear(); parser_ = Parser::Ground;
+      }
       else if (byte == 27) parser_ = Parser::OscEscape;
       else {
         if (parser_ == Parser::OscEscape) { sequence_.clear(); parser_ = Parser::Escape; }
@@ -413,22 +551,36 @@ void Terminal::feed(std::string_view bytes) {
       auto& state = screen();
       switch (byte) {
         case 8: state.cursor.col = std::max(0, state.cursor.col - 1); state.wrap_pending = false; break;
-        case 9:
-          state.wrap_pending = false;
-          do { ++state.cursor.col; } while (state.cursor.col < columns_ - 1 && !tabs_[state.cursor.col]);
-          state.cursor.col = std::min(columns_ - 1, state.cursor.col); break;
+        case 9: state.wrap_pending = false; tab_forward(); break;
+        case 14: active_charset_ = 1; break;  // SO: invoke G1
+        case 15: active_charset_ = 0; break;  // SI: invoke G0
         case 10: case 11: case 12: state.wrapped[state.cursor.row] = false; linefeed(); if (newline_) state.cursor.col = 0; break;
         case 13: state.cursor.col = 0; state.wrap_pending = false; break;
       }
       continue;
     }
     if (parser_ == Parser::Charset) {
-      if (charset_target_ == '(') dec_graphics_ = byte == '0';
+      if (charset_target_ == '(' || charset_target_ == ')') charset_graphics_[charset_target_ == ')'] = byte == '0';
       parser_ = Parser::Ground; continue;
+    }
+    if (parser_ == Parser::EscapeIntermediate) {
+      if (byte >= 0x20 && byte <= 0x2f) { if (sequence_.size() < 8) sequence_.push_back(byte); continue; }
+      if (sequence_ == "#" && byte == '8') {  // DECALN screen alignment pattern
+        auto& state = screen();
+        Cell fill = default_cell(); fill.chars[0] = U'E';
+        std::fill(state.cells.begin(), state.cells.end(), fill);
+        std::fill(state.wrapped.begin(), state.wrapped.end(), false);
+        top_ = 0; bottom_ = rows_ - 1; state.cursor = {}; state.wrap_pending = false;
+      }
+      sequence_.clear(); parser_ = Parser::Ground; continue;
     }
     if (parser_ == Parser::Escape) {
       parser_ = Parser::Ground;
       auto& state = screen();
+      if (byte >= 0x20 && byte <= 0x2f && byte != '(' && byte != ')' && byte != '*' && byte != '+') {
+        // e.g. ESC % G, ESC # 8: swallow the whole sequence instead of printing its final byte.
+        sequence_.assign(1, static_cast<char>(byte)); parser_ = Parser::EscapeIntermediate; continue;
+      }
       switch (byte) {
         case '[': parser_ = Parser::Csi; sequence_.clear(); break;
         case ']': parser_ = Parser::Osc; sequence_.clear(); break;
@@ -463,7 +615,7 @@ void Terminal::feed(std::string_view bytes) {
     }
     if (byte < 0x80) {
       char32_t character = byte;
-      if (dec_graphics_ && byte >= 0x60 && byte <= 0x7e) {
+      if (charset_graphics_[active_charset_] && byte >= 0x60 && byte <= 0x7e) {
         constexpr std::u32string_view graphics = U"◆▒␉␌␍␊°±␤␋┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│≤≥π≠£·";
         character = graphics[byte - 0x60];
       }
@@ -649,6 +801,7 @@ void Terminal::character(char32_t character, unsigned modifiers) {
     if ((character >= U'@' && character <= U'_') || (character >= U'a' && character <= U'z')) character &= 31U;
     else if (character == U' ' || character == U'2') character = 0;
     else if (character == U'?' || character == U'8') character = 127;
+    else if (character == U'/') character = 31;
     else if (character >= U'3' && character <= U'7') character = character - U'3' + 27;
   }
   std::string encoded; utf8(encoded, character); output(encoded);
@@ -889,6 +1042,7 @@ void Terminal::paste(std::string_view text) {
   std::string encoded = bracketed_paste_ ? "\x1b[200~" : "";
   for (size_t i = 0; i < text.size(); ++i) {
     if (text[i] == '\n' && i > 0 && text[i - 1] == '\r') continue;
+    if (bracketed_paste_ && text[i] == '\x1b') continue;  // pasted text cannot end the bracket early
     encoded.push_back(text[i] == '\n' ? '\r' : text[i]);
   }
   if (bracketed_paste_) encoded += "\x1b[201~";

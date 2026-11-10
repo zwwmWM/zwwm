@@ -1,9 +1,12 @@
 #pragma once
 
+#include <concepts>
 #include <cstdint>
 #include <functional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -11,8 +14,13 @@
 namespace zwwm::lang {
 
 struct SourceLocation {
+  SourceLocation() = default;
+  SourceLocation(std::size_t line, std::size_t column = 1, std::string file = {})
+      : line(line), column(column), file(std::move(file)) {}
+
   std::size_t line = 1;
   std::size_t column = 1;
+  std::string file;  // empty for in-memory input
 };
 
 enum class DiagnosticLevel { warning, error };
@@ -50,7 +58,15 @@ struct Value {
   using Object = ObjectValue;
   using Storage = std::variant<std::monostate, std::string, bool, std::int64_t, VariableReference, Array, List, Object>;
 
+  Value() = default;
+  template <typename T>
+    requires(!std::same_as<std::remove_cvref_t<T>, Value> && std::constructible_from<Storage, T>)
+  Value(T&& value, SourceLocation where = {}) : data(std::forward<T>(value)), location(std::move(where)) {}
+
   Storage data;
+  SourceLocation location;
+  // Set for decimal literals: the integer holds thousandths (0.85 -> 850).
+  bool decimal = false;
 };
 
 inline void ObjectValue::add(std::string name, Value value) {
@@ -99,6 +115,7 @@ class ValidationContext {
 };
 
 // Component validators add semantic checks without coupling them to zw-lang.
+// Parsing resolves $VARIABLES and "${VARIABLE}" splices, so validators see plain values.
 using ValidationRule = std::function<void(const Assignment&, ValidationContext&)>;
 
 [[nodiscard]] ParseResult parse_config(const std::string& input);
@@ -106,6 +123,7 @@ using ValidationRule = std::function<void(const Assignment&, ValidationContext&)
 [[nodiscard]] ValidationResult validate_config(const Config& config);
 [[nodiscard]] ValidationResult validate_config(const Config& config, std::span<const ValidationRule> rules);
 
+// Lookups return the last occurrence, matching how later assignments override earlier ones.
 [[nodiscard]] const Value* find_assignment(const Config& config, std::string_view key);
 [[nodiscard]] const Value* find_field(const Value::Object& object, std::string_view key);
 [[nodiscard]] const std::string* as_string(const Value& value);

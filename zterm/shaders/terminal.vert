@@ -7,7 +7,6 @@ layout(location = 3) in float layer;   // atlas layer; +16 requests pixel snappi
 
 layout(push_constant) uniform Push {
   vec2 viewport;
-  float text_rounding;
 } push;
 
 layout(location = 0) out vec3 uv;

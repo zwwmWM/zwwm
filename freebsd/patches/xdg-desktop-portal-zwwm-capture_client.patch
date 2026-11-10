@@ -1,0 +1,22 @@
+--- a/xdg-desktop-portal-zwwm/src/capture_client.cpp
++++ b/xdg-desktop-portal-zwwm/src/capture_client.cpp
+@@ -15,10 +15,8 @@
+ #include <algorithm>
+ #include <cstdint>
+ #include <cstring>
+-#include <linux/memfd.h>
+ #include <sys/mman.h>
+ #include <sys/socket.h>
+-#include <sys/syscall.h>
+ #include <unistd.h>
+ #include <unordered_map>
+ #include <vector>
+@@ -210,7 +208,7 @@
+     frame->format = format; frame->width = width; frame->height = height; frame->stride = stride;
+     frame->size = static_cast<std::size_t>(stride) * height;
+     zwayland::wire::FileDescriptor fd(
+-        static_cast<int>(syscall(SYS_memfd_create, "zwwm-screencopy-client", MFD_CLOEXEC)));
++        memfd_create("zwwm-screencopy-client", MFD_CLOEXEC));
+     if (fd.get() < 0 || ftruncate(fd.get(), static_cast<off_t>(frame->size)) != 0) {
+       frame->owner->finishFrame(frame, false);
+       return;

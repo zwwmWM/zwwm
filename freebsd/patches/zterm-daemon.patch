@@ -1,0 +1,49 @@
+--- a/zterm/src/daemon.cpp
++++ b/zterm/src/daemon.cpp
+@@ -8,9 +8,10 @@
+ #include <zwayland/wire/connection.hpp>
+ #include <zwayland/wire/message.hpp>
+ 
++#include <fcntl.h>
+ #include <poll.h>
+ #include <signal.h>
+-#include <sys/signalfd.h>
++#include <sys/event.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ #include <algorithm>
+@@ -130,8 +131,15 @@
+   for (int signal : {SIGINT,SIGTERM,SIGHUP,SIGCHLD}) sigaddset(&mask, signal);
+   if (sigprocmask(SIG_BLOCK, &mask, &previous) != 0) throw std::runtime_error("cannot initialize daemon signals");
+   struct Restore { sigset_t mask; ~Restore() { (void)sigprocmask(SIG_SETMASK, &mask, nullptr); } } restore{previous};
+-  Fd signals(signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK));
+-  if (signals.get() < 0) throw std::runtime_error("cannot initialize daemon signal descriptor");
++  Fd signals(kqueue());
++  if (signals.get() < 0 || fcntl(signals.get(), F_SETFD, FD_CLOEXEC) != 0)
++    throw std::runtime_error("cannot initialize daemon signal descriptor");
++  for (int signal : {SIGINT,SIGTERM,SIGHUP,SIGCHLD}) {
++    struct kevent change{};
++    EV_SET(&change, signal, EVFILT_SIGNAL, EV_ADD, 0, 0, nullptr);
++    if (kevent(signals.get(), &change, 1, nullptr, 0, nullptr) != 0)
++      throw std::runtime_error("cannot initialize daemon signal descriptor");
++  }
+   ClientConnection broker(true);
+   Runtime runtime;
+   runtime.warm();
+@@ -193,9 +201,13 @@
+     if (descriptors[0].revents & (POLLHUP | POLLERR | POLLNVAL)) break;
+     if (descriptors[0].revents & POLLIN) if (!broker.display().dispatch_pending()) break;
+     if (descriptors[1].revents & POLLIN) {
+-      signalfd_siginfo event{};
+-      while (read(signals.get(), &event, sizeof(event)) == sizeof(event)) {
+-        if (event.ssi_signo == SIGCHLD) {
++      struct kevent event{};
++      const timespec zero{};
++      while (kevent(signals.get(), nullptr, 0, &event, 1, &zero) == 1) {
++        const int signal = static_cast<int>(event.ident);
++        sigset_t pending; sigemptyset(&pending); sigaddset(&pending, signal);
++        (void)sigtimedwait(&pending, nullptr, &zero);
++        if (signal == SIGCHLD) {
+           for (pid_t child; (child = waitpid(-1,nullptr,WNOHANG)) > 0;) {
+             for (auto& window : runtime.windows) window.session->reap(child);
+             if (runtime.spare) runtime.spare->reap(child);

@@ -45,6 +45,9 @@ foreach(spec IN LISTS specs)
 endforeach()
 add_executable(zterm src/main.cpp src/gpu.cpp src/text.cpp src/clipboard.cpp src/config.cpp src/config_watch.cpp src/theme.cpp src/connection.cpp src/daemon.cpp ${headers})
 target_include_directories(zterm PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../freebsd/FreeBSDPatches.cmake")
+zwwm_freebsd_patch(zterm)
+zwwm_freebsd_inotify(zterm)
 # Vulkan create-info structs are filled with partial designated initializers.
 target_compile_options(zterm PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-missing-designated-field-initializers)
 target_compile_definitions(zterm PRIVATE

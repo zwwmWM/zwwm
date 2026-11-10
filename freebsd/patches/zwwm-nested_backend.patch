@@ -1,0 +1,67 @@
+--- a/zwwm/src/nested_backend.cpp
++++ b/zwwm/src/nested_backend.cpp
+@@ -22,15 +22,12 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <fcntl.h>
+-#include <linux/memfd.h>
+ #include <libdrm/drm_fourcc.h>
+ #include <limits>
+ #include <optional>
+ #include <stdexcept>
+ #include <unordered_map>
+ #include <sys/mman.h>
+-#include <sys/epoll.h>
+-#include <sys/syscall.h>
+ #include <unistd.h>
+ 
+ namespace zwwm {
+@@ -243,12 +240,10 @@
+ }
+ 
+ int create_anonymous_file() {
+-#ifdef SYS_memfd_create
+-  const int fd = static_cast<int>(syscall(SYS_memfd_create, "zwwm-nested", MFD_CLOEXEC));
++  const int fd = memfd_create("zwwm-nested", MFD_CLOEXEC);
+   if (fd >= 0) {
+     return fd;
+   }
+-#endif
+ 
+   char path[] = "/tmp/zwwm-nested-XXXXXX";
+   const int fallback_fd = mkostemp(path, O_CLOEXEC);
+@@ -306,17 +301,17 @@
+     return false;
+   }
+   parent_source_ = event_loop_->add_fd(
+-      parent_display_->fd(), EPOLLIN | EPOLLHUP | EPOLLERR,
++      parent_display_->fd(), zwayland::server::kEventReadable | zwayland::server::kEventHangup | zwayland::server::kEventError,
+       [this](int, int mask) {
+-        if ((mask & (EPOLLHUP | EPOLLERR)) != 0 ||
+-            ((mask & EPOLLOUT) != 0 && !parent_display_->flush()) ||
+-            ((mask & EPOLLIN) != 0 && !parent_display_->dispatch_pending())) {
++        if ((mask & (zwayland::server::kEventHangup | zwayland::server::kEventError)) != 0 ||
++            ((mask & zwayland::server::kEventWritable) != 0 && !parent_display_->flush()) ||
++            ((mask & zwayland::server::kEventReadable) != 0 && !parent_display_->dispatch_pending())) {
+           last_error_ = "parent Wayland compositor disconnected";
+           return false;
+         }
+         event_loop_->update_fd(parent_display_->fd(),
+-            EPOLLIN | EPOLLHUP | EPOLLERR |
+-            (parent_display_->wants_write() ? static_cast<std::uint32_t>(EPOLLOUT) : 0U));
++            zwayland::server::kEventReadable | zwayland::server::kEventHangup | zwayland::server::kEventError |
++            (parent_display_->wants_write() ? zwayland::server::kEventWritable : 0));
+         return true;
+       });
+   if (parent_source_ < 0) {
+@@ -1778,8 +1773,8 @@
+   if (parent_display_ == nullptr) return false;
+   (void)parent_display_->flush();
+   event_loop_->update_fd(parent_display_->fd(),
+-      EPOLLIN | EPOLLHUP | EPOLLERR |
+-      (parent_display_->wants_write() ? static_cast<std::uint32_t>(EPOLLOUT) : 0U));
++      zwayland::server::kEventReadable | zwayland::server::kEventHangup | zwayland::server::kEventError |
++      (parent_display_->wants_write() ? zwayland::server::kEventWritable : 0));
+   return true;
+ }
+ 

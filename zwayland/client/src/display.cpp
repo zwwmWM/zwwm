@@ -49,20 +49,20 @@ int connect_to_socket(const std::string& name) {
 
 Display::Display(int fd)
     : connection_(std::make_unique<wire::Connection>(fd)) {
-  auto display = std::make_shared<Proxy>();
+  auto display = std::make_unique<Proxy>();
   display->id = 1;
   display->interface = &core::display_interface;
   display->display = this;
-  proxies_.emplace(1, std::move(display));
+  proxies_.insert(1, std::move(display));
 }
 
 Display::Display(std::unique_ptr<wire::Connection> connection)
     : connection_(std::move(connection)) {
-  auto display = std::make_shared<Proxy>();
+  auto display = std::make_unique<Proxy>();
   display->id = 1;
   display->interface = &core::display_interface;
   display->display = this;
-  proxies_.emplace(1, std::move(display));
+  proxies_.insert(1, std::move(display));
 }
 
 Display::~Display() = default;
@@ -122,65 +122,66 @@ bool Display::dispatch_pending() {
 }
 
 bool Display::dispatch_messages() {
-  for (;;) {
+  ++dispatch_depth_;
+  bool ok = true;
+  while (ok) {
     auto message = connection_->next_message();
     if (!message) break;
 
-    const auto proxy_found = proxies_.find(message->object_id);
-    if (proxy_found == proxies_.end()) {
+    Proxy* proxy = proxies_.find(message->object_id);
+    const Interface* iface = proxy != nullptr ? proxy->interface : nullptr;
+    if (proxy == nullptr) {
+      // Events racing a destroy go to the zombie and are discarded, FDs included.
       const auto zombie = zombies_.find(message->object_id);
-      if (zombie != zombies_.end() && message->opcode < zombie->second->event_count) {
-        wire::MessageParser parser(message->body, message->fds);
-        try {
-          parser.discard(zombie->second->events[message->opcode].signature);
-        } catch (const std::exception&) {
-          connection_->consume(message->size, parser.consumed_fds());
-          return false;
-        }
-        connection_->consume(message->size, parser.consumed_fds());
-      } else {
+      if (zombie == zombies_.end() || message->opcode >= zombie->second->event_count) {
         connection_->consume(message->size, 0);
+        continue;
       }
-      continue;
-    }
-    const std::shared_ptr<Proxy> proxy_owner = proxy_found->second;
-    Proxy* proxy = proxy_owner.get();
-    const Interface* iface = proxy->interface;
-    if (message->opcode >= iface->event_count) {
+      iface = zombie->second;
+    } else if (message->opcode >= iface->event_count ||
+               iface->events[message->opcode].since > proxy->version) {
       connection_->consume(message->size, 0);
-      return false;
+      ok = false;
+      break;
     }
-    if (iface->events[message->opcode].since > proxy->version) {
+
+    const char* signature = iface->events[message->opcode].signature;
+    const std::size_t fd_count = wire::signature_fd_count(signature);
+    if (message->fds.size() < fd_count) {
       connection_->consume(message->size, 0);
-      return false;
+      ok = false;
+      break;
     }
-    wire::MessageParser parser(message->body, message->fds);
+    wire::MessageParser parser(message->body, message->fds.first(fd_count));
     try {
-      if (iface == &core::display_interface && message->opcode == 0) {
+      if (proxy == nullptr) {
+        parser.discard(signature);
+      } else if (iface == &core::display_interface && message->opcode == 0) {
         error_object_id_ = parser.read_object();
         error_code_ = parser.read_uint();
         error_message_ = std::string(parser.read_string());
         protocol_error_ = true;
       } else if (iface == &core::display_interface && message->opcode == 1) {
         const std::uint32_t id = parser.read_uint();
-        if (zombies_.erase(id) == 0 && find_proxy(id) != nullptr)
-          deleted_ids_.insert(id);
+        if (zombies_.erase(id) != 0) release_id(id);
+        else if (find_proxy(id) != nullptr) deleted_ids_.insert(id);
       } else if (proxy->observer) {
         proxy->observer(*proxy, message->opcode, parser);
       } else if (auto it = observers_.find(iface); it != observers_.end()) {
         const std::shared_ptr<EventObserver> observer = it->second;
         (*observer)(*proxy, message->opcode, parser);
       } else {
-        parser.discard(iface->events[message->opcode].signature);
+        parser.discard(signature);
       }
       if (!parser.at_end()) throw std::runtime_error("event has trailing data");
     } catch (const std::exception&) {
-      connection_->consume(message->size, parser.consumed_fds());
-      return false;
+      ok = false;
     }
-    connection_->consume(message->size, parser.consumed_fds());
+    for (std::size_t i = parser.consumed_fds(); i < fd_count; ++i) close(message->fds[i]);
+    connection_->consume(message->size, fd_count);
   }
-  return connection_->healthy() && !protocol_error_;
+  if (--dispatch_depth_ == 0) graveyard_.clear();
+  return ok && connection_->healthy() && !protocol_error_;
 }
 
 bool Display::roundtrip() {
@@ -200,7 +201,7 @@ bool Display::roundtrip() {
   wire::MessageBuilder request(display_proxy()->id);
   request.set_opcode(0);
   request.append_new_id(callback_id);
-  send_request(display_proxy()->id, 0, request.finish(), request.take_fds());
+  send_request(request);
   (void)flush();
   while (!done && dispatch()) {}
 
@@ -210,12 +211,23 @@ bool Display::roundtrip() {
 
 bool Display::flush() { return connection_->flush(); }
 
+void Display::release_id(std::uint32_t id) {
+  if (id >= 2 && id < wire::kServerIdStart) free_ids_.push_back(id);
+}
+
 std::uint32_t Display::alloc_id() {
+  while (!free_ids_.empty()) {
+    const std::uint32_t id = free_ids_.front();
+    free_ids_.pop_front();
+    if (!proxies_.contains(id) && !zombies_.contains(id) && !deleted_ids_.contains(id))
+      return id;
+  }
+  // Ids are dense: libwayland servers reject a new id beyond their table size.
   for (std::uint32_t attempts = 0; attempts < 0xfefffffeU; ++attempts) {
-    if (next_id_ < 2 || next_id_ >= 0xff000000U) next_id_ = 2;
+    if (next_id_ < 2 || next_id_ >= wire::kServerIdStart) next_id_ = 2;
     const std::uint32_t id = next_id_++;
-    if (!proxies_.contains(id) && !zombies_.contains(id) &&
-        !deleted_ids_.contains(id)) return id;
+    if (!proxies_.contains(id) && !zombies_.contains(id) && !deleted_ids_.contains(id))
+      return id;
   }
   return 0;
 }
@@ -224,47 +236,63 @@ Proxy* Display::create_proxy(const Interface* interface, std::uint32_t id,
                               std::uint32_t version, std::any userdata) {
   if (interface == nullptr || id == 0 || version == 0 ||
       zombies_.contains(id) || deleted_ids_.contains(id)) return nullptr;
-  auto proxy = std::make_shared<Proxy>();
+  auto proxy = std::make_unique<Proxy>();
   proxy->id = id;
   proxy->version = std::min(version, interface->version);
   proxy->interface = interface;
   proxy->display = this;
   proxy->userdata = std::move(userdata);
   Proxy* result = proxy.get();
-  const bool inserted = proxies_.emplace(id, proxy).second;
-  if (!inserted) return nullptr;
-  return result;
+  return proxies_.insert(id, std::move(proxy)) ? result : nullptr;
 }
 
-Proxy* Display::find_proxy(std::uint32_t id) {
-  auto it = proxies_.find(id);
-  return it == proxies_.end() ? nullptr : it->second.get();
-}
+Proxy* Display::find_proxy(std::uint32_t id) { return proxies_.find(id); }
 
 void Display::destroy_proxy(std::uint32_t id) {
-  const auto found = proxies_.find(id);
-  if (found == proxies_.end() || id == 1) return;
-  if (id < 0xff000000U) {
-    if (deleted_ids_.erase(id) == 0)
-      zombies_[id] = found->second->interface;
+  if (id == 1) return;
+  std::unique_ptr<Proxy> owner = proxies_.take(id);
+  if (!owner) return;
+  if (id < wire::kServerIdStart) {
+    // Wait for delete_id before reusing the id, unless it already arrived.
+    if (deleted_ids_.erase(id) != 0) release_id(id);
+    else zombies_[id] = owner->interface;
   }
-  proxies_.erase(found);
+  if (dispatch_depth_ > 0) graveyard_.push_back(std::move(owner));
 }
 
 void Display::discard_proxy(std::uint32_t id) {
-  if (id != 1) proxies_.erase(id);
+  if (id == 1) return;
+  // The constructor request never went out, so the id is free immediately.
+  if (std::unique_ptr<Proxy> owner = proxies_.take(id)) {
+    release_id(id);
+    if (dispatch_depth_ > 0) graveyard_.push_back(std::move(owner));
+  }
 }
 
-void Display::send_request([[maybe_unused]] std::uint32_t object_id,
-                             std::uint32_t opcode,
-                             std::vector<std::byte> bytes, std::vector<int> fds) {
+void Display::check_request(std::uint32_t object_id, std::uint32_t opcode) {
   Proxy* proxy = find_proxy(object_id);
   if (protocol_error_ || proxy == nullptr)
     throw std::runtime_error("request targets an invalid proxy");
   if (opcode >= proxy->interface->method_count ||
       proxy->interface->methods[opcode].since > proxy->version)
     throw std::runtime_error("request is not supported by this proxy version");
-  connection_->queue(std::move(bytes), std::move(fds));
+}
+
+void Display::send_request(std::uint32_t object_id, std::uint32_t opcode,
+                           std::vector<std::byte> bytes, std::vector<int> fds) {
+  try {
+    check_request(object_id, opcode);
+  } catch (...) {
+    for (int fd : fds) close(fd);
+    throw;
+  }
+  (void)connection_->queue(std::span<const std::byte>(bytes), std::span<const int>(fds));
+}
+
+void Display::send_request(wire::MessageBuilder& message) {
+  check_request(message.object_id(), message.opcode());
+  std::vector<int> fds = message.take_fds();
+  (void)connection_->queue(message.seal(), fds);
 }
 
 }  // namespace zwayland::client

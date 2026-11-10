@@ -80,7 +80,8 @@ ThemeDocument read_theme(const std::string& name, const std::filesystem::path& r
     if (!parsed.ok()) {
       std::string error;
       for (const auto& diagnostic : parsed.diagnostics) if (diagnostic.level == lang::DiagnosticLevel::error)
-        error += path.string()+":"+std::to_string(diagnostic.location.line)+": "+diagnostic.message+"\n";
+        error += (diagnostic.location.file.empty() ? path.string() : diagnostic.location.file)+":"+
+                 std::to_string(diagnostic.location.line)+": "+diagnostic.message+"\n";
       throw ConfigError(error,sources);
     }
     result.config = std::move(parsed.config); return result;
