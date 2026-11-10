@@ -1,0 +1,22 @@
+--- a/zwwm-vlk/src/window.cpp
++++ b/zwwm-vlk/src/window.cpp
+@@ -5,7 +5,6 @@
+ 
+ #include <fcntl.h>
+ #include <sys/mman.h>
+-#include <sys/syscall.h>
+ #include <unistd.h>
+ 
+ #include <limits>
+@@ -17,10 +16,8 @@
+ namespace {
+ 
+ int create_anonymous_file() {
+-#ifdef SYS_memfd_create
+-  const int fd = static_cast<int>(syscall(SYS_memfd_create, "zwwm-vlk", 0x0001U));
++  const int fd = memfd_create("zwwm-vlk", MFD_CLOEXEC);
+   if (fd >= 0) return fd;
+-#endif
+   char path[] = "/tmp/zwwm-vlk-XXXXXX";
+   const int fallback_fd = mkostemp(path, O_CLOEXEC);
+   if (fallback_fd < 0) return -1;

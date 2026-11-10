@@ -531,10 +531,10 @@ Rect center_in(Rect rect, Rect area) {
   rect.y = area.y + (area.height - rect.height) / 2;
   return rect;
 }
-// Transient windows center on their parent.
+// Transients center on a floating parent; a tiled parent's slot is arbitrary, so use the screen.
 Rect placement_area(const XdgSurfaceState& x, Rect work) {
   const auto* parent = x.transient_parent;
-  if (parent != nullptr && parent->mapped && parent->output == x.output &&
+  if (parent != nullptr && parent->mapped && parent->floating && parent->output == x.output &&
       parent->tile_bounds.width > 0 && parent->tile_bounds.height > 0) return parent->tile_bounds;
   return work;
 }
@@ -1615,8 +1615,7 @@ void notify_surface(SurfaceState* s) {
   s->pending_buffer_damage.clear();
 }
 void stop_overview_animation(Observer* observer) {
-  if (observer->overview_loop != nullptr && observer->overview_timer >= 0)
-    observer->overview_loop->update_timer(observer->overview_timer, 0);
+  observer->overview_animating = false;
   observer->overview_motion.reset(0);
   observer->overview_scroll_motion.reset(observer->overview_first_tag);
   observer->overview_progress = 0;
@@ -1651,15 +1650,8 @@ void refresh_overview(Observer* observer) {
   observer->restoring_scene = restoring;
   observer->overview_repainting = false;
   observer->callback(observer->data, ShmBufferView{.output = {}, .camera_frame = true, .camera_frame_ready = true, .window_shader = {}, .border_shader = {}});
-  const bool animating = observer->overview_visible && (observer->overview_motion.active(now) || observer->overview_scroll_motion.active(now));
-  if (animating) {
-    if (observer->overview_loop == nullptr) observer->overview_loop = &observer->seat->display->event_loop();
-    if (observer->overview_timer < 0)
-      observer->overview_timer = observer->overview_loop->add_timer([observer] { refresh_overview(observer); });
-    observer->overview_loop->update_timer(observer->overview_timer, 8);
-  } else if (observer->overview_loop != nullptr && observer->overview_timer >= 0) {
-    observer->overview_loop->update_timer(observer->overview_timer, 0);
-  }
+  observer->overview_animating = observer->overview_visible &&
+      (observer->overview_motion.active(now) || observer->overview_scroll_motion.active(now));
 }
 void update_overview(Observer* observer, bool enabled) {
   if (observer == nullptr || observer->seat == nullptr) return;
@@ -4045,6 +4037,7 @@ bool frame_hidden(Observer* observer, SurfaceState* scene_root, OutputId assigne
 }
 }  // namespace detail
 void CompositorServer::notify_frame_presented(OutputId output) {
+  if (impl_->observer.overview_animating) refresh_overview(&impl_->observer);
   const auto now = timestamp_ms();
   if (impl_->observer.camera.is_animating() &&
       (!output || output == impl_->observer.camera_output)) {

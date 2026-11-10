@@ -8,7 +8,6 @@ layout(set = 0, binding = 1) uniform sampler2DArray color_atlas;
 
 layout(push_constant) uniform Push {
   vec2 viewport;
-  float text_rounding;
 } push;
 
 layout(location = 0) in vec3 uv;
@@ -41,14 +40,10 @@ void main() {
     dx *= 0.25; dy *= 0.25;
     coverage = max(max(mask(uv.xy - dx - dy), mask(uv.xy + dx - dy)),
                    max(mask(uv.xy - dx + dy), mask(uv.xy + dx + dy)));
-  } else if (push.text_rounding > 0.0) {
-    vec2 x = dx * push.text_rounding * 0.8;
-    vec2 y = dy * push.text_rounding * 0.8;
-    vec2 d1 = (x + y) * 0.70710678;
-    vec2 d2 = (x - y) * 0.70710678;
-    coverage = mask(uv.xy) * 0.25 +
-      (mask(uv.xy + x) + mask(uv.xy - x) + mask(uv.xy + y) + mask(uv.xy - y)) * 0.125 +
-      (mask(uv.xy + d1) + mask(uv.xy - d1) + mask(uv.xy + d2) + mask(uv.xy - d2)) * 0.0625;
+  } else if (abs(abs(dx.x) * atlas_size - 1.0) < 0.001 && abs(abs(dy.y) * atlas_size - 1.0) < 0.001) {
+    // One texel per pixel: read it exactly, any filter here only blurs.
+    vec2 texel = clamp(floor(uv.xy * atlas_size), uv_bounds.xy * atlas_size, uv_bounds.zw * atlas_size - 1.0);
+    coverage = texelFetch(atlas, ivec3(texel, uv.z), 0).r;
   } else {
     dx *= 0.25; dy *= 0.25;
     coverage = (mask(uv.xy - dx - dy) + mask(uv.xy + dx - dy) + mask(uv.xy - dx + dy) + mask(uv.xy + dx + dy)) * 0.25;

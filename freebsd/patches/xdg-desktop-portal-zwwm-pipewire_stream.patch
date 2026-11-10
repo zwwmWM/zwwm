@@ -1,0 +1,23 @@
+--- a/xdg-desktop-portal-zwwm/src/pipewire_stream.cpp
++++ b/xdg-desktop-portal-zwwm/src/pipewire_stream.cpp
+@@ -18,11 +18,9 @@
+ #include <atomic>
+ #include <cstring>
+ #include <fcntl.h>
+-#include <linux/memfd.h>
+ #include <limits>
+ #include <mutex>
+ #include <sys/mman.h>
+-#include <sys/syscall.h>
+ #include <unistd.h>
+ #include <span>
+ #include <unordered_map>
+@@ -225,7 +223,7 @@
+     const std::size_t bytes = static_cast<std::size_t>(size.width()) * size.height() * 4U;
+     Allocation allocation;
+     allocation.fd = zwayland::wire::FileDescriptor(
+-        static_cast<int>(syscall(SYS_memfd_create, "zwwm-pipewire-frame", MFD_CLOEXEC)));
++        memfd_create("zwwm-pipewire-frame", MFD_CLOEXEC));
+     if (allocation.fd.get() < 0 || ftruncate(allocation.fd.get(), static_cast<off_t>(bytes)) != 0)
+       return false;
+     allocation.mapping = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, allocation.fd.get(), 0);

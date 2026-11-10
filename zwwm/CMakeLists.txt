@@ -1,6 +1,7 @@
 find_package(PkgConfig REQUIRED)
 include(GNUInstallDirs)
 option(XWAYLAND_ENABLE "Build Xwayland integration" ON)
+include("${CMAKE_CURRENT_SOURCE_DIR}/../freebsd/FreeBSDPatches.cmake")
 if(DEFINED XWAYLAND-ENABLE)
   set(XWAYLAND_ENABLE "${XWAYLAND-ENABLE}" CACHE BOOL "Build Xwayland integration" FORCE)
 endif()
@@ -47,7 +48,7 @@ target_include_directories(zwwm_camera PUBLIC include)
 target_compile_options(zwwm_camera PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_library(zwwm::camera ALIAS zwwm_camera)
 
-add_library(zwwm_runtime_config STATIC src/runtime_config.cpp)
+add_library(zwwm_runtime_config STATIC src/runtime_config.cpp src/config_validation.cpp)
 target_include_directories(zwwm_runtime_config PUBLIC include)
 target_link_libraries(zwwm_runtime_config PUBLIC zwayland-server PkgConfig::XKBCOMMON zwwm::lang zwwm::master_stack zwwm::animation)
 target_compile_options(zwwm_runtime_config PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -55,6 +56,8 @@ target_compile_definitions(zwwm_runtime_config PRIVATE
   ZWWM_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/zwwm"
   ZWWM_SOURCE_DATA_DIR="${CMAKE_SOURCE_DIR}/zwwm/data"
 )
+zwwm_freebsd_patch(zwwm_runtime_config)
+zwwm_freebsd_inotify(zwwm_runtime_config)
 add_library(zwwm::runtime_config ALIAS zwwm_runtime_config)
 
 add_library(zwwm_compositor STATIC
@@ -86,6 +89,7 @@ if(XWAYLAND_ENABLE)
   target_compile_definitions(zwwm_compositor PRIVATE ZWWM_XWAYLAND=1)
 endif()
 target_compile_options(zwwm_compositor PRIVATE -Wall -Wextra -Wpedantic -Werror)
+zwwm_freebsd_patch(zwwm_compositor)
 
 add_executable(zwwm src/main.cpp src/plugin_loader.cpp src/error_popup.cpp src/manager_protocol.cpp src/nested_backend.cpp src/runtime_backend.cpp src/portal_capture.cpp)
 target_sources(zwwm PRIVATE src/nested_backend_touch.cpp)
@@ -93,6 +97,7 @@ target_sources(zwwm PRIVATE src/window_manager_protocol.cpp)
 target_sources(zwwm PRIVATE src/layout_manager_protocol.cpp)
 target_sources(zwwm PRIVATE src/client_connection_protocol.cpp)
 target_include_directories(zwwm PRIVATE include)
+zwwm_freebsd_patch(zwwm)
 target_link_libraries(zwwm PRIVATE
   zwayland-server
   zwayland-client

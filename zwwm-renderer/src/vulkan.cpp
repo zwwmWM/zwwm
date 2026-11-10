@@ -756,7 +756,10 @@ struct VulkanRenderer::State {
   }
 
   void end_rendering() {
-    if (!batch || !batch->rendering) return;
+    if (!batch) return;
+    // A requested clear must land even when no draw follows it.
+    if (!batch->rendering && batch->clear && batch->target != nullptr) ensure_rendering();
+    if (!batch->rendering) return;
     vkCmdEndRendering(batch->commands.get());
     batch->rendering = false;
   }

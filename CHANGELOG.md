@@ -31,6 +31,43 @@ All notable changes to zwwm are documented here.
   with backoff, and the XWM adds `WM_STATE`, `_NET_FRAME_EXTENTS`, and
   `_NET_CLOSE_WINDOW`.
 
+### Direct backend
+
+- The cursor is shown on the KMS cursor plane, so pointer motion no longer
+  composes a frame and a visible cursor no longer blocks direct scanout.
+  Rotated outputs, cursors larger than the plane, and drivers that reject the
+  plane keep the composited cursor.
+
+### FreeBSD
+
+- **Experimental:** FreeBSD builds through `-Dplatform=freebsd` (Meson) or
+  `ZWWM_PLATFORM=freebsd` (CMake), which apply `freebsd/patches` at build time.
+  It has not had a real test drive on FreeBSD hardware yet; expect breakage and
+  please report what you find.
+
+### zwayland
+
+Same Wayland wire protocol and public API; the internals are reworked.
+
+- Events are batched and flushed once per client per loop iteration, before the
+  loop sleeps. `EPOLLOUT` is armed only while a socket is backed up, instead of
+  one `epoll_ctl` and an extra wakeup per event.
+- Input and output use contiguous buffers: reading no longer allocates per
+  `recvmsg`, messages split across reads are not copied, and loopback
+  connections hand buffers over without copying.
+- `MessageBuilder` keeps typical messages in 256 bytes of inline storage, and
+  scanner-generated senders encode straight into the connection.
+- Resources and proxies live in id-indexed tables instead of hash maps of
+  `shared_ptr`; objects destroyed mid-dispatch are freed once it unwinds.
+- The protocol signature decides how many fds a message carries: unread fds
+  are closed, and a missing fd is a protocol error.
+- The event loop drives all timers from one timerfd, runs idle callbacks in
+  FIFO order, and adds `add_prepare()` and single-iteration `dispatch()`.
+- `Signal::emit` no longer allocates.
+- **Behavior:** clients with more than 4 MiB of unsent events are disconnected
+  (`Display::set_max_client_buffer`). The client library reuses object ids
+  after `delete_id`, and server ids are reused only after a short quarantine.
+
 ### Mobile
 
 - text-input-v3 relays to input-method-v2 (including the keyboard grab), and

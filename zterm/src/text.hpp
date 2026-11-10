@@ -27,6 +27,7 @@ class Text {
   void configure(const FontFamilies& families, unsigned size, unsigned weight = 400);
   Bitmap rasterize(std::string_view text, bool bold, bool italic, std::uint32_t rgb,
                    bool grid = false, bool separator = false, FontRole role = FontRole::Mono);
+  void set_rounding(float rounding) { rounding_ = rounding; }
   unsigned width() const { return width_; }
   unsigned height() const { return height_; }
   static void append_utf8(std::string& text, char32_t character);
@@ -39,6 +40,7 @@ class Text {
   unsigned width_ = 1, height_ = 1;
   unsigned weight_ = 400;
   int baseline_ = 1;
+  float rounding_ = 0;
   FontFamilies families_;
   std::string family_;
   std::unordered_set<std::string> font_warnings_;

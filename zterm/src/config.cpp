@@ -30,6 +30,9 @@ CursorShape cursor_shape(const std::string& name) {
   throw std::runtime_error("cursor shape must be beam, line, or block");
 }
 
+// A decoder error that already names its file, which may be an imported one.
+struct LocatedError : std::runtime_error { using std::runtime_error::runtime_error; };
+
 class Decoder {
  public:
   Decoder(Options& options, const lang::Config& config) : options_(options) {
@@ -46,7 +49,9 @@ class Decoder {
           if (assignment.key == "zterm") object(assignment.value, "zterm", [this](const auto& key, const auto& value) { setting(key, value); });
         } else setting(assignment.key, assignment.value);
       } catch (const std::exception& error) {
-        throw std::runtime_error(std::to_string(assignment.location.line) + ":" + std::to_string(assignment.location.column) + ": " + error.what());
+        const auto position = std::to_string(assignment.location.line) + ":" + std::to_string(assignment.location.column) + ": " + error.what();
+        if (assignment.location.file.empty()) throw std::runtime_error(position);
+        throw LocatedError(assignment.location.file + ":" + position);
       }
     }
   }
@@ -207,6 +212,7 @@ void apply_theme(Options& options, const std::string& name, const std::filesyste
     if (!parent.empty()) apply_theme(options,parent,document.path.parent_path(),stack);
     decoder.apply(document.config);
   } catch (const ConfigError&) { throw; }
+  catch (const LocatedError& error) { throw ConfigError(error.what(),options.config_sources); }
   catch (const std::exception& error) { throw ConfigError(document.path.string()+":"+error.what(),options.config_sources); }
   stack.pop_back(); options.theme = name;
 }
@@ -332,7 +338,7 @@ Options load_options(int argc, char** argv) {
       if (!parsed.ok()) {
         std::string errors;
         for (const auto& error : parsed.diagnostics) if (error.level == lang::DiagnosticLevel::error)
-          errors += options.config_path + ":" + std::to_string(error.location.line) + ":" + std::to_string(error.location.column) + ": " + error.message + "\n";
+          errors += (error.location.file.empty() ? options.config_path : error.location.file) + ":" + std::to_string(error.location.line) + ":" + std::to_string(error.location.column) + ": " + error.message + "\n";
         throw ConfigError(errors,options.config_sources);
       }
       try {
@@ -345,7 +351,8 @@ Options load_options(int argc, char** argv) {
         decoder.apply(parsed.config);
       }
       catch (const ConfigError&) { throw; }
-      catch (const std::exception& error) { throw ConfigError(options.config_path + ":" + error.what(),options.config_sources); }
+      catch (const LocatedError& error) { throw ConfigError(error.what(),options.config_sources); }
+  catch (const std::exception& error) { throw ConfigError(options.config_path + ":" + error.what(),options.config_sources); }
     }
   }
   if (cli_theme) {

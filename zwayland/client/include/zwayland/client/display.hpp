@@ -2,6 +2,7 @@
 
 #include <any>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -11,6 +12,7 @@
 
 #include "zwayland/wire/connection.hpp"
 #include "zwayland/wire/message.hpp"
+#include "zwayland/wire/object_map.hpp"
 
 namespace zwayland::client {
 
@@ -65,8 +67,7 @@ class Display {
   // Connects to $WAYLAND_DISPLAY (or "wayland-0"). Returns nullptr on failure.
   static std::unique_ptr<Display> connect(const std::string& name = {});
 
-  // Adopts an already-linked Connection (e.g. an in-process loopback peer)
-  // instead of opening a socket.
+  // Adopts an already-linked Connection, e.g. a loopback peer.
   static std::unique_ptr<Display> adopt(std::unique_ptr<wire::Connection> connection);
 
   ~Display();
@@ -80,12 +81,10 @@ class Display {
   // Registers the event observer for `interface`.
   void set_observer(const Interface* interface, EventObserver observer);
 
-  // Reads from the socket and dispatches complete messages. Returns false on
-  // hangup/error.
+  // False on hangup/error.
   [[nodiscard]] bool dispatch();
 
-  // Dispatches bytes already available on the socket without blocking. Event
-  // loop integrations call this after their fd becomes readable.
+  // Non-blocking; call after the fd becomes readable.
   [[nodiscard]] bool dispatch_pending();
 
   // Sends wl_display.sync and dispatches until its callback completes.
@@ -112,6 +111,8 @@ class Display {
   // Queues a request addressed to `object_id`.
   void send_request(std::uint32_t object_id, std::uint32_t opcode,
                     std::vector<std::byte> bytes, std::vector<int> fds = {});
+  // Encodes straight from the builder into the output buffer and takes its FDs.
+  void send_request(wire::MessageBuilder& message);
 
   // Convenience: the bootstrap wl_display proxy (id 1).
   [[nodiscard]] Proxy* display_proxy() { return find_proxy(1); }
@@ -120,11 +121,18 @@ class Display {
   explicit Display(int fd);
   explicit Display(std::unique_ptr<wire::Connection> connection);
   [[nodiscard]] bool dispatch_messages();
+  void check_request(std::uint32_t object_id, std::uint32_t opcode);
+  void release_id(std::uint32_t id);
 
   std::unique_ptr<wire::Connection> connection_;
-  std::unordered_map<std::uint32_t, std::shared_ptr<Proxy>> proxies_;
+  wire::ObjectMap<Proxy> proxies_;
+  // Proxies destroyed mid-dispatch stay allocated until the dispatch unwinds.
+  std::vector<std::unique_ptr<Proxy>> graveyard_;
+  std::size_t dispatch_depth_ = 0;
   std::unordered_map<std::uint32_t, const Interface*> zombies_;
   std::unordered_set<std::uint32_t> deleted_ids_;
+  // Ids the server acknowledged with delete_id; reused like libwayland's free list.
+  std::deque<std::uint32_t> free_ids_;
   std::unordered_map<const Interface*, std::shared_ptr<EventObserver>> observers_;
   std::uint32_t next_id_ = 2;
   bool protocol_error_ = false;

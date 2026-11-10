@@ -316,8 +316,7 @@ void zwayland_server_header(std::ostream& out, const Protocol& protocol) {
           emit_append(out, "b", event.args[i], names[i]);
         }
       }
-      out << "  resource.client->send_event(resource.id, " << opcode(interface, event, "event")
-          << ", b.finish(), b.take_fds());\n}\n";
+      out << "  resource.client->send_event(b);\n}\n";
     }
 
     // Typed request handler: maps opcodes to handler.<request>(client, resource, args...).
@@ -493,15 +492,13 @@ void zwayland_client_header(std::ostream& out, const Protocol& protocol) {
         else out << ", sender->version";
         out << ") == nullptr) throw std::runtime_error(\"could not allocate new proxy\");\n"
             << "  try {\n"
-            << "    display.send_request(id, " << opcode(interface, request, "request")
-            << ", b.finish(), b.take_fds());\n"
+            << "    display.send_request(b);\n"
             << "  } catch (...) {\n"
             << "    display.discard_proxy(new_id);\n"
             << "    throw;\n"
             << "  }\n";
       } else {
-        out << "  display.send_request(id, " << opcode(interface, request, "request")
-            << ", b.finish(), b.take_fds());\n";
+        out << "  display.send_request(b);\n";
       }
       if (request.type == "destructor") out << "  display.destroy_proxy(id);\n";
       if (created != nullptr) out << "  return new_id;\n";

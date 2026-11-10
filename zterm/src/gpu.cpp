@@ -26,7 +26,6 @@ constexpr unsigned atlas_layers = 8;
 
 struct Push {
   float viewport[2];
-  float text_rounding;
 };
 
 int render_node(dev_t device) {
@@ -95,6 +94,7 @@ void Gpu::initialize(dev_t device, const std::vector<Format>& formats, FontFamil
   fonts_ = std::move(fonts);
   font_weight_ = weight;
   text_rounding_ = text_rounding;
+  text_renderer_.set_rounding(text_rounding);
   icon_scale_ = icon_scale;
   device_fd_ = render_node(device);
   gbm_ = gbm_create_device(device_fd_);
@@ -347,6 +347,7 @@ void Gpu::configure(FontFamilies fonts, unsigned weight, float rounding, float i
   if (background_opacity < 1 && format_ != DRM_FORMAT_ARGB8888)
     throw std::runtime_error("background opacity requires ARGB8888 DMA-BUF support");
   if (fonts != fonts_ || weight != font_weight_) font_size_ = 0;
+  if (rounding != text_rounding_) { text_renderer_.set_rounding(rounding); reset_atlas(); }
   fonts_ = std::move(fonts); font_weight_ = weight; text_rounding_ = rounding; icon_scale_ = icon_scale;
   background_ = background; selection_color_ = selection; background_opacity_ = background_opacity; cached_revision_ = 0;
   selection_foreground_ = selection_foreground; cursor_color_ = cursor_color; cursor_text_ = cursor_text;
@@ -651,7 +652,7 @@ bool Gpu::draw(Terminal& terminal, zwayland::client::Proxy& surface, zwayland::c
                          {content_width(), content_height()}};
   vkCmdSetViewport(cb, 0, 1, &viewport);
   vkCmdSetScissor(cb, 0, 1, &content);
-  const Push push{{float(content_width()), float(content_height())}, text_rounding_};
+  const Push push{{float(content_width()), float(content_height())}};
   vkCmdPushConstants(cb, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
   vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0, nullptr);
   if (vertices != nullptr) {

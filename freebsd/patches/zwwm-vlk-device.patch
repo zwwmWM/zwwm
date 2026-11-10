@@ -1,0 +1,11 @@
+--- a/zwwm-vlk/src/device.cpp
++++ b/zwwm-vlk/src/device.cpp
+@@ -1,7 +1,7 @@
+ #include "zwwm-vlk/device.hpp"
+ 
+ #include <libdrm/drm_fourcc.h>
+-#include <sys/sysmacros.h>
++#include <sys/types.h>
+ #include <unistd.h>
+ 
+ #include <algorithm>

@@ -215,7 +215,8 @@ void extract_color(const lang::Value::Object& object, std::string_view name, Col
 
 void print_diagnostics(const std::string& path, const std::vector<lang::Diagnostic>& diagnostics) {
   for (const auto& diagnostic : diagnostics) {
-    std::fprintf(stderr, "%s:%zu:%zu: %s: %s\n", path.c_str(), diagnostic.location.line,
+    const auto& file = diagnostic.location.file.empty() ? path : diagnostic.location.file;
+    std::fprintf(stderr, "%s:%zu:%zu: %s: %s\n", file.c_str(), diagnostic.location.line,
                  diagnostic.location.column,
                  diagnostic.level == lang::DiagnosticLevel::error ? "error" : "warning",
                  diagnostic.message.c_str());
@@ -1002,11 +1003,13 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
           error(result.diagnostics, item->location, "animations.cubic-bezier must be an object");
         } else {
           const auto point = [&](std::string_view name, std::uint32_t& target) {
-            const auto* value = lang::find_field(*bezier, name);
+            // "x1 = 0.25" arrives as x1-per-mille; "x1 = 250" keeps the old spelling.
+            const auto* value = lang::find_field(*bezier, std::string(name) + "-per-mille");
+            if (value == nullptr) value = lang::find_field(*bezier, name);
             if (value == nullptr) return;
             const auto* integer = lang::as_integer(*value);
             if (integer == nullptr || *integer < 0 || *integer > 1000) {
-              error(result.diagnostics, item->location,
+              error(result.diagnostics, value->location,
                     "animations.cubic-bezier." + std::string(name) + " must be an integer from 0 to 1000");
             } else target = static_cast<std::uint32_t>(*integer);
           };
@@ -1084,7 +1087,7 @@ RuntimeConfigResult load_runtime_config_file(const std::string& path) {
   RuntimeConfigResult result;
   result.diagnostics = parsed.diagnostics;
   if (!parsed.ok()) return result;
-  const auto validation = lang::validate_config(parsed.config);
+  const auto validation = validate_runtime_config(parsed.config);
   result.diagnostics.insert(result.diagnostics.end(), validation.diagnostics.begin(), validation.diagnostics.end());
   if (!validation.ok()) return result;
   auto compiled = compile_runtime_config(parsed.config);
@@ -1195,7 +1198,7 @@ std::string format_runtime_config_error(const std::string& path,
     return diagnostic.level == lang::DiagnosticLevel::error;
   });
   if (item == diagnostics.end()) return "Configuration parsing, validation, or compilation failed";
-  const auto filename = std::filesystem::path(path).filename().string();
+  const auto filename = std::filesystem::path(item->location.file.empty() ? path : item->location.file).filename().string();
   return (filename.empty() ? path : filename) + ":" + std::to_string(item->location.line) + ":" +
          std::to_string(item->location.column) + ": " + item->message;
 }

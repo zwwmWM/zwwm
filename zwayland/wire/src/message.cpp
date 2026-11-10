@@ -58,11 +58,7 @@ std::vector<ArgSpec> parse_signature(std::string_view signature) {
   return specs;
 }
 
-MessageBuilder::MessageBuilder(std::uint32_t object_id) {
-  // Reserve header; filled in finish().
-  buffer_.resize(8);
-  std::memcpy(buffer_.data(), &object_id, sizeof(object_id));
-}
+MessageBuilder::MessageBuilder(std::uint32_t object_id) : object_id_(object_id) {}
 
 MessageBuilder::~MessageBuilder() {
   for (int fd : fds_) close(fd);
@@ -70,38 +66,40 @@ MessageBuilder::~MessageBuilder() {
 
 void MessageBuilder::set_opcode(std::uint32_t opcode) { opcode_ = opcode; }
 
-void MessageBuilder::pad_to_alignment() {
-  while (buffer_.size() % 4 != 0) buffer_.push_back(std::byte{0});
+std::byte* MessageBuilder::grow(std::size_t bytes) {
+  const std::size_t needed = size_ + bytes;
+  if (heap_.empty() && needed > kInline) {
+    heap_.resize(std::max(needed, kInline * 2));
+    std::memcpy(heap_.data(), inline_, size_);
+  } else if (!heap_.empty() && needed > heap_.size()) {
+    heap_.resize(std::max(needed, heap_.size() * 2));
+  }
+  std::byte* out = data() + size_;
+  size_ = needed;
+  return out;
 }
 
 void MessageBuilder::append_int(std::int32_t value) {
-  pad_to_alignment();
-  const auto raw = static_cast<std::uint32_t>(value);
-  buffer_.insert(buffer_.end(), reinterpret_cast<const std::byte*>(&raw),
-                 reinterpret_cast<const std::byte*>(&raw) + 4);
+  append_uint(static_cast<std::uint32_t>(value));
 }
 
 void MessageBuilder::append_uint(std::uint32_t value) {
-  pad_to_alignment();
-  buffer_.insert(buffer_.end(), reinterpret_cast<const std::byte*>(&value),
-                 reinterpret_cast<const std::byte*>(&value) + 4);
+  std::memcpy(grow(4), &value, 4);
 }
 
 void MessageBuilder::append_fixed(double value) { append_int(to_fixed(value)); }
 
 void MessageBuilder::append_string(std::string_view value) {
-  if (value.size() >= std::numeric_limits<std::uint32_t>::max())
-    throw std::length_error("string is too large for the Wayland wire format");
+  if (value.size() >= 0xffffU)
+    throw std::length_error("string is too large for a Wayland message");
   if (value.find('\0') != std::string_view::npos)
     throw std::invalid_argument("Wayland strings cannot contain embedded NUL bytes");
-  pad_to_alignment();
   const std::uint32_t length = static_cast<std::uint32_t>(value.size()) + 1;
+  const std::size_t padded = (length + 3U) & ~std::size_t{3U};
   append_uint(length);
-  if (!value.empty())
-    buffer_.insert(buffer_.end(), reinterpret_cast<const std::byte*>(value.data()),
-                    reinterpret_cast<const std::byte*>(value.data()) + value.size());
-  buffer_.push_back(std::byte{0});
-  pad_to_alignment();
+  std::byte* out = grow(padded);
+  if (!value.empty()) std::memcpy(out, value.data(), value.size());
+  std::memset(out + value.size(), 0, padded - value.size());
 }
 
 void MessageBuilder::append_null_string() { append_uint(0); }
@@ -110,29 +108,39 @@ void MessageBuilder::append_object(std::uint32_t id) { append_uint(id); }
 
 void MessageBuilder::append_new_id(std::uint32_t id) { append_uint(id); }
 
-void MessageBuilder::append_array(std::span<const std::byte> data) {
-  if (data.size() > std::numeric_limits<std::uint32_t>::max())
-    throw std::length_error("array is too large for the Wayland wire format");
-  pad_to_alignment();
-  append_uint(static_cast<std::uint32_t>(data.size()));
-  buffer_.insert(buffer_.end(), data.begin(), data.end());
-  pad_to_alignment();
+void MessageBuilder::append_array(std::span<const std::byte> bytes) {
+  if (bytes.size() >= 0xffffU)
+    throw std::length_error("array is too large for a Wayland message");
+  const std::size_t padded = (bytes.size() + 3U) & ~std::size_t{3U};
+  append_uint(static_cast<std::uint32_t>(bytes.size()));
+  std::byte* out = grow(padded);
+  if (!bytes.empty()) std::memcpy(out, bytes.data(), bytes.size());
+  std::memset(out + bytes.size(), 0, padded - bytes.size());
 }
 
 void MessageBuilder::add_fd(int fd) {
   const int copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
   if (copy < 0) throw std::runtime_error("could not duplicate Wayland FD argument");
-  fds_.push_back(copy);
+  try {
+    fds_.push_back(copy);
+  } catch (...) {
+    close(copy);
+    throw;
+  }
+}
+
+std::span<const std::byte> MessageBuilder::seal() {
+  if (size_ > 0xffffU || opcode_ > 0xffffU)
+    throw std::length_error("Wayland message exceeds its 16-bit header fields");
+  const std::uint32_t header = (static_cast<std::uint32_t>(size_) << 16) | opcode_;
+  std::memcpy(data(), &object_id_, 4);
+  std::memcpy(data() + 4, &header, 4);
+  return {data(), size_};
 }
 
 std::vector<std::byte> MessageBuilder::finish() {
-  pad_to_alignment();
-  if (buffer_.size() > 0xffffU || opcode_ > 0xffffU)
-    throw std::length_error("Wayland message exceeds its 16-bit header fields");
-  const std::uint32_t size = static_cast<std::uint32_t>(buffer_.size());
-  const std::uint32_t header = (size << 16) | (opcode_ & 0xffff);
-  std::memcpy(buffer_.data() + 4, &header, sizeof(header));
-  return std::move(buffer_);
+  const std::span<const std::byte> bytes = seal();
+  return {bytes.begin(), bytes.end()};
 }
 
 std::vector<int> MessageBuilder::take_fds() {

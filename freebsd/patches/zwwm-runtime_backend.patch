@@ -1,0 +1,55 @@
+--- a/zwwm/src/runtime_backend.cpp
++++ b/zwwm/src/runtime_backend.cpp
+@@ -41,7 +41,6 @@
+ #include <optional>
+ #include <ranges>
+ #include <string_view>
+-#include <sys/epoll.h>
+ #include <sys/stat.h>
+ #include <unordered_map>
+ #include <unistd.h>
+@@ -359,7 +358,7 @@
+     return false;
+   }
+   try {
+-    seat_source_ = event_loop_->add_fd(seat_fd, EPOLLIN, [this](int fd, int mask) {
++    seat_source_ = event_loop_->add_fd(seat_fd, zwayland::server::kEventReadable, [this](int fd, int mask) {
+       on_seat_fd(fd, static_cast<std::uint32_t>(mask), this);
+       return true;
+     });
+@@ -378,7 +377,7 @@
+     return false;
+   }
+   try {
+-    udev_source_ = event_loop_->add_fd(udev_monitor_get_fd(udev_monitor_), EPOLLIN, [this](int fd, int mask) {
++    udev_source_ = event_loop_->add_fd(udev_monitor_get_fd(udev_monitor_), zwayland::server::kEventReadable, [this](int fd, int mask) {
+       on_udev_fd(fd, static_cast<std::uint32_t>(mask), this);
+       return true;
+     });
+@@ -398,7 +397,7 @@
+   }
+   std::fprintf(stderr, "zwwm: direct backend: input initialized for %s\n", seat_name);
+   try {
+-    libinput_source_ = event_loop_->add_fd(libinput_get_fd(libinput_), EPOLLIN, [this](int fd, int mask) {
++    libinput_source_ = event_loop_->add_fd(libinput_get_fd(libinput_), zwayland::server::kEventReadable, [this](int fd, int mask) {
+       on_libinput_fd(fd, static_cast<std::uint32_t>(mask), this);
+       return true;
+     });
+@@ -1912,7 +1911,7 @@
+   }
+   try {
+     auto* monitored = device.get();
+-    device->source = event_loop_->add_fd(device->fd, EPOLLIN, [monitored](int fd, int mask) {
++    device->source = event_loop_->add_fd(device->fd, zwayland::server::kEventReadable, [monitored](int fd, int mask) {
+       on_drm_fd(fd, static_cast<std::uint32_t>(mask), monitored);
+       return true;
+     });
+@@ -2369,7 +2368,7 @@
+     if (device->source < 0) {
+       auto* resumed = device.get();
+       try {
+-        device->source = event_loop_->add_fd(device->fd, EPOLLIN, [resumed](int fd, int mask) {
++        device->source = event_loop_->add_fd(device->fd, zwayland::server::kEventReadable, [resumed](int fd, int mask) {
+           on_drm_fd(fd, static_cast<std::uint32_t>(mask), resumed);
+           return true;
+         });

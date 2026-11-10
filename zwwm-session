@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
 
+# xdg-desktop-portal.service requires graphical-session.target; without it screencast never starts.
+start_session_target() {
+  systemctl --user show-environment >/dev/null 2>&1 || return 1
+  local unit_dir="${XDG_RUNTIME_DIR:-/run/user/$UID}/systemd/user"
+  mkdir -p "$unit_dir"
+  cat >"$unit_dir/zwwm-session.target" <<'EOF'
+[Unit]
+Description=zwwm compositor session
+BindsTo=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user reset-failed xdg-desktop-portal.service 2>/dev/null || true
+  systemctl --user start zwwm-session.target
+}
+
 unset WAYLAND_DEBUG
 export XDG_CURRENT_DESKTOP=zwwm
 export XDG_SESSION_DESKTOP=zwwm
@@ -33,5 +50,11 @@ fi
 if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && ! -S "${XDG_RUNTIME_DIR:-}/bus" ]] &&
    command -v dbus-run-session >/dev/null 2>&1; then
   exec dbus-run-session -- "${command[@]}" "$@"
+fi
+if start_session_target; then
+  "${command[@]}" "$@"
+  status=$?
+  systemctl --user stop zwwm-session.target
+  exit "$status"
 fi
 exec "${command[@]}" "$@"

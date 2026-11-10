@@ -1,0 +1,24 @@
+--- a/zwwm/src/compositor_server_buffers.cpp
++++ b/zwwm/src/compositor_server_buffers.cpp
+@@ -8,11 +8,9 @@
+ #include <cstring>
+ #include <fcntl.h>
+ #include <limits>
+-#include <linux/memfd.h>
+ #include <new>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+-#include <sys/syscall.h>
+ #include <unistd.h>
+ #include <unordered_map>
+ #include <utility>
+@@ -316,8 +314,7 @@
+ static_assert(sizeof(FormatTableEntry) == 16);
+ 
+ UniqueFd create_format_table(const DmabufState& state) {
+-  const int fd = static_cast<int>(syscall(SYS_memfd_create, "zwwm-dmabuf-formats",
+-                                           MFD_CLOEXEC | MFD_ALLOW_SEALING));
++  const int fd = memfd_create("zwwm-dmabuf-formats", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+   if (fd < 0) return {};
+   UniqueFd result(fd);
+   for (const auto& [format, modifier] : state.formats) {

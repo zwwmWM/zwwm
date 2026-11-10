@@ -109,12 +109,10 @@ struct Observer {
   bool restoring_scene = false;
   bool external_policy = false;
   bool overview = false;
-  bool overview_visible = false, overview_repainting = false;
+  bool overview_visible = false, overview_repainting = false, overview_animating = false;
   double overview_first_tag = 0;
   double overview_progress = 0, overview_scroll = 0;
   OverviewMotion overview_motion, overview_scroll_motion;
-  zwayland::server::EventLoop* overview_loop = nullptr;
-  int overview_timer = -1;
   CompositorServer::LayoutProvider external_layout;
   bool external_layout_snap = false;
   CompositorServer::PolicyInputHandler policy_input;
@@ -122,7 +120,6 @@ struct Observer {
   OutputId canvas_frame_output;
   OutputId camera_output;
   std::uint8_t camera_tag = 0;
-  ~Observer() { if (overview_loop != nullptr && overview_timer >= 0) overview_loop->remove(overview_timer); }
 };
 
 struct Pool { void* mapping = nullptr; std::size_t size = 0; UniqueFd fd; std::size_t buffers = 0; bool destroyed = false; };

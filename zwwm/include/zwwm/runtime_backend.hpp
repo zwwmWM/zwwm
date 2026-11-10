@@ -81,7 +81,6 @@ class RuntimeBackend {
   bool try_direct_scanout(DrmOutput& card);
   void store_capture_surface(const ShmBufferView& buffer);
   void release_direct_frame(DrmOutput& card, std::uint32_t framebuffer, std::uint64_t buffer_id);
-  void schedule_output_probe();
   void add_drm_device(const char* path);
   void remove_drm_device(const char* path);
   void suspend_drm_devices();
@@ -89,6 +88,8 @@ class RuntimeBackend {
   void rescan_drm_device(DrmDevice& device);
   bool initialize_atomic_output(DrmOutput& output, const std::vector<std::uint32_t>& reserved_planes);
   bool create_scanout(DrmOutput& output);
+  void create_cursor_plane(DrmOutput& output, const std::vector<std::uint32_t>& reserved_planes);
+  void update_cursor(DrmOutput& output);
   std::uint32_t add_framebuffer(DrmDevice& device, gbm_bo* bo);
   bool commit_atomic_output(DrmOutput& output, std::uint32_t framebuffer, bool modeset);
   bool disable_atomic_output(DrmOutput& output);
@@ -110,10 +111,8 @@ class RuntimeBackend {
   int udev_source_ = -1;
   int libinput_source_ = -1;
   int error_timer_ = -1;
-  int probe_timer_ = -1;
   std::uint64_t last_capture_ms_ = 0;
   std::unordered_map<std::uint64_t, std::uint64_t> capture_requests_;
-  std::uint32_t probe_attempts_ = 0;
   std::vector<std::unique_ptr<DrmDevice>> devices_;
   std::vector<std::pair<int, int>> restricted_devices_;
   bool active_ = false;

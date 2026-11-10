@@ -1,0 +1,48 @@
+--- a/zterm/src/main.cpp
++++ b/zterm/src/main.cpp
+@@ -22,11 +22,10 @@
+ #include <xkbcommon/xkbcommon-compose.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+-#include <sys/signalfd.h>
++#include <sys/event.h>
+ #include <sys/stat.h>
+ #include <sys/timerfd.h>
+ #include <sys/wait.h>
+-#include <pty.h>
+ #include <pwd.h>
+ #include <poll.h>
+ #include <fcntl.h>
+@@ -208,9 +207,13 @@
+     if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) read_pty();
+     if (fds[1].revents & POLLOUT) write_pty();
+     if (fds[2].revents & POLLIN) {
+-      signalfd_siginfo event{};
+-      while (read(signals_, &event, sizeof(event)) == sizeof(event)) {
+-        if (event.ssi_signo != SIGCHLD) running_ = false;
++      struct kevent event{};
++      const timespec zero{};
++      while (kevent(signals_, nullptr, 0, &event, 1, &zero) == 1) {
++        const int signal = static_cast<int>(event.ident);
++        sigset_t pending; sigemptyset(&pending); sigaddset(&pending, signal);
++        (void)sigtimedwait(&pending, nullptr, &zero);
++        if (signal != SIGCHLD) running_ = false;
+         else if (child_ > 0 && waitpid(child_, nullptr, WNOHANG) == child_) child_ = -1;
+       }
+     }
+@@ -528,8 +531,13 @@
+       sigset_t mask; sigemptyset(&mask);
+       for (int signal : {SIGCHLD, SIGTERM, SIGINT, SIGHUP}) sigaddset(&mask, signal);
+       if (sigprocmask(SIG_BLOCK, &mask, &original_mask_) != 0) throw std::runtime_error("cannot block signals");
+-      signals_ = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+-      if (signals_ < 0) throw std::runtime_error("cannot create signal descriptor");
++      signals_ = kqueue();
++      if (signals_ < 0 || fcntl(signals_, F_SETFD, FD_CLOEXEC) != 0) throw std::runtime_error("cannot create signal descriptor");
++      for (int signal : {SIGCHLD, SIGTERM, SIGINT, SIGHUP}) {
++        struct kevent change{};
++        EV_SET(&change, signal, EVFILT_SIGNAL, EV_ADD, 0, 0, nullptr);
++        if (kevent(signals_, &change, 1, nullptr, 0, nullptr) != 0) throw std::runtime_error("cannot create signal descriptor");
++      }
+     }
+     pty_ = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+     char slave[256]{};
