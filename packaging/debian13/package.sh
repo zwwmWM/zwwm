@@ -3,14 +3,15 @@ set -euo pipefail
 
 version=${ZWWM_VERSION/-/\~}
 arch=$(dpkg --print-architecture)
+# dpkg-shlibdeps only runs next to a debian/control file, with paths relative to it.
+mkdir -p "$ZWWM_WORK/debian" "$ZWWM_STAGE/DEBIAN"
+: >"$ZWWM_WORK/debian/control"
+cd "$ZWWM_WORK"
 elf=()
 while IFS= read -r file; do
   [[ $(head -c 4 "$file" | tr -d '\0') == $'\x7fELF' ]] && elf+=("$file")
-done < <(cd "$ZWWM_WORK" && find stage -type f)
-# dpkg-shlibdeps only runs next to a debian/control file.
-mkdir -p "$ZWWM_WORK/debian" "$ZWWM_STAGE/DEBIAN"
-: >"$ZWWM_WORK/debian/control"
-shlibs=$(cd "$ZWWM_WORK" && dpkg-shlibdeps -O --ignore-missing-info "${elf[@]}" | sed -n 's/^shlibs:Depends=//p')
+done < <(find stage -type f)
+shlibs=$(dpkg-shlibdeps -O --ignore-missing-info "${elf[@]}" | sed -n 's/^shlibs:Depends=//p')
 
 control=$(<"$ZWWM_RECIPE/control.in")
 control=${control//@VERSION@/$version}
