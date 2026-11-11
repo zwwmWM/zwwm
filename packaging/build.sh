@@ -31,8 +31,14 @@ ZWWM_VERSION=$(tr -d '[:space:]' <"$root/.version")
 export ZWWM_VERSION
 
 # The tree itself is never edited; distribution fixes live in the recipe's patches.
-tar -C "$root" --exclude=./.git --exclude=./build --exclude='./build-*' --exclude=./bld \
-  --exclude='./result*' -cf - . | tar -C "$src" -xf -
+# Local build trees are skipped by what they contain, not by name (build-aux is source).
+excludes=(--exclude=./.git --exclude='./result*')
+for dir in "$root"/*/; do
+  if [[ -e ${dir}build.ninja || -e ${dir}CMakeCache.txt ]]; then
+    excludes+=(--exclude="./$(basename "$dir")")
+  fi
+done
+tar -C "$root" "${excludes[@]}" -cf - . | tar -C "$src" -xf -
 shopt -s nullglob
 for patch_file in "$recipe"/patches/*.patch; do
   echo "applying $(basename "$patch_file")"
