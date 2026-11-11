@@ -1,0 +1,2 @@
+-- expect: layout.master-ratio must be an integer percent from 10 to 90
+layout = { master-ratio = 95 }

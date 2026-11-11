@@ -1,0 +1,4 @@
+plugins = ["/nonexistent/example.so"]
+plugin-settings = {
+  example = { swipe-distance = 80 enabled = true nested = { list = [1, 2] name = null } }
+}

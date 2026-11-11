@@ -1,0 +1,2 @@
+-- expect: mobile.windows must be a boolean
+mobile = { windows = "yes" }

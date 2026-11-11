@@ -1,0 +1,6 @@
+layout = {
+  default = "endless-canvas"
+  inner-gap = 8
+  min-zoom-per-mille = 500
+  max-zoom-per-mille = 1000
+}

@@ -1,0 +1,5 @@
+-- Imports resolve beside this file; later assignments override imported ones.
+import = "parts/appearance.zw"
+import = ["parts/bindings.zw"]
+
+input = { focus-mode = "hover" }

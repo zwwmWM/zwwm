@@ -1,0 +1,2 @@
+-- expect: output.bit-depth must be 8 or 10
+output = { bit-depth = 12 }

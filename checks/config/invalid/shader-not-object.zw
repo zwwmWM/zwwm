@@ -1,0 +1,2 @@
+-- expect: each shader must be an object
+shaders = { x = "shaders/window.frag" }

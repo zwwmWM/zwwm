@@ -68,6 +68,16 @@ Same Wayland wire protocol and public API; the internals are reworked.
   (`Display::set_max_client_buffer`). The client library reuses object ids
   after `delete_id`, and server ids are reused only after a short quarantine.
 
+### Configuration
+
+- `zwwm --check-config FILE` validates a configuration without starting a
+  session, printing each error and warning with its location.
+- `layer-rule` no longer produces an "unknown top-level setting" warning.
+- A `rule` without `match` or `set` is reported as an error instead of crashing
+  the validator.
+- CI now checks the default configuration, the fixtures in `checks/config`, and
+  the `zw` snippets in the documentation on every push.
+
 ### Portal
 
 - **Behavior:** the Settings portal no longer forwards to xdg-desktop-portal-gtk.

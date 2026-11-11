@@ -1,0 +1,8 @@
+overview = {
+  layout = "stack-master"
+  master-ratio = 60
+  backdrop-image = ""
+  backdrop-blur-radius = 24
+  backdrop-blur-passes = 3
+  scene-radius = 24
+}

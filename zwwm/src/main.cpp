@@ -40,6 +40,23 @@ int main(int argc, char** argv) {
     std::printf("zwwm %s\n", ZWWM_VERSION);
     return EXIT_SUCCESS;
   }
+  if (argc == 3 && std::string_view(argv[1]) == "--check-config") {
+    // Every diagnostic is printed; only errors make the check fail.
+    const auto checked = zwwm::load_runtime_config_file(argv[2]);
+    for (const auto& diagnostic : checked.diagnostics) {
+      const auto& file = diagnostic.location.file.empty() ? std::string(argv[2]) : diagnostic.location.file;
+      std::fprintf(stderr, "%s:%zu:%zu: %s: %s\n", file.c_str(), diagnostic.location.line,
+                   diagnostic.location.column,
+                   diagnostic.level == zwwm::lang::DiagnosticLevel::error ? "error" : "warning",
+                   diagnostic.message.c_str());
+    }
+    if (!checked.ok()) {
+      if (checked.diagnostics.empty()) std::fprintf(stderr, "%s: error: could not load configuration\n", argv[2]);
+      return EXIT_FAILURE;
+    }
+    std::printf("%s: ok\n", argv[2]);
+    return EXIT_SUCCESS;
+  }
   // A clipboard recipient may close its pipe during a transfer. Let write()
   // report EPIPE so transfer cleanup runs instead of terminating the session.
   struct sigaction pipe_action {};
@@ -60,7 +77,8 @@ int main(int argc, char** argv) {
       return EXIT_SUCCESS;
     }
     else {
-      std::fprintf(stderr, "usage: %s [--portal-helper PATH | --no-portal] [--version]\n", argv[0]);
+      std::fprintf(stderr, "usage: %s [--portal-helper PATH | --no-portal] [--version]\n"
+                           "       %s --check-config FILE\n", argv[0], argv[0]);
       return EXIT_FAILURE;
     }
   }

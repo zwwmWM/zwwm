@@ -1,0 +1,2 @@
+-- expect: plugin-settings entries must have a nonempty name and an object value
+plugin-settings = { demo = 5 }

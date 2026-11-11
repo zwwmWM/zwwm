@@ -1,0 +1,11 @@
+animations = {
+  enabled = true
+  duration-ms = 200
+  open-duration-ms = 120
+  close-duration-ms = 90
+  cubic-bezier = { x1 = 0 y1 = 0 x2 = 1000 y2 = 1000 }
+  open-window = false
+  close = false
+  open-scale-per-mille = 1000
+  tag-fade-per-mille = 500
+}

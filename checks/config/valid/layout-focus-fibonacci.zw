@@ -1,0 +1,5 @@
+layout = {
+  default = "focus-fibonacci"
+  gaps = 10
+  smart-gaps = true
+}

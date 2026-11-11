@@ -1,0 +1,7 @@
+output = { mode = "1920x1080@179.82" scale-per-mille = 1000 bit-depth = 10 transform = "normal" }
+
+outputs = {
+  "DP-1" = { mode = "2560x1440@144" scale-per-mille = 1250 }
+  "card0-HDMI-A-1" = { mode = "preferred" transform = "90" }
+  "eDP-1" = { scale-per-mille = 8000 transform = "270" }
+}

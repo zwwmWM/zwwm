@@ -1,0 +1,28 @@
+name: checks
+
+# Validates the configuration language on every change: the shipped default,
+# the fixtures under checks/config, and every zw snippet in the documentation.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  config:
+    name: configuration language
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sh packaging/arch/deps.sh
+      - name: Build zwwm
+        run: |
+          CC=clang CXX=clang++ meson setup build --buildtype=release
+          meson compile -C build zwwm:executable
+      - name: Check configurations
+        run: bash checks/config.sh build/zwwm

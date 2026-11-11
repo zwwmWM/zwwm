@@ -1,0 +1,8 @@
+layout = {
+  default = "master-stack"
+  master-count = 2
+  master-ratio = 55
+  outer-gap = 0
+  inner-gap = 0
+  smart-gaps = true
+}

@@ -1,0 +1,2 @@
+-- expect: environment values must be strings or variable references
+environment = { GOOD = 5 }

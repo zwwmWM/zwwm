@@ -1,0 +1,2 @@
+-- expect: environment variable names must be shell identifiers
+environment = { "1BAD-NAME" = "x" }

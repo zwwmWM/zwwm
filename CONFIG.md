@@ -73,6 +73,7 @@ environment values.
 
 `import` accepts one path or an array:
 
+<!-- config-check: skip -->
 ```zw
 import = "appearance.zw"
 import = ["bindings.zw", "$HOME/.config/zwwm/outputs.zw"]
@@ -87,6 +88,7 @@ settings such as `shaders`, `input`, or `output`, the last assignment wins.
 Repeated `bind`, `rule`, and `layer-rule` assignments accumulate in declaration
 order.
 
+<!-- config-check: skip -->
 ```zw
 import = "defaults.zw"
 
@@ -105,6 +107,7 @@ you want in the final object.
 A binding contains four comma-separated values and an optional fifth one of
 flags:
 
+<!-- config-check: skip -->
 ```zw
 bind = MODIFIERS, KEY, ACTION, ARGUMENT
 bind = MODIFIERS, KEY, ACTION, ARGUMENT, FLAGS
@@ -697,6 +700,7 @@ Window rules use shell-style glob matching. A rule may match `app-id`, `title`,
 or both. When both are present, both must match. Rules are evaluated in
 declaration order; later matching values override earlier values.
 
+<!-- config-check: skip -->
 ```zw
 rule = {
   match = { app-id = "org.example.*" title = "Preferences" }
@@ -725,6 +729,7 @@ rule = {
 
 Examples:
 
+<!-- config-check: skip -->
 ```zw
 rule = { match = { app-id = "foot" } set = { opacity = 92 window-shader = "blur" } }
 rule = { match = { title = "Picture-in-Picture" } set = { floating = true size = "30%x30%" } }
@@ -770,6 +775,10 @@ The equivalent Wayland manager command is:
 ```sh
 zwwmctl reload
 ```
+
+To check a file without starting a session, run `zwwm --check-config FILE`. It
+prints every error and warning with its location and exits non-zero when the
+file would be rejected.
 
 Other control and inspection commands include:
 

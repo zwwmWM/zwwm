@@ -1,0 +1,2 @@
+-- expect: layout must be an object
+layout = "master-stack"

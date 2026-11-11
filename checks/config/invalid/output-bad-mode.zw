@@ -1,0 +1,2 @@
+-- expect: output.mode must be "preferred" or WIDTHxHEIGHT@HZ
+output = { mode = "1920x1080" }

@@ -1,0 +1,5 @@
+bind = , XF86PowerOff, exec, "true", "tap,locked"
+bind = , XF86PowerOff, exec, "true", "hold,locked"
+bind = , XF86AudioRaiseVolume, exec, "true", "repeat,locked"
+bind = Mod4, X, exec, "true", "release"
+mobile = { hold-ms = 400 }

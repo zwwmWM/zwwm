@@ -1,0 +1,2 @@
+-- expect: output.scale-per-mille must be an integer from 250 to 8000
+output = { scale-per-mille = 100 }

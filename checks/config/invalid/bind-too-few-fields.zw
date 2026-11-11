@@ -1,0 +1,2 @@
+-- expect: bind must contain modifier, key, action, argument, and optional flags
+bind = Mod4, Return

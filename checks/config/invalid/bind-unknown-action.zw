@@ -1,0 +1,2 @@
+-- expect: unknown bind action
+bind = Mod4, Return, launch, "ghostty"
