@@ -146,7 +146,11 @@ struct CaptureClient::Impl {
                         QImage::Format_RGB32);
       image = view.copy();
       if ((owned->flags & protocol::ZWWM_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) != 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
         image = image.flipped(Qt::Vertical);
+#else
+        image = image.mirrored(false, true);
+#endif
     }
     const quint64 id = owned->id;
     const quint32 flags = owned->flags;
