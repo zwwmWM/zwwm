@@ -68,6 +68,13 @@ Same Wayland wire protocol and public API; the internals are reworked.
   (`Display::set_max_client_buffer`). The client library reuses object ids
   after `delete_id`, and server ids are reused only after a short quarantine.
 
+### Portal
+
+- **Behavior:** the Settings portal no longer forwards to xdg-desktop-portal-gtk.
+  It answers only `org.freedesktop.appearance` `color-scheme`, fixed to prefer
+  dark, so GTK interface settings (fonts, cursor theme, accent colour) are no
+  longer visible through the portal.
+
 ### Mobile
 
 - text-input-v3 relays to input-method-v2 (including the keyboard grab), and

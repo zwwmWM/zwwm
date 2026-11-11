@@ -1,0 +1,11 @@
+--- a/xdg-desktop-portal-zwwm/src/capture_client.cpp
++++ b/xdg-desktop-portal-zwwm/src/capture_client.cpp
+@@ -146,7 +146,7 @@
+                         QImage::Format_RGB32);
+       image = view.copy();
+       if ((owned->flags & protocol::ZWWM_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) != 0)
+-        image = image.flipped(Qt::Vertical);
++        image = image.mirrored(false, true);
+     }
+     const quint64 id = owned->id;
+     const quint32 flags = owned->flags;

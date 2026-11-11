@@ -1,0 +1,11 @@
+Package: zwwm
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: zwwmWM <zwwmWM@users.noreply.github.com>
+Section: x11
+Priority: optional
+Homepage: https://github.com/zwwmWM/zwwm
+Depends: @SHLIBS@, xwayland, xdg-desktop-portal
+Recommends: xdg-desktop-portal-gtk
+Description: Wayland compositor with tiling and endless-canvas layouts
+ zwwm is a Vulkan Wayland compositor built on its own zwayland runtime.

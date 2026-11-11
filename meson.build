@@ -413,8 +413,7 @@ zwwm_compositor_dep = declare_dependency(
 
 pipewire = dependency('libpipewire-0.3', include_type: 'system')
 spa = dependency('libspa-0.2', include_type: 'system')
-# Newer Qt headers use C++26 syntax that -Werror would reject.
-qt6_dep = dependency('qt6', modules: ['Core', 'DBus', 'Gui', 'Widgets']).as_system('system')
+qt6_dep = dependency('qt6', modules: ['Core', 'DBus', 'Gui', 'Widgets'])
 qt6 = import('qt6')
 portal_moc = qt6.preprocess(
   moc_headers: files(

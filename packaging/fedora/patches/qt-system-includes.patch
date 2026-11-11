@@ -1,0 +1,14 @@
+diff --git a/meson.build b/meson.build
+index a7376a7..31b9763 100644
+--- a/meson.build
++++ b/meson.build
+@@ -413,7 +413,8 @@ zwwm_compositor_dep = declare_dependency(
+ 
+ pipewire = dependency('libpipewire-0.3', include_type: 'system')
+ spa = dependency('libspa-0.2', include_type: 'system')
+-qt6_dep = dependency('qt6', modules: ['Core', 'DBus', 'Gui', 'Widgets'])
++# Newer Qt headers use C++26 syntax that -Werror would reject.
++qt6_dep = dependency('qt6', modules: ['Core', 'DBus', 'Gui', 'Widgets']).as_system('system')
+ qt6 = import('qt6')
+ portal_moc = qt6.preprocess(
+   moc_headers: files(
