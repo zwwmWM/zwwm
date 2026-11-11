@@ -1,0 +1,10 @@
+name: zwwm
+origin: x11-wm/zwwm
+comment: "Wayland compositor with tiling and endless-canvas layouts"
+desc: "zwwm is a Vulkan Wayland compositor built on its own zwayland runtime."
+maintainer: "zwwmWM@users.noreply.github.com"
+www: "https://github.com/zwwmWM/zwwm"
+prefix: /usr/local
+licenselogic: single
+licenses: [BSD3CLAUSE]
+categories: [x11-wm, wayland]

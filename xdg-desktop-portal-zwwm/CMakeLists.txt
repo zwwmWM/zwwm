@@ -36,7 +36,7 @@ add_executable(xdg-desktop-portal-zwwm
   src/pipewire_stream.hpp
   vendor/stb_image_write.h
 )
-include("${CMAKE_CURRENT_SOURCE_DIR}/../freebsd/FreeBSDPatches.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../packaging/freebsd/FreeBSDPatches.cmake")
 zwwm_freebsd_patch(xdg-desktop-portal-zwwm)
 set_target_properties(xdg-desktop-portal-zwwm PROPERTIES AUTOMOC ON)
 target_include_directories(xdg-desktop-portal-zwwm SYSTEM PRIVATE vendor)

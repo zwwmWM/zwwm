@@ -52,7 +52,7 @@ if freebsd
     name = src.replace('/src/', '-').replace('/', '-').replace('.cpp', '')
     freebsd_patched += {src: custom_target(
       'freebsd-' + name,
-      input: [src, 'freebsd/patches' / name + '.patch'],
+      input: [src, 'packaging/freebsd/platform-patches' / name + '.patch'],
       output: name + '.cpp',
       command: [patch_prog, '-s', '-f', '-o', '@OUTPUT@', '@INPUT0@', '-i', '@INPUT1@'],
     )}

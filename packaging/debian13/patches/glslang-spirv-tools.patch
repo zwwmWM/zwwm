@@ -1,0 +1,15 @@
+--- a/meson.build
++++ b/meson.build
+@@ -233,6 +233,12 @@
+     cpp_compiler.find_library('glslang-default-resource-limits'),
+   ])
+ endif
++# The static glslang shipped here leaves its SPIRV-Tools references unresolved.
++glslang = declare_dependency(dependencies: [
++  glslang,
++  cpp_compiler.find_library('SPIRV-Tools-opt'),
++  cpp_compiler.find_library('SPIRV-Tools'),
++])
+ # Vulkan create-info structs are filled with partial designated initializers.
+ vulkan_cpp = strict_cpp + ['-Wno-missing-designated-field-initializers']
+ 

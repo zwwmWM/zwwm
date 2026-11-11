@@ -1,0 +1,16 @@
+vulkan-loader
+libdrm
+mesa-libs
+png
+libxkbcommon
+libxcb
+libXcursor
+pipewire
+qt6-base
+seatd
+libinput
+libudev-devd
+fontconfig
+freetype2
+xwayland
+xdg-desktop-portal
