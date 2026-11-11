@@ -1,0 +1,2 @@
+-- expect: undefined variable $MISSING
+bind = $MISSING, Return, exec, "true"

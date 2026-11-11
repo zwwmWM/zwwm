@@ -1,0 +1,2 @@
+-- expect: bind flags must be press, release, tap, hold, repeat and/or locked
+bind = Mod4, Return, exec, "true", "sometimes"

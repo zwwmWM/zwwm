@@ -1,0 +1,2 @@
+-- expect: animations.enabled must be a boolean
+animations = { enabled = "yes" }

@@ -45,6 +45,7 @@ foreground/background, the 16 ANSI colors, selection, cursor colors, and opacity
 Explicit config colors override its theme; `--theme NAME` overrides config colors.
 Use `--list-themes` to browse names. Theme-file edits reload automatically.
 
+<!-- config-check: skip -->
 ```zw
 font = {
   mono = "JetBrainsMono Nerd Font Mono"

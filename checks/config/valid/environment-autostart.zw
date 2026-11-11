@@ -1,0 +1,10 @@
+PANEL = "waybar"
+TERMINAL = "ghostty"
+
+environment = {
+  XDG_CURRENT_DESKTOP = "zwwm"
+  XCURSOR_SIZE = "24"
+  TERMINAL = $TERMINAL
+}
+
+exec-sh-on-startup = [$PANEL, "swww-daemon"]

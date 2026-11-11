@@ -1,0 +1,2 @@
+-- expect: overview.master-ratio must be 10..90
+overview = { master-ratio = 5 }

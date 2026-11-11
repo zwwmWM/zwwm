@@ -1,0 +1,2 @@
+-- expect: each shader requires a name, source, and window, border, background, or shadow role
+shaders = { x = { role = "cursor" source = "shaders/window.frag" } }

@@ -1,0 +1,2 @@
+-- expect: could not open configuration file
+import = "does-not-exist.zw"

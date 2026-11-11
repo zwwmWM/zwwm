@@ -1,0 +1,18 @@
+TERMINAL = "ghostty"
+MOD = "Mod4"
+
+bind = $MOD, Return, exec, $TERMINAL
+bind = "Mod4+Shift", Escape, exit, ""
+bind = $MOD, Q, killactive, ""
+bind = $MOD, F, togglefloating, ""
+bind = $MOD, M, toggle-fullscreen, ""
+bind = $MOD, Left, focus, "left"
+bind = $MOD, "1", tag, "1"
+bind = "Mod4+Shift", "1", movetotag, "1"
+bind = $MOD, scrollback, zoomin, ""
+bind = $MOD, scrollforward, zoomout, ""
+bind = $MOD, G, movecluster, ""
+bind = Mod4, middle, pan, ""
+bind = , Home, exec, "true"
+bind = , right, leftclick, "true"
+bind = , left, rightclick, "true"

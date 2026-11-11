@@ -1,0 +1,5 @@
+mobile = {
+  windows = true
+  edge-swipe-size = 0
+  hold-ms = 500
+}

@@ -1,0 +1,2 @@
+-- expect: rule.set.floating must be a boolean
+rule = { match = { app-id = "foot" } set = { floating = "yes" } }

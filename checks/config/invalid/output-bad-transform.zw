@@ -1,0 +1,2 @@
+-- expect: output.transform must be "normal", "90", "180", or "270"
+output = { transform = "45" }

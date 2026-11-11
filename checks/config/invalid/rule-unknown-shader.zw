@@ -1,0 +1,2 @@
+-- expect: rule window-shader must name a shader with the matching role
+rule = { match = { app-id = "foot" } set = { window-shader = "nope" } }

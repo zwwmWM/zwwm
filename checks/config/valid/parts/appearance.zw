@@ -1,0 +1,2 @@
+layout = { default = "focus-fibonacci" gaps = 6 }
+animations = { enabled = false }

@@ -1,0 +1,2 @@
+-- expect: input.focus-mode must be "hover" or "by-click"
+input = { focus-mode = "sloppy" }

@@ -1,0 +1,3 @@
+-- expect: unterminated object
+layout = {
+  inner-gap = 12

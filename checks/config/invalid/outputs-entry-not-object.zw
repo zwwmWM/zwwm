@@ -1,0 +1,2 @@
+-- expect: outputs.DP-1 must be an object
+outputs = { "DP-1" = "preferred" }

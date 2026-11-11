@@ -426,10 +426,10 @@ void validate_assignment(const Assignment& assignment, ValidationContext& contex
     const Value* match = find_field(*rule, "match");
     const Value* set = find_field(*rule, "set");
     if (match == nullptr || !is_object(*match)) {
-      context.error(set->location, "rule.match must be an object");
+      context.error(match == nullptr ? assignment.location : match->location, "rule.match must be an object");
     }
     if (set == nullptr || !is_object(*set)) {
-      context.error(set->location, "rule.set must be an object");
+      context.error(set == nullptr ? assignment.location : set->location, "rule.set must be an object");
       return;
     }
     const auto& actions = std::get<Value::Object>(set->data);
@@ -440,6 +440,8 @@ void validate_assignment(const Assignment& assignment, ValidationContext& contex
     }
     return;
   }
+  // Layer rules are checked field by field when the configuration is compiled.
+  if (assignment.key == "layer-rule") return;
   context.warning(assignment.location, "unknown top-level setting: " + assignment.key);
 }
 

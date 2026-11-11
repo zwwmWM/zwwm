@@ -1,0 +1,2 @@
+-- expect: layout.min-zoom-per-mille must not exceed layout.max-zoom-per-mille
+layout = { min-zoom-per-mille = 2000 max-zoom-per-mille = 1000 }

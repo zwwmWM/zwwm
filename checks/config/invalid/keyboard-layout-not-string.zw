@@ -1,0 +1,2 @@
+-- expect: keyboard.layout must be a string
+keyboard = { layout = 5 }

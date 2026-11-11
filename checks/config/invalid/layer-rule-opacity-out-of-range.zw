@@ -1,0 +1,2 @@
+-- expect: layer-rule opacity must be 0..100
+layer-rule = { match = { namespace = "waybar" } set = { opacity = 150 } }

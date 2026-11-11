@@ -1,0 +1,2 @@
+-- expect: rule.set must be an object
+rule = { match = { app-id = "foot" } }

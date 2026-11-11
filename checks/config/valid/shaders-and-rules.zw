@@ -1,0 +1,24 @@
+shaders = {
+  blur = {
+    role = "window"
+    source = "shaders/window.frag"
+    values = { radius = 10 blur_radius = 8 blur_passes = 3 }
+  }
+  border = {
+    role = "border"
+    source = "shaders/border.frag"
+    values = { width = 2 radius = 10 gradient_colors = ["#2e3744", "#1f2731"] }
+  }
+}
+
+rule = {
+  match = { app-id = "org.example.*" title = "Preferences" }
+  set = { floating = true size = "60%x70%" window-shader = "blur" border-shader = "border" opacity = 95 }
+}
+rule = { match = { title = "Picture-in-Picture" } set = { floating = true size = "30%x30%" } }
+
+layer-rule = {
+  match = { namespace = "waybar" }
+  set = { blur = true blur-radius = 10 ignore-alpha = 10 opacity = 92 }
+}
+layer-rule = { match = { namespace = "notif*" } set = { opacity = 100 } }

@@ -1,0 +1,10 @@
+input = {
+  focus-mode = "hover"
+  reverse-mouse-scrolling = true
+}
+
+keyboard = {
+  layout = "us,de"
+  variant = ","
+  options = "grp:alt_shift_toggle"
+}

@@ -1,0 +1,2 @@
+-- expect: rule.match must be an object
+rule = { set = { floating = true } }

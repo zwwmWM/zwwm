@@ -1,0 +1,2 @@
+-- expect: layer-rule requires match and set objects
+layer-rule = { match = { namespace = "waybar" } }

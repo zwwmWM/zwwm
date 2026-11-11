@@ -1,0 +1,2 @@
+-- expect: layout.default must be "master-stack", "focus-fibonacci", or "endless-canvas"
+layout = { default = "spiral" }
