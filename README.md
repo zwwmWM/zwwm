@@ -2,10 +2,8 @@
 zwwm is a C++23 post-Wayland compositor with a Wayland stack rebuilt from the ground up —
 even though in 2026 everyone seems to be rewriting everything in Rust.
 
-> [!WARNING]
-> `0.2.0-alpha.2` is the current public alpha. Configuration, private zwwm
-> protocols, APIs, behavior, and internal architecture may change without
-> backward compatibility. Use it only if you accept that instability.
+# Stability
+zwwm had been tested for months and daily driven by me personally and some other people so it is finally in stable stage as now im trying keep making mostly language fixes or adding straight new features.
 
 ## Features
 
