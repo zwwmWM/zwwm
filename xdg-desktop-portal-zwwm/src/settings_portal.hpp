@@ -2,6 +2,9 @@
 
 #include <QDBusAbstractAdaptor>
 #include <QDBusVariant>
+#include <QMap>
+#include <QStringList>
+#include <QVariantMap>
 
 class ScreenshotPortal;
 
@@ -21,16 +24,10 @@ class SettingsAdaptor : public QDBusAbstractAdaptor {
   uint version() const { return 1; }
 
  public slots:
-  void ReadAll(const QStringList& namespaces);
-  void Read(const QString& nameSpace, const QString& key);
+  QMap<QString, QVariantMap> ReadAll(const QStringList& namespaces);
+  QDBusVariant Read(const QString& nameSpace, const QString& key);
 
  signals:
+  // Part of the interface; the single setting never changes, so it is never emitted.
   void SettingChanged(const QString& nameSpace, const QString& key, const QDBusVariant& value);
-
- private:
-  void forwardCall(const QString& member, const QVariantList& arguments);
-
- private slots:
-  void forwardSettingChanged(const QString& nameSpace, const QString& key,
-                             const QDBusVariant& value);
 };

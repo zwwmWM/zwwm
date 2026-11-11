@@ -50,6 +50,12 @@ both monitor and toplevel sources. Metadata cursor, multiple simultaneous
 sources, virtual outputs, persistence, and dynamic resize are not currently
 implemented.
 
+## Settings
+
+Settings is answered by the backend itself and is not configurable. It serves
+one key, `org.freedesktop.appearance` `color-scheme`, fixed to prefer dark;
+every other key is reported as not found and `SettingChanged` is never emitted.
+
 ## Installation
 
 CMake installs:

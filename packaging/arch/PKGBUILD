@@ -1,0 +1,18 @@
+# Wraps the install staged by packaging/build.sh, which exports ZWWM_VERSION and ZWWM_STAGE.
+pkgname=zwwm
+pkgver=${ZWWM_VERSION//-/_}
+pkgrel=1
+pkgdesc="Wayland compositor with tiling and endless-canvas layouts"
+arch=('x86_64' 'aarch64')
+url="https://github.com/zwwmWM/zwwm"
+license=('BSD-3-Clause')
+depends=(vulkan-icd-loader glslang libdrm mesa libpng libxkbcommon libxcb libxcursor pipewire
+         qt6-base seatd libinput fontconfig freetype2 systemd-libs xorg-xwayland
+         xdg-desktop-portal)
+optdepends=('xdg-desktop-portal-gtk: file chooser and settings portals')
+backup=($(cd "$ZWWM_STAGE" && find etc -type f | sort))
+options=('!strip' '!debug')
+
+package() {
+  cp -a "$ZWWM_STAGE/." "$pkgdir/"
+}
