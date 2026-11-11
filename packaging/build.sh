@@ -3,7 +3,8 @@
 # Usage: packaging/build.sh <dist> [output-dir]
 #
 # A recipe directory holds:
-#   image       container image CI builds in (or vm: the FreeBSD release CI boots)
+#   image       container image CI builds in (or vm: a FreeBSD release for CI to boot;
+#               packaging/freebsd has none for now, so CI skips it)
 #   prefix      install prefix, when it is not /usr
 #   env         NAME=value lines exported for the build
 #   deps.sh     installs the build dependencies
