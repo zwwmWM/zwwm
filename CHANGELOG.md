@@ -41,9 +41,9 @@ All notable changes to zwwm are documented here.
 ### FreeBSD
 
 - **Experimental:** FreeBSD builds through `-Dplatform=freebsd` (Meson) or
-  `ZWWM_PLATFORM=freebsd` (CMake), which apply `freebsd/patches` at build time.
-  It has not had a real test drive on FreeBSD hardware yet; expect breakage and
-  please report what you find.
+  `ZWWM_PLATFORM=freebsd` (CMake), which apply
+  `packaging/freebsd/platform-patches` at build time. It has not had a real test drive on FreeBSD hardware yet; expect
+  breakage and please report what you find.
 
 ### zwayland
 

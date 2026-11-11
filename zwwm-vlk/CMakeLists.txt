@@ -25,7 +25,7 @@ add_library(zwwm-vlk
   src/image.cpp
   src/window.cpp
 )
-include("${CMAKE_CURRENT_SOURCE_DIR}/../freebsd/FreeBSDPatches.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../packaging/freebsd/FreeBSDPatches.cmake")
 zwwm_freebsd_patch(zwwm-vlk)
 add_library(zwwm::vlk ALIAS zwwm-vlk)
 

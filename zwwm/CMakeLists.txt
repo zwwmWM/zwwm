@@ -1,7 +1,7 @@
 find_package(PkgConfig REQUIRED)
 include(GNUInstallDirs)
 option(XWAYLAND_ENABLE "Build Xwayland integration" ON)
-include("${CMAKE_CURRENT_SOURCE_DIR}/../freebsd/FreeBSDPatches.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../packaging/freebsd/FreeBSDPatches.cmake")
 if(DEFINED XWAYLAND-ENABLE)
   set(XWAYLAND_ENABLE "${XWAYLAND-ENABLE}" CACHE BOOL "Build Xwayland integration" FORCE)
 endif()

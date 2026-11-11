@@ -3,10 +3,14 @@
 # Usage: packaging/build.sh <dist> [output-dir]
 #
 # A recipe directory holds:
-#   image       container image CI builds in
+#   image       container image CI builds in (or vm: the FreeBSD release CI boots)
+#   prefix      install prefix, when it is not /usr
+#   env         NAME=value lines exported for the build
 #   deps.sh     installs the build dependencies
 #   patches/    *.patch applied (-p1) to a copy of the source before building
 #   package.sh  wraps the staged install; reads the ZWWM_* variables exported below
+# Every package is named <native name>-<dist>.<extension>.
+# packaging/freebsd/platform-patches is different: the build systems apply it themselves.
 set -euo pipefail
 
 dist=${1:?usage: build.sh <dist> [output-dir]}
@@ -17,13 +21,22 @@ if [[ ! -f $recipe/package.sh ]]; then
   echo "build.sh: no recipe for '$dist' in $here" >&2
   exit 2
 fi
-out=$(realpath -m "${2:-dist}")
+mkdir -p "${2:-dist}"
+final=$(cd "${2:-dist}" && pwd)
 
 work=$(mktemp -d)
 # Read-only source directories would otherwise survive the cleanup.
 trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"' EXIT
 src=$work/src
+out=$work/out
 mkdir -p "$src" "$out"
+prefix=/usr
+if [[ -f $recipe/prefix ]]; then prefix=$(tr -d '[:space:]' <"$recipe/prefix"); fi
+if [[ -f $recipe/env ]]; then
+  set -a
+  . "$recipe/env"
+  set +a
+fi
 
 export ZWWM_DIST=$dist ZWWM_RECIPE=$recipe ZWWM_WORK=$work ZWWM_OUT=$out
 export ZWWM_STAGE=$work/stage
@@ -45,9 +58,17 @@ for patch_file in "$recipe"/patches/*.patch; do
   patch -d "$src" -p1 -f -s -i "$patch_file"
 done
 
-CC=clang CXX=clang++ meson setup "$work/build" "$src" --buildtype=release --prefix=/usr
+CC=clang CXX=clang++ meson setup "$work/build" "$src" --buildtype=release --prefix="$prefix"
 meson compile -C "$work/build"
 DESTDIR=$ZWWM_STAGE meson install -C "$work/build" --no-rebuild --strip
 
 bash "$recipe/package.sh"
-ls -l "$out"
+for package in "$out"/*; do
+  name=$(basename "$package")
+  case $name in
+    *.pkg.tar.*) stem=${name%.pkg.tar.*} ;;
+    *) stem=${name%.*} ;;
+  esac
+  mv "$package" "$final/$stem-$dist${name#"$stem"}"
+done
+ls -l "$final"

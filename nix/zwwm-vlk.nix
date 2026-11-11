@@ -6,7 +6,7 @@ stdenv.mkDerivation {
 
   src = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.unions [ ../.version ../LICENSE ../zwwm-vlk ];
+    fileset = lib.fileset.unions [ ../.version ../LICENSE ../zwwm-vlk ../packaging/freebsd/FreeBSDPatches.cmake ];
   };
   postUnpack = ''sourceRoot+=/zwwm-vlk'';
 

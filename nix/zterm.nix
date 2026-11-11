@@ -6,7 +6,7 @@ stdenv.mkDerivation {
   version = "0.1.0-dev";
   src = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.unions [ ../LICENSE ../zterm/CMakeLists.txt ../zterm/shaders ../zterm/src ../zterm/themes ../zterm/config.zw ../zterm/README.md ];
+    fileset = lib.fileset.unions [ ../LICENSE ../zterm/CMakeLists.txt ../zterm/shaders ../zterm/src ../zterm/themes ../zterm/config.zw ../zterm/README.md ../packaging/freebsd/FreeBSDPatches.cmake ];
   };
   postUnpack = ''sourceRoot+=/zterm'';
   nativeBuildInputs = [ cmake ninja pkg-config zwayland-scanner glslang ];

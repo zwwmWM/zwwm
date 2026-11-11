@@ -1,7 +1,8 @@
 name: packages
 
 # Runs for release tags such as 0.2.0-alpha.2; the manual trigger builds without publishing.
-# Every directory under packaging/ with an image file is one distribution.
+# Every directory under packaging/ with an image file (container) or a vm file
+# (FreeBSD release) is one distribution.
 on:
   push:
     tags:
@@ -16,17 +17,22 @@ jobs:
     name: list distributions
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.list.outputs.matrix }}
+      containers: ${{ steps.list.outputs.containers }}
+      vms: ${{ steps.list.outputs.vms }}
     steps:
       - uses: actions/checkout@v4
       - id: list
         run: |
-          entries=()
-          for dir in packaging/*/; do
-            [[ -f ${dir}image ]] || continue
-            entries+=("{\"name\":\"$(basename "$dir")\",\"image\":\"$(tr -d '[:space:]' < "${dir}image")\"}")
+          for kind in image vm; do
+            entries=()
+            for dir in packaging/*/; do
+              [[ -f $dir$kind ]] || continue
+              entries+=("{\"name\":\"$(basename "$dir")\",\"$kind\":\"$(tr -d '[:space:]' < "$dir$kind")\"}")
+            done
+            output=containers
+            [[ $kind == vm ]] && output=vms
+            (IFS=,; echo "$output={\"include\":[${entries[*]}]}" >> "$GITHUB_OUTPUT")
           done
-          (IFS=,; echo "matrix={\"include\":[${entries[*]}]}" >> "$GITHUB_OUTPUT")
 
   build:
     name: ${{ matrix.name }}
@@ -35,7 +41,7 @@ jobs:
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.dists.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.dists.outputs.containers) }}
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -57,9 +63,43 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build-vm:
+    name: ${{ matrix.name }}
+    needs: dists
+    if: ${{ needs.dists.outputs.vms != '{"include":[]}' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.dists.outputs.vms) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches .version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(tr -d '[:space:]' < .version)
+          if [[ "$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match .version ($version)"
+            exit 1
+          fi
+      # GitHub has no FreeBSD runners; this boots a FreeBSD VM and syncs the workspace.
+      - name: Build package
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: ${{ matrix.vm }}
+          usesh: true
+          run: |
+            set -e
+            sh packaging/${{ matrix.name }}/deps.sh
+            bash packaging/build.sh ${{ matrix.name }} dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zwwm-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: publish
-    needs: build
+    needs: [build, build-vm]
     # Publishes whichever distributions built, even if another one failed.
     if: ${{ !cancelled() && github.ref_type == 'tag' }}
     runs-on: ubuntu-latest

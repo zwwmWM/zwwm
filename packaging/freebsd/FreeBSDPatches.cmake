@@ -1,4 +1,5 @@
-include_guard(GLOBAL)
+# Guarded per directory: the variables below are directory-scoped.
+include_guard(DIRECTORY)
 
 set(ZWWM_PLATFORM "auto" CACHE STRING "Target platform: auto, linux or freebsd")
 set_property(CACHE ZWWM_PLATFORM PROPERTY STRINGS auto linux freebsd)
@@ -24,7 +25,7 @@ if(ZWWM_FREEBSD AND NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR
   message(FATAL_ERROR "ZWWM_PLATFORM=${_zwwm_platform} does not match ${CMAKE_SYSTEM_NAME}")
 endif()
 
-get_filename_component(ZWWM_FREEBSD_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+get_filename_component(ZWWM_FREEBSD_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 
 function(zwwm_freebsd_patch target)
   if(NOT ZWWM_FREEBSD)
@@ -40,7 +41,7 @@ function(zwwm_freebsd_patch target)
     string(REPLACE "/src/" "-" name "${rel}")
     string(REPLACE "/" "-" name "${name}")
     string(REGEX REPLACE "\\.cpp$" "" name "${name}")
-    set(patch "${ZWWM_FREEBSD_ROOT}/freebsd/patches/${name}.patch")
+    set(patch "${ZWWM_FREEBSD_ROOT}/packaging/freebsd/platform-patches/${name}.patch")
     if(src MATCHES "\\.cpp$" AND EXISTS "${patch}")
       set(out "${CMAKE_CURRENT_BINARY_DIR}/freebsd/${name}.cpp")
       add_custom_command(OUTPUT "${out}"

@@ -56,6 +56,7 @@ stdenv.mkDerivation {
       ../zwwm-renderer
       ../zwwm
       ../zwwmctl
+      ../packaging/freebsd/FreeBSDPatches.cmake
     ];
   };
 

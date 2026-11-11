@@ -18,4 +18,4 @@ control=${control//@ARCH@/$arch}
 control=${control//@SHLIBS@/$shlibs}
 printf '%s\n' "$control" >"$ZWWM_STAGE/DEBIAN/control"
 (cd "$ZWWM_STAGE" && find etc -type f | sort | sed 's|^|/|') >"$ZWWM_STAGE/DEBIAN/conffiles"
-dpkg-deb --root-owner-group --build "$ZWWM_STAGE" "$ZWWM_OUT/zwwm_${version}_${ZWWM_DIST}_${arch}.deb"
+dpkg-deb --root-owner-group --build "$ZWWM_STAGE" "$ZWWM_OUT/zwwm_${version}_${arch}.deb"

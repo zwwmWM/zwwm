@@ -1,0 +1,3 @@
+# Ports install under /usr/local, which the base compiler does not search.
+CPPFLAGS=-I/usr/local/include
+LDFLAGS=-L/usr/local/lib

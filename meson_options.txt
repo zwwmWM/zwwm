@@ -1,2 +1,2 @@
 option('xwayland', type: 'boolean', value: true, description: 'Build Xwayland integration')
-option('platform', type: 'combo', choices: ['auto', 'linux', 'freebsd'], value: 'auto', description: 'Target platform; freebsd applies freebsd/patches at build time')
+option('platform', type: 'combo', choices: ['auto', 'linux', 'freebsd'], value: 'auto', description: 'Target platform; freebsd applies packaging/freebsd/platform-patches at build time')
