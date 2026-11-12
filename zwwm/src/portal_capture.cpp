@@ -10,9 +10,15 @@
 #include <zwwm-screencopy-view-unstable-v1-zwayland-server.h>
 #include <ext-zwwm-toplevels-unstable-v1-zwayland-server.h>
 #include <xdg-output-zwayland-server.h>
+#include <zwwm-capture-access-v1-zwayland-server.h>
 
 #include <cerrno>
 #include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <fcntl.h>
+#include <sys/random.h>
+#include <sys/stat.h>
 #include <csignal>
 #include <cstring>
 #include <sys/epoll.h>
@@ -51,6 +57,23 @@ struct PortalCapture::Impl {
     zwayland::server::Listener listener{};
     Impl* owner = nullptr;
   } client_listener;
+  // Clients that presented the capture token; see zwwm-capture-access-v1.
+  struct TrustedClient {
+    zwayland::server::Listener listener{};
+    Impl* owner = nullptr;
+    zwayland::server::Client* client = nullptr;
+  };
+  std::vector<std::unique_ptr<TrustedClient>> trusted_clients;
+  std::array<std::byte, 32> token{};
+  std::string token_path;
+  std::uint32_t access_global = 0;
+
+  // The portal child, or a client that authenticated with the token.
+  bool trusted(const zwayland::server::Client* candidate) const {
+    return candidate != nullptr && (candidate == client ||
+        std::any_of(trusted_clients.begin(), trusted_clients.end(),
+                    [candidate](const auto& entry) { return entry->client == candidate; }));
+  }
 
   zwayland::server::Display* display = nullptr;
   zwayland::server::EventLoop* event_loop = nullptr;
@@ -98,7 +121,7 @@ struct PortalCapture::Impl {
 
   static bool visible(const zwayland::server::Client* candidate, const std::uint32_t global, void* data) {
     auto* self = static_cast<Impl*>(data);
-    return (global != self->screencopy && global != self->toplevel_manager) || candidate == self->client;
+    return (global != self->screencopy && global != self->toplevel_manager) || self->trusted(candidate);
   }
   static void frame_destroy(zwayland::server::Resource* resource) { auto* frame = resource->data<Frame>(); if (frame != nullptr && frame->owner != nullptr) std::erase(frame->owner->frames, frame); delete frame; }
   static void canonical_frame_destroy(zwayland::server::Resource* resource) { auto* frame = resource->data<CanonicalFrame>(); if (frame != nullptr && frame->owner != nullptr) std::erase(frame->owner->canonical_frames, frame); delete frame; }
@@ -126,7 +149,7 @@ struct PortalCapture::Impl {
                                std::int32_t height, bool physical = false, Impl* owner = nullptr,
                                std::uint64_t target_id = 0) {
     auto* self = owner == nullptr ? manager->data<Impl>() : owner;
-    if (self == nullptr || client != self->client) { manager->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "unauthorized output capture"); return; }
+    if (self == nullptr || !self->trusted(client)) { manager->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "unauthorized output capture"); return; }
     const auto selected = output == nullptr ? self->resolve_output(self->output(client, {})) : self->resolve_output(output);
     if (!selected || (output != nullptr && output != self->output(client, selected->id))) { manager->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "unknown output capture"); return; }
     auto* resource = client->create_resource(&protocol::zwwm_screencopy_frame_v1_interface, id, 1);
@@ -298,7 +321,7 @@ struct PortalCapture::Impl {
   }
   static void bind_screencopy(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
     auto* self = static_cast<Impl*>(data);
-    if (client != self->client) { client->post_error(0, "unauthorized screencopy bind"); return; }
+    if (!self->trusted(client)) { client->post_error(0, "unauthorized screencopy bind"); return; }
     auto* resource = client->create_resource(&protocol::zwwm_screencopy_view_manager_v1_interface, id, std::min(version, 1U));
     if (resource == nullptr) { client->post_no_memory(); return; }
     struct ZwwmScreencopyViewManagerV1ImplHandler {
@@ -357,7 +380,7 @@ struct PortalCapture::Impl {
   }
   static void bind_toplevels(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
     auto* self = static_cast<Impl*>(data);
-    if (client != self->client) { client->post_error(0, "unauthorized toplevel bind"); return; }
+    if (!self->trusted(client)) { client->post_error(0, "unauthorized toplevel bind"); return; }
     auto* resource = client->create_resource(&protocol::ext_zwwm_toplevels_v1_interface, id, std::min(version, 1U));
     if (resource == nullptr) { client->post_no_memory(); return; }
     struct ExtZwwmToplevelsV1ImplHandler {
@@ -388,9 +411,73 @@ struct PortalCapture::Impl {
     }
     for (const auto& info : current) for (auto* manager : managers) {
       const bool known = std::any_of(handles.begin(), handles.end(), [&info, manager](const Handle* handle) { return handle->manager == manager && !handle->closed && handle->info.id == info.id; });
-      if (!known) { send_handle(client, manager, info); changed = true; }
+      if (!known) { send_handle(manager->client, manager, info); changed = true; }
     }
     if (changed) for (auto* manager : managers) protocol::ext_zwwm_toplevels_v1_send_done(*manager);
+  }
+
+  static void trusted_client_destroyed(zwayland::server::Listener* listener, void*) {
+    auto* entry = reinterpret_cast<TrustedClient*>(listener);
+    std::erase_if(entry->owner->trusted_clients,
+                  [entry](const auto& item) { return item.get() == entry; });
+  }
+
+  static void authenticate(zwayland::server::Client* client, zwayland::server::Resource* resource,
+                           std::span<const std::byte> presented) {
+    auto* self = resource->data<Impl>();
+    if (self == nullptr) return;
+    // Compare every byte so the time taken says nothing about the token.
+    std::uint8_t difference = presented.size() == self->token.size() ? 0 : 1;
+    for (std::size_t index = 0; index < self->token.size(); ++index)
+      difference |= static_cast<std::uint8_t>(
+          (index < presented.size() ? presented[index] : std::byte{0}) ^ self->token[index]);
+    if (difference != 0 || client->uid() != getuid()) {
+      protocol::zwwm_capture_access_v1_send_denied(*resource);
+      return;
+    }
+    if (!self->trusted(client)) {
+      auto entry = std::make_unique<TrustedClient>();
+      entry->owner = self;
+      entry->client = client;
+      entry->listener.notify = trusted_client_destroyed;
+      client->add_destroy_listener(entry->listener);
+      self->trusted_clients.push_back(std::move(entry));
+    }
+    protocol::zwwm_capture_access_v1_send_granted(*resource);
+  }
+
+  static void bind_access(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
+    auto* resource = client->create_resource(&protocol::zwwm_capture_access_v1_interface, id, std::min(version, 1U));
+    if (resource == nullptr) { client->post_no_memory(); return; }
+    struct Handler {
+      void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) { resource.destroy(); }
+      void authenticate(zwayland::server::Client& client, zwayland::server::Resource& resource,
+                        std::span<const std::byte> token) {
+        Impl::authenticate(&client, &resource, token);
+      }
+    };
+    resource->set_data(static_cast<Impl*>(data));
+    resource->set_handler(protocol::zwwm_capture_access_v1_handler(Handler{}));
+  }
+
+  // Writes a fresh token to $XDG_RUNTIME_DIR/<WAYLAND_DISPLAY>.capture-token,
+  // readable only by this user, and names it in ZWWM_CAPTURE_TOKEN for the
+  // clients zwwm starts. False leaves capture to the portal alone.
+  bool create_token() {
+    const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+    const char* socket_name = std::getenv("WAYLAND_DISPLAY");
+    if (runtime == nullptr || *runtime == '\0' || socket_name == nullptr || *socket_name == '\0') return false;
+    if (getrandom(token.data(), token.size(), 0) != static_cast<ssize_t>(token.size())) return false;
+    token_path = std::string(runtime) + "/" + socket_name + ".capture-token";
+    (void)unlink(token_path.c_str());
+    UniqueFd file(open(token_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
+    if (!file || fchmod(file.get(), 0600) != 0 ||
+        write(file.get(), token.data(), token.size()) != static_cast<ssize_t>(token.size())) {
+      (void)unlink(token_path.c_str());
+      token_path.clear();
+      return false;
+    }
+    return setenv("ZWWM_CAPTURE_TOKEN", token_path.c_str(), 1) == 0;
   }
 
   void close_channel(bool destroy_client) {
@@ -399,7 +486,8 @@ struct PortalCapture::Impl {
       source = -1;
     }
     socket.reset();
-    if (destroy_client && client != nullptr) { for (auto* frame : frames) if (!frame->terminal) { frame->terminal = true; protocol::zwwm_screencopy_frame_v1_send_failed(*frame->resource, protocol::ZWWM_SCREENCOPY_FRAME_V1_FAILURE_REVOKED); } for (auto* manager : managers) protocol::ext_zwwm_toplevels_v1_send_finished(*manager); client->flush(); client->destroy(); }
+    // Only the portal's own objects go with it; authenticated clients keep theirs.
+    if (destroy_client && client != nullptr) { for (auto* frame : frames) if (!frame->terminal && frame->resource->client == client) { frame->terminal = true; protocol::zwwm_screencopy_frame_v1_send_failed(*frame->resource, protocol::ZWWM_SCREENCOPY_FRAME_V1_FAILURE_REVOKED); } for (auto* manager : managers) if (manager->client == client) protocol::ext_zwwm_toplevels_v1_send_finished(*manager); client->flush(); client->destroy(); }
     if (portal_client) portal_client(nullptr);
     client = nullptr;
   }
@@ -551,10 +639,12 @@ PortalCapture::PortalCapture(zwayland::server::Display* display, zwayland::serve
   impl_->canonical_screencopy = display->add_global(&protocol::zwlr_screencopy_manager_v1_interface, 3, [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind_canonical_screencopy)(&client, data, bound_version, id); });
   impl_->xdg_output_manager = display->add_global(&protocol::zxdg_output_manager_v1_interface, 3, [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind_xdg_output_manager)(&client, data, bound_version, id); });
   impl_->toplevel_manager = display->add_global(&protocol::ext_zwwm_toplevels_v1_interface, 1, [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind_toplevels)(&client, data, bound_version, id); });
+  if (impl_->create_token())
+    impl_->access_global = display->add_global(&protocol::zwwm_capture_access_v1_interface, 1, [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind_access)(&client, data, bound_version, id); });
   display->set_global_filter([self = impl_.get()](const zwayland::server::Client& candidate,
                                                   const zwayland::server::Global& global) {
     return (global.name != self->screencopy && global.name != self->toplevel_manager) ||
-           &candidate == self->client;
+           self->trusted(&candidate);
   });
 }
 
@@ -566,6 +656,9 @@ PortalCapture::~PortalCapture() {
   }
   impl_->close_channel(true);
   impl_->display->set_global_filter({});
+  for (const auto& entry : impl_->trusted_clients) entry->client->destroy_signal.remove(entry->listener);
+  impl_->trusted_clients.clear();
+  if (!impl_->token_path.empty()) (void)unlink(impl_->token_path.c_str());
   if (impl_->child_source >= 0) {
     impl_->event_loop->remove(impl_->child_source);
     impl_->child_source = -1;
@@ -594,13 +687,10 @@ bool PortalCapture::spawn(const std::string& executable) {
 const std::string& PortalCapture::last_error() const { return impl_->error; }
 void PortalCapture::toplevels_changed() { if (impl_->client != nullptr) impl_->update_toplevels(); }
 void PortalCapture::frame_presented() {
-  if (impl_->client == nullptr) return;
-  zwayland::server::Resource* output = impl_->output(impl_->client, {});
-  if (output == nullptr) return;
   timespec now{};
   if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return;
   const auto seconds = static_cast<std::uint64_t>(now.tv_sec);
-  if (impl_->xdg_dimensions_pending && !impl_->xdg_outputs.empty()) {
+  if (impl_->client != nullptr && impl_->xdg_dimensions_pending && !impl_->xdg_outputs.empty()) {
     OutputCapture capture;
     if (impl_->capture(capture, false, 0) && capture.width != 0 && capture.height != 0) {
       for (const auto& output_resource : impl_->xdg_outputs)
@@ -609,10 +699,14 @@ void PortalCapture::frame_presented() {
       impl_->xdg_dimensions_pending = false;
     }
   }
-  for (auto* manager : impl_->screencopy_managers)
+  for (auto* manager : impl_->screencopy_managers) {
+    // Each client names the output through its own wl_output.
+    zwayland::server::Resource* output = impl_->output(manager->client, {});
+    if (output == nullptr) continue;
     protocol::zwwm_screencopy_view_manager_v1_send_presented(*manager, output,
         static_cast<std::uint32_t>(seconds >> 32U), static_cast<std::uint32_t>(seconds),
         static_cast<std::uint32_t>(now.tv_nsec));
+  }
 }
 
 }  // namespace zwwm

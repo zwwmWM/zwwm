@@ -171,6 +171,7 @@ protocol_specs = [
   ['input-method-unstable-v2', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/input-method-unstable-v2.xml')],
   ['virtual-keyboard-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/virtual-keyboard-unstable-v1.xml')],
   ['zwwm-edge-swipe-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-edge-swipe-v1.xml')],
+  ['zwwm-capture-access-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-capture-access-v1.xml')],
 ]
 
 protocol_server_headers = []
