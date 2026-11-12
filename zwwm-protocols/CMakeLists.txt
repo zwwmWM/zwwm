@@ -102,6 +102,8 @@ zwwm_add_project_protocol(wlr-output-power-management-unstable-v1 protocols/wlr-
 zwwm_add_project_protocol(input-method-unstable-v2 protocols/input-method-unstable-v2.xml)
 zwwm_add_project_protocol(virtual-keyboard-unstable-v1 protocols/virtual-keyboard-unstable-v1.xml)
 zwwm_add_project_protocol(zwwm-edge-swipe-v1 protocols/zwwm-edge-swipe-v1.xml)
+zwwm_add_project_protocol(zwwm-capture-access-v1 protocols/zwwm-capture-access-v1.xml)
+install(FILES protocols/zwwm-capture-access-v1.xml DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
 install(FILES protocols/zwwm-edge-swipe-v1.xml DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
 
 add_custom_target(zwwm_protocol_headers DEPENDS ${ZWWW_PROTOCOL_HEADERS})
