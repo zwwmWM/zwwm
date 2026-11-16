@@ -2,7 +2,7 @@
 <protocol name="ext_zwwm_manager_v1">
   <copyright>Copyright 2026 binarylinuxx</copyright>
 
-  <interface name="ext_zwwm_manager_v1" version="6">
+  <interface name="ext_zwwm_manager_v1" version="7">
     <description summary="zwwm control and state manager">
       Provides typed compositor state snapshots, control actions, and event
       subscriptions to clients connected to the compositor Wayland socket.
@@ -17,6 +17,7 @@
       <entry name="cameras" value="5"/>
       <entry name="keyboard" value="6"/>
       <entry name="live" value="7" since="6"/>
+      <entry name="windows" value="8" since="7"/>
     </enum>
 
     <enum name="event_mask" bitfield="true">
@@ -58,7 +59,7 @@
     </request>
   </interface>
 
-  <interface name="ext_zwwm_snapshot_v1" version="1">
+  <interface name="ext_zwwm_snapshot_v1" version="2">
     <description summary="one compositor state snapshot"/>
     <request name="destroy" type="destructor"/>
     <event name="status">
@@ -116,6 +117,17 @@
     </event>
     <event name="done"/>
     <event name="failed"><arg name="message" type="string"/></event>
+    <event name="window" since="2">
+      <description summary="one managed window, for the windows snapshot">
+        Every top-level window, including those on inactive tags. state is
+        a bitfield: 1 mapped, 2 focused, 4 floating, 8 fullscreen, 16
+        modal, 32 hidden (not on an active tag).
+      </description>
+      <arg name="id_hi" type="uint"/><arg name="id_lo" type="uint"/>
+      <arg name="app_id" type="string"/><arg name="title" type="string"/>
+      <arg name="tag" type="uint"/>
+      <arg name="state" type="uint"/>
+    </event>
   </interface>
 
   <interface name="ext_zwwm_result_v1" version="1">

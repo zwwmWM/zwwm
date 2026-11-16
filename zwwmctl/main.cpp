@@ -108,6 +108,17 @@ std::string json_line(std::string_view line) {
     }
     return result + "]}";
   }
+  if (fields[1] == "windows" && fields.size() >= 3) {
+    std::string result = "{\"ok\":true,\"windows\":["; std::size_t at = 3;
+    const std::size_t count = std::strtoull(fields[2].c_str(), nullptr, 10);
+    for (std::size_t index = 0; index < count; ++index, at += 5) {
+      if (at + 5 > fields.size()) return "{\"ok\":false,\"error\":\"truncated windows response\"}";
+      if (index != 0) result += ',';
+      result += "{\"id\":" + fields[at] + ",\"app_id\":" + json_string(fields[at + 1]) + ",\"title\":" +
+                json_string(fields[at + 2]) + ",\"tag\":" + fields[at + 3] + ",\"state\":" + fields[at + 4] + "}";
+    }
+    return result + "]}";
+  }
   if (fields[1] == "tags" && fields.size() >= 3) {
     std::string result = "{\"ok\":true,\"tags\":["; std::size_t at = 3;
     const std::size_t count = std::strtoull(fields[2].c_str(), nullptr, 10);
@@ -271,6 +282,13 @@ struct SnapshotHandler {
       add_number(self.fields, combine(output_hi, output_lo)); add_number(self.fields, x); add_number(self.fields, y);
       add_number(self.fields, width); add_number(self.fields, height); add_number(self.fields, state);
   }
+  void window(zwayland::client::Proxy&, std::uint32_t id_hi, std::uint32_t id_lo, const std::string& app_id,
+              const std::string& title, std::uint32_t tag, std::uint32_t state) {
+      auto& self = *client;
+      ++self.count;
+      add_number(self.fields, combine(id_hi, id_lo)); add(self.fields, app_id); add(self.fields, title);
+      add_number(self.fields, tag); add_number(self.fields, state);
+  }
   void tag(zwayland::client::Proxy&, const std::string& connector, std::uint32_t output_hi,
            std::uint32_t output_lo, std::uint32_t active) {
       auto& self = *client;
@@ -384,7 +402,7 @@ struct RegistryHandler {
     if (interface == protocol::ext_zwwm_manager_v1_interface.name)
       client->manager = zwayland::client::core::bind(
           *client->display, registry, name, protocol::ext_zwwm_manager_v1_interface,
-      std::min(version, 6U));
+      std::min(version, 7U));
   }
   void global_remove(zwayland::client::Proxy&, std::uint32_t) {}
 };
@@ -404,7 +422,7 @@ std::string line(const Client& client) {
 }
 
 void usage(const char* program) {
-  std::fprintf(stderr, "usage: %s {version|ping|status|output|outputs|clients|tags|layers|camera|keyboard|states|listen|reload|rebuild-switch-shaders|setcursor THEME SIZE|dispatch ACTION [ARG]|events [EVENT ...]} [-j|--json]\n", program);
+  std::fprintf(stderr, "usage: %s {version|ping|status|output|outputs|clients|windows|tags|layers|camera|keyboard|states|listen|reload|rebuild-switch-shaders|setcursor THEME SIZE|dispatch ACTION [ARG]|events [EVENT ...]} [-j|--json]\n", program);
 }
 
 std::uint32_t event_mask(const std::vector<std::string>& events) {
@@ -475,10 +493,12 @@ int main(int argc, char** argv) {
 
   bool stream = false;
   if (command == "status" || command == "output" || command == "outputs" || command == "clients" ||
-       command == "tags" || command == "layers" || command == "camera" || command == "keyboard") {
+       command == "tags" || command == "layers" || command == "camera" || command == "keyboard" ||
+       command == "windows") {
     if (!arguments.empty()) { usage(argv[0]); return EXIT_FAILURE; }
     if ((command == "camera" && client.manager->version < 4) ||
-        (command == "keyboard" && client.manager->version < 5)) {
+        (command == "keyboard" && client.manager->version < 5) ||
+        (command == "windows" && client.manager->version < 7)) {
       std::fputs("zwwmctl: command requires restarting zwwm with a newer manager protocol\n", stderr);
       return EXIT_FAILURE;
     }
@@ -490,6 +510,7 @@ int main(int argc, char** argv) {
         client.kind == "tags" ? protocol::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_TAGS :
         client.kind == "camera" ? protocol::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_CAMERAS :
         client.kind == "keyboard" ? protocol::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_KEYBOARD :
+        client.kind == "windows" ? protocol::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_WINDOWS :
         protocol::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_LAYERS;
     protocol::ext_zwwm_snapshot_v1_observe(*client.display, SnapshotHandler{&client});
     const std::uint32_t snapshot_id = protocol::ext_zwwm_manager_v1_get_snapshot(

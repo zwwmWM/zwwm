@@ -60,8 +60,11 @@ struct ManagerProtocol::Impl {
     void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) { resource.destroy(); }
   };
 
-  zwayland::server::Resource* snapshot(zwayland::server::Client* client, std::uint32_t id) {
-    auto* resource = client->create_resource(&protocol::ext_zwwm_snapshot_v1_interface, id, 1);
+  zwayland::server::Resource* snapshot(zwayland::server::Client* client, std::uint32_t id,
+                                       std::uint32_t manager_version) {
+    // Manager version 7 brought the windows snapshot and its window event.
+    auto* resource = client->create_resource(&protocol::ext_zwwm_snapshot_v1_interface, id,
+                                             manager_version >= 7 ? 2U : 1U);
     if (resource == nullptr) { client->post_no_memory(); return nullptr; }
     resource->set_data(this);
     resource->set_handler(protocol::ext_zwwm_snapshot_v1_handler(DestroyHandler{}));
@@ -100,6 +103,15 @@ struct ManagerProtocol::Impl {
             resource, high(toplevel.id), low(toplevel.id), toplevel.app_id.c_str(), toplevel.title.c_str(),
             high(toplevel.output.value), low(toplevel.output.value), toplevel.x, toplevel.y,
             toplevel.width, toplevel.height, toplevel.state);
+    } else if (type == protocol::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_WINDOWS) {
+      if (resource->version < 2) {
+        protocol::ext_zwwm_snapshot_v1_send_failed(*resource, "windows snapshots need manager version 7");
+        return;
+      }
+      for (const auto& window : compositor->managed_windows())
+        protocol::ext_zwwm_snapshot_v1_send_window(*resource, high(window.id), low(window.id),
+                                                   window.app_id.c_str(), window.title.c_str(),
+                                                   window.tag, window.state);
     } else if (type == protocol::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_TAGS) {
       for (const auto& tag : compositor->tags())
         protocol::ext_zwwm_snapshot_v1_send_tag(*resource, tag.connector.c_str(), high(tag.output.value),
@@ -152,7 +164,8 @@ struct ManagerProtocol::Impl {
 
   static void get_snapshot(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, std::uint32_t type) {
     auto* self = manager->data<Impl>();
-    if (auto* resource = self->snapshot(client, id); resource != nullptr) self->send_snapshot(resource, type);
+    if (auto* resource = self->snapshot(client, id, manager->version); resource != nullptr)
+      self->send_snapshot(resource, type);
   }
 
   static void reload_request(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id) {
