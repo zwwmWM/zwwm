@@ -662,28 +662,81 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
                     "each shader requires a name, source, and window, border, background, or shadow role");
               continue;
             }
-            CustomShaderConfig shader{.name = name, .role = *role, .source = *source, .values = {}};
-            if (const auto* values_value = lang::find_field(*definition, "values"); values_value != nullptr) {
+            CustomShaderConfig shader{.name = name, .role = *role, .source = *source, .values = {}, .passes = {},
+                                      .target_padding = 0};
+            // Pass outputs name float targets; a string value naming one becomes its slot number.
+            std::vector<std::string> targets;
+            const auto* passes_value = lang::find_field(*definition, "passes");
+            const auto* passes = passes_value == nullptr ? nullptr : lang::as_array(*passes_value);
+            if (passes_value != nullptr && (passes == nullptr || *role != CustomShaderRole::window))
+              error(result.diagnostics, item->location, "shader passes must be an array on a window shader");
+            if (passes != nullptr && *role == CustomShaderRole::window) {
+              for (const auto& pass_value : passes->values) {
+                const auto* pass = lang::as_object(pass_value);
+                const auto* output_value = pass == nullptr ? nullptr : lang::find_field(*pass, "output");
+                const auto* output = output_value == nullptr ? nullptr : resolved_string(*output_value, variables);
+                if (output != nullptr && !output->empty() &&
+                    std::find(targets.begin(), targets.end(), *output) == targets.end())
+                  targets.push_back(*output);
+              }
+              if (targets.size() > 8) error(result.diagnostics, item->location, "shader passes may use at most 8 outputs");
+            }
+            const auto read_values = [&](const lang::Value* values_value,
+                                         std::vector<std::pair<std::string, CustomShaderValue>>& out) {
+              if (values_value == nullptr) return;
               const auto* values = lang::as_object(*values_value);
               if (values == nullptr) {
                 error(result.diagnostics, item->location, "shader values must be an object");
-              } else {
-                for (std::size_t value_index = 0; value_index < values->names.size(); ++value_index) {
-                  const auto& parameter_name = values->names[value_index];
-                  const bool valid_name = !parameter_name.empty() &&
-                      (std::isalpha(static_cast<unsigned char>(parameter_name.front())) || parameter_name.front() == '_') &&
-                      std::all_of(std::next(parameter_name.begin()), parameter_name.end(), [](unsigned char character) {
-                        return std::isalnum(character) || character == '_';
-                      });
-                  auto parameter = shader_value(values->values[value_index], variables);
-                  if (!valid_name || !parameter) {
-                    error(result.diagnostics, item->location,
-                          "shader values require identifier names and boolean, integer, color, 1..20 color array, or 2..4 integer array values");
-                  } else {
-                    shader.values.emplace_back(parameter_name, std::move(*parameter));
-                  }
+                return;
+              }
+              for (std::size_t value_index = 0; value_index < values->names.size(); ++value_index) {
+                const auto& parameter_name = values->names[value_index];
+                const bool valid_name = !parameter_name.empty() &&
+                    (std::isalpha(static_cast<unsigned char>(parameter_name.front())) || parameter_name.front() == '_') &&
+                    std::all_of(std::next(parameter_name.begin()), parameter_name.end(), [](unsigned char character) {
+                      return std::isalnum(character) || character == '_';
+                    });
+                std::optional<CustomShaderValue> parameter;
+                const auto* text = resolved_string(values->values[value_index], variables);
+                if (const auto target = text == nullptr ? targets.end() : std::find(targets.begin(), targets.end(), *text);
+                    target != targets.end())
+                  parameter = static_cast<std::int32_t>(target - targets.begin());
+                else
+                  parameter = shader_value(values->values[value_index], variables);
+                if (!valid_name || !parameter) {
+                  error(result.diagnostics, item->location,
+                        "shader values require identifier names and boolean, integer, color, 1..20 color array, 2..4 integer array, or pass output values");
+                } else {
+                  out.emplace_back(parameter_name, std::move(*parameter));
                 }
               }
+            };
+            read_values(lang::find_field(*definition, "values"), shader.values);
+            if (passes != nullptr && *role == CustomShaderRole::window) {
+              for (const auto& pass_value : passes->values) {
+                const auto* pass = lang::as_object(pass_value);
+                const auto* pass_source_value = pass == nullptr ? nullptr : lang::find_field(*pass, "source");
+                const auto* pass_source = pass_source_value == nullptr ? nullptr : resolved_string(*pass_source_value, variables);
+                const auto* output_value = pass == nullptr ? nullptr : lang::find_field(*pass, "output");
+                const auto* output = output_value == nullptr ? nullptr : resolved_string(*output_value, variables);
+                if (pass_source == nullptr || pass_source->empty() || output == nullptr || output->empty()) {
+                  error(result.diagnostics, item->location, "each shader pass requires a source and an output name");
+                  continue;
+                }
+                CustomShaderPassConfig parsed_pass{
+                    .source = *pass_source,
+                    .output = static_cast<std::uint32_t>(std::find(targets.begin(), targets.end(), *output) - targets.begin()),
+                    .values = {}};
+                read_values(lang::find_field(*pass, "values"), parsed_pass.values);
+                shader.passes.push_back(std::move(parsed_pass));
+              }
+            }
+            if (const auto* padding_value = lang::find_field(*definition, "target-padding"); padding_value != nullptr) {
+              const auto* padding = lang::as_integer(*padding_value);
+              if (padding == nullptr || *padding < 0 || *padding > 512)
+                error(result.diagnostics, item->location, "shader target-padding must be 0..512");
+              else
+                shader.target_padding = static_cast<std::uint32_t>(*padding);
             }
             mutable_config->shaders.push_back(std::move(shader));
       }
@@ -1098,9 +1151,13 @@ RuntimeConfigResult load_runtime_config_file(const std::string& path) {
     const auto base = std::filesystem::path(path).parent_path();
     if (!mutable_config->overview_backdrop_image.empty() && std::filesystem::path(mutable_config->overview_backdrop_image).is_relative())
       mutable_config->overview_backdrop_image = (base / mutable_config->overview_backdrop_image).lexically_normal().string();
+    const auto resolve = [&](std::string& source) {
+      std::filesystem::path shader_path(source);
+      if (shader_path.is_relative()) source = (base / shader_path).lexically_normal().string();
+    };
     for (auto& shader : mutable_config->shaders) {
-      std::filesystem::path shader_path(shader.source);
-      if (shader_path.is_relative()) shader.source = (base / shader_path).lexically_normal().string();
+      resolve(shader.source);
+      for (auto& pass : shader.passes) resolve(pass.source);
     }
   }
   return result;
@@ -1115,42 +1172,57 @@ bool load_shader_sources(const RuntimeConfig& config, renderer::ShaderSources* s
   loaded.background = config.background_shader;
   loaded.shadow = config.shadow_shader;
   loaded.overview_backdrop_image = config.overview_backdrop_image;
-  for (const auto& shader : config.shaders) {
-    std::ifstream input(shader.source, std::ios::binary | std::ios::ate);
+  const auto read_source = [&](const std::string& shader_name, const std::string& path, std::string& out) {
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input) {
-      if (message != nullptr) *message = "could not open shader " + shader.name + ": " + shader.source;
+      if (message != nullptr) *message = "could not open shader " + shader_name + ": " + path;
       return false;
     }
     const auto size = input.tellg();
     if (size < 0 || size > 1024 * 1024) {
-      if (message != nullptr) *message = "shader " + shader.name + " exceeds 1 MiB";
+      if (message != nullptr) *message = "shader " + shader_name + " exceeds 1 MiB";
       return false;
     }
+    out.resize(static_cast<std::size_t>(size));
+    input.seekg(0);
+    if (!out.empty() && !input.read(out.data(), static_cast<std::streamsize>(size))) {
+      if (message != nullptr) *message = "could not read shader " + shader_name + ": " + path;
+      return false;
+    }
+    return true;
+  };
+  const auto convert_values = [](const std::vector<std::pair<std::string, CustomShaderValue>>& values,
+                                 std::vector<std::pair<std::string, renderer::ShaderValue>>& out) {
+    for (const auto& [name, value] : values) {
+      renderer::ShaderValue converted;
+      if (const auto* boolean = std::get_if<bool>(&value)) converted = *boolean;
+      else if (const auto* integer = std::get_if<std::int32_t>(&value)) converted = *integer;
+      else if (const auto* color = std::get_if<Color>(&value)) converted = color->normalized();
+      else if (const auto* components = std::get_if<std::vector<std::int32_t>>(&value)) converted = *components;
+      else {
+        std::vector<std::array<float, 4>> colors;
+        for (const auto& color : std::get<std::vector<Color>>(value)) colors.push_back(color.normalized());
+        converted = std::move(colors);
+      }
+      out.emplace_back(name, std::move(converted));
+    }
+  };
+  for (const auto& shader : config.shaders) {
     renderer::NamedShaderSource loaded_shader;
     loaded_shader.name = shader.name;
     loaded_shader.role = shader.role == CustomShaderRole::window ? renderer::ShaderRole::window :
                          shader.role == CustomShaderRole::border ? renderer::ShaderRole::border :
                          shader.role == CustomShaderRole::shadow ? renderer::ShaderRole::shadow :
                                                                    renderer::ShaderRole::background;
-    loaded_shader.source.resize(static_cast<std::size_t>(size));
-    input.seekg(0);
-    if (!loaded_shader.source.empty() &&
-        !input.read(loaded_shader.source.data(), static_cast<std::streamsize>(size))) {
-      if (message != nullptr) *message = "could not read shader " + shader.name + ": " + shader.source;
-      return false;
-    }
-    for (const auto& [name, value] : shader.values) {
-      renderer::ShaderValue converted;
-      if (const auto* boolean = std::get_if<bool>(&value)) converted = *boolean;
-      else if (const auto* integer = std::get_if<std::int32_t>(&value)) converted = *integer;
-      else if (const auto* color = std::get_if<Color>(&value)) converted = color->normalized();
-       else if (const auto* components = std::get_if<std::vector<std::int32_t>>(&value)) converted = *components;
-       else {
-         std::vector<std::array<float, 4>> colors;
-         for (const auto& color : std::get<std::vector<Color>>(value)) colors.push_back(color.normalized());
-         converted = std::move(colors);
-       }
-      loaded_shader.values.emplace_back(name, std::move(converted));
+    if (!read_source(shader.name, shader.source, loaded_shader.source)) return false;
+    convert_values(shader.values, loaded_shader.values);
+    loaded_shader.target_padding = shader.target_padding;
+    for (const auto& pass : shader.passes) {
+      renderer::ShaderPassSource loaded_pass;
+      loaded_pass.output = pass.output;
+      if (!read_source(shader.name, pass.source, loaded_pass.source)) return false;
+      convert_values(pass.values, loaded_pass.values);
+      loaded_shader.passes.push_back(std::move(loaded_pass));
     }
     loaded.programs.push_back(std::move(loaded_shader));
   }

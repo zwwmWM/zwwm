@@ -35,11 +35,19 @@ enum class CustomShaderRole : std::uint8_t { window, border, background, shadow 
 using CustomShaderValue = std::variant<bool, std::int32_t, Color, std::vector<std::int32_t>,
                                        std::vector<Color>>;
 
+struct CustomShaderPassConfig {
+  std::string source;
+  std::uint32_t output = 0;
+  std::vector<std::pair<std::string, CustomShaderValue>> values;
+};
+
 struct CustomShaderConfig {
   std::string name;
   CustomShaderRole role = CustomShaderRole::window;
   std::string source;
   std::vector<std::pair<std::string, CustomShaderValue>> values;
+  std::vector<CustomShaderPassConfig> passes;
+  std::uint32_t target_padding = 0;
 };
 
 struct DecorationConfig {
@@ -186,12 +194,12 @@ class RuntimeConfig {
   BlurConfig blur;
   GlassConfig glass;
   std::vector<CustomShaderConfig> shaders{
-      {"window", CustomShaderRole::window, default_shader_source("window.frag"), {}},
-      {"border", CustomShaderRole::border, default_shader_source("border.frag"), {}},
-      {"background", CustomShaderRole::background, default_shader_source("background.frag"), {}},
+      {"window", CustomShaderRole::window, default_shader_source("window.frag"), {}, {}, 0},
+      {"border", CustomShaderRole::border, default_shader_source("border.frag"), {}, {}, 0},
+      {"background", CustomShaderRole::background, default_shader_source("background.frag"), {}, {}, 0},
       {"shadow", CustomShaderRole::shadow, default_shader_source("shadow.frag"),
        {{"size", 28}, {"offset_x", 0}, {"offset_y", 8}, {"strength", 100},
-        {"color", Color{0, 0, 0, 90}}, {"focused_color", Color{0, 0, 0, 140}}}}};
+        {"color", Color{0, 0, 0, 90}}, {"focused_color", Color{0, 0, 0, 140}}}, {}, 0}};
   std::string window_shader = "window";
   std::string border_shader = "border";
   std::string background_shader = "background";

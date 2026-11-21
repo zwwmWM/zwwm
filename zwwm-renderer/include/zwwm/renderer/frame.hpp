@@ -23,11 +23,20 @@ using ShaderValue = std::variant<bool, std::int32_t, std::array<float, 4>,
                                   std::vector<std::int32_t>,
                                   std::vector<std::array<float, 4>>>;
 
+// Renders into float target `output` (slot 0..7) before the owning window shader runs.
+struct ShaderPassSource {
+  std::string source;
+  std::uint32_t output = 0;
+  std::vector<std::pair<std::string, ShaderValue>> values;
+};
+
 struct NamedShaderSource {
   std::string name;
   ShaderRole role = ShaderRole::window;
   std::string source;
   std::vector<std::pair<std::string, ShaderValue>> values;
+  std::vector<ShaderPassSource> passes;
+  std::uint32_t target_padding = 0;
 };
 
 struct ShaderSources {

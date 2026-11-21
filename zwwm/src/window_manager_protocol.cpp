@@ -328,7 +328,7 @@ struct WindowManagerProtocol::Impl {
       if (name.empty() || role > 2 || !std::filesystem::path(source).is_absolute()) {
         t->fail("shader requires a name, valid role, and absolute source filename"); return;
       }
-      CustomShaderConfig definition{name, static_cast<CustomShaderRole>(role), source, {}};
+      CustomShaderConfig definition{name, static_cast<CustomShaderRole>(role), source, {}, {}, 0};
       const auto found = std::find_if(t->draft.shaders.begin(), t->draft.shaders.end(),
                                       [&](const auto& item) { return item.name == name; });
       if (found == t->draft.shaders.end()) t->draft.shaders.push_back(std::move(definition));

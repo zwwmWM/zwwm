@@ -55,6 +55,8 @@ layout(set = 0, binding = 0, std140) uniform ZwwmDraw {
   float saturation;
   float noise;
   float reserved;
+  vec4 target_rect;         // output pixels covered by pass targets
+  ivec4 target_textures[2]; // pass target slots 0..7, as zwwm_textures indices
 } zwwm;
 
 layout(set = 0, binding = 1) uniform sampler2D zwwm_textures[];
@@ -65,6 +67,9 @@ vec4 zwwm_backdrop(vec2 uv) { return zwwm_sample(zwwm.backdrop_texture, uv); }
 vec4 zwwm_blurred_backdrop(vec2 uv) { return zwwm_sample(zwwm.blurred_backdrop_texture, uv); }
 vec4 zwwm_background(vec2 uv) { return zwwm_sample(zwwm.background_texture, uv); }
 ivec2 zwwm_background_size() { return textureSize(zwwm_textures[max(zwwm.background_texture, 0)], 0); }
+int zwwm_target_index(int slot) { return zwwm.target_textures[clamp(slot, 0, 7) / 4][clamp(slot, 0, 7) % 4]; }
+vec4 zwwm_target(int slot, vec2 uv) { return zwwm_sample(zwwm_target_index(slot), uv); }
+ivec2 zwwm_target_size(int slot) { return textureSize(zwwm_textures[max(zwwm_target_index(slot), 0)], 0); }
 
 vec2 zwwm_transform(vec2 position) {
   if (zwwm.texture_transform == 1) return vec2(position.y, 1.0 - position.x);

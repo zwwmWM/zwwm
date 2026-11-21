@@ -85,13 +85,18 @@ struct DrawData {
   float saturation = 1.0F;
   float noise = 0.0F;
   float reserved = 0.0F;
+  std::array<float, 2> padding{};
+  std::array<float, 4> target_rect{};
+  std::array<std::int32_t, 8> target_textures{};
 };
 static_assert(offsetof(DrawData, output_size) == 144);
 static_assert(offsetof(DrawData, window_texture) == 192);
 static_assert(offsetof(DrawData, texel_size) == 232);
-static_assert(sizeof(DrawData) == 264);
-// std140 rounds the block to its 16-byte base alignment.
-constexpr VkDeviceSize kDrawSize = 272;
+static_assert(offsetof(DrawData, target_rect) == 272);
+static_assert(sizeof(DrawData) == 320);
+constexpr VkDeviceSize kDrawSize = 320;
+constexpr VkFormat kPassFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+constexpr std::size_t kPassSlots = 8;
 
 std::array<float, 4> rect_of(const FloatRect& rect) {
   return {static_cast<float>(rect.origin.x), static_cast<float>(rect.origin.y), static_cast<float>(rect.size.width),
@@ -441,10 +446,18 @@ struct VulkanRenderer::State {
   ProgramRef surface, glass, kawase;
   TextureRef dummy;
 
+  struct PassProgram {
+    ProgramRef program;
+    std::uint32_t output = 0;
+  };
   struct CustomProgram {
     ProgramRef program;
     ShaderRole role = ShaderRole::window;
+    std::vector<PassProgram> passes;
+    std::uint32_t target_padding = 0;
   };
+  // One more than the slots, so a pass never renders into a texture it samples.
+  std::vector<TextureRef> pass_targets;
   std::unordered_map<std::string, CustomProgram> custom_programs, pending_custom_programs;
   std::string window_shader, border_shader, background_shader, shadow_shader;
   std::string pending_window_shader, pending_border_shader, pending_background_shader, pending_shadow_shader;
@@ -472,6 +485,7 @@ struct VulkanRenderer::State {
     kawase.reset();
     textures.clear();
     snapshots.clear();
+    pass_targets.clear();
     arenas.clear();
     wallpaper.reset();
     pending_wallpaper.reset();
@@ -1057,7 +1071,19 @@ bool VulkanRenderer::prepare_shaders(const ShaderSources& sources) {
       discard_shaders();
       return false;
     }
-    state.pending_custom_programs.emplace(source.name, State::CustomProgram{std::move(program), source.role});
+    State::CustomProgram custom{std::move(program), source.role, {}, source.target_padding};
+    for (std::size_t index = 0; index < source.passes.size(); ++index) {
+      const auto& pass = source.passes[index];
+      auto pass_program = pass.output < kPassSlots ? state.make_program(pass.source, source.role, pass.values, error) : nullptr;
+      if (pass_program == nullptr) {
+        last_error_ = "shader " + source.name + " pass " + std::to_string(index + 1) + ": " +
+                      (pass.output < kPassSlots ? error : "output slot out of range");
+        discard_shaders();
+        return false;
+      }
+      custom.passes.push_back({std::move(pass_program), pass.output});
+    }
+    state.pending_custom_programs.emplace(source.name, std::move(custom));
   }
   const auto valid_default = [&](const std::string& name, ShaderRole role) {
     const auto found = state.pending_custom_programs.find(name);
@@ -1471,6 +1497,72 @@ bool VulkanRenderer::render(const FramePlan& frame, const TextureRef& target,
     const int quality = static_cast<int>(std::clamp<std::uint32_t>(draw.glass_quality, 1, 3));
     complete = state.draw(state.glass, data, true, quality) && complete;
   };
+  // Runs a shader's passes into float targets covering its clip rect plus padding, then
+  // hands their slots to the final draw. Pass coordinates are local to the targets.
+  const auto run_passes = [&](const State::CustomProgram& custom, const RenderDraw& draw, DrawData& final_data) {
+    const FloatRect area = draw.clip_bounds.value_or(draw.bounds);
+    const double padding = static_cast<double>(custom.target_padding);
+    const double limit = static_cast<double>(state.device->limits().maxImageDimension2D);
+    const double left = std::floor(area.origin.x - padding);
+    const double top = std::floor(area.origin.y - padding);
+    const auto width = static_cast<std::uint32_t>(
+        std::clamp(std::ceil(area.origin.x + area.size.width + padding) - left, 1.0, limit));
+    const auto height = static_cast<std::uint32_t>(
+        std::clamp(std::ceil(area.origin.y + area.size.height + padding) - top, 1.0, limit));
+    std::uint32_t slots = 0;
+    for (const auto& pass : custom.passes) slots = std::max(slots, pass.output + 1);
+    auto& targets = state.pass_targets;
+    if (targets.size() < slots + 1) targets.resize(slots + 1);
+    for (std::size_t index = 0; index <= slots; ++index) {
+      auto& item = targets[index];
+      if (item == nullptr || item->width() != width || item->height() != height)
+        item = vlk::Image::create(state.device, width, height, kPassFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, nullptr);
+      if (item == nullptr) {
+        complete = false;
+        return;
+      }
+    }
+    std::array<int, kPassSlots> bound{};
+    bound.fill(-1);
+    const auto shift = [&](std::array<float, 4> rect) {
+      rect[0] -= static_cast<float>(left);
+      rect[1] -= static_cast<float>(top);
+      return rect;
+    };
+    const auto slot_indices = [&] {
+      std::array<std::int32_t, 8> indices{};
+      for (std::size_t slot = 0; slot < kPassSlots; ++slot)
+        if (bound[slot] >= 0) indices[slot] = state.texture_index(targets[static_cast<std::size_t>(bound[slot])]);
+      return indices;
+    };
+    const auto prepare_bound = [&] {
+      state.end_rendering();
+      for (const int index : bound) if (index >= 0) state.prepare_sampled(targets[static_cast<std::size_t>(index)]);
+    };
+    const TextureRef frame_target = state.batch->target;
+    const auto saved_scissor = state.scissor;
+    state.scissor.reset();
+    for (const auto& pass : custom.passes) {
+      int free = 0;
+      while (std::find(bound.begin(), bound.end(), free) != bound.end()) ++free;
+      prepare_bound();
+      state.set_target(targets[static_cast<std::size_t>(free)], std::array<float, 4>{0.0F, 0.0F, 0.0F, 0.0F});
+      DrawData data = final_data;
+      data.draw_rect = data.target_rect = {0.0F, 0.0F, static_cast<float>(width), static_cast<float>(height)};
+      data.toplevel_rect = shift(final_data.toplevel_rect);
+      data.texture_rect = shift(final_data.texture_rect);
+      data.clip_rect = shift(final_data.clip_rect);
+      data.target_textures = slot_indices();
+      complete = state.draw(pass.program, data, false) && complete;
+      bound[pass.output] = free;
+    }
+    prepare_bound();
+    state.set_target(frame_target, std::nullopt);
+    state.scissor = saved_scissor;
+    final_data.target_rect = {static_cast<float>(left), static_cast<float>(top), static_cast<float>(width),
+                              static_cast<float>(height)};
+    final_data.target_textures = slot_indices();
+  };
   const auto draw_custom = [&](const RenderDraw& draw, const ProgramRef& selected, bool blurred_backdrop_ready) {
     DrawData data;
     data.draw_rect = rect_of(draw.bounds);
@@ -1493,6 +1585,11 @@ bool VulkanRenderer::render(const FramePlan& frame, const TextureRef& target,
     data.backdrop_texture = state.texture_index(snapshots.reflection);
     data.blurred_backdrop_texture = state.texture_index(blurred_backdrop_ready ? snapshots.background : snapshots.reflection);
     data.background_texture = state.texture_index(state.wallpaper);
+    for (const auto& [name, custom] : state.custom_programs) {
+      if (custom.program != selected || custom.passes.empty()) continue;
+      run_passes(custom, draw, data);
+      break;
+    }
     complete = state.draw(selected, data, true) && complete;
   };
 
