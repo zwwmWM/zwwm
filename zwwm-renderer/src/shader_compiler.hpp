@@ -42,5 +42,7 @@ struct CompiledShader {
 // Descriptors outside the zwwm.glsl ABI and the set 1 config block are rejected.
 [[nodiscard]] bool compile_vertex(std::string_view source, CompiledShader* shader, std::string* error);
 [[nodiscard]] bool compile_fragment(std::string_view source, CompiledShader* shader, std::string* error);
+// Compute passes may also bind their storage-image output at set 2 binding 0.
+[[nodiscard]] bool compile_compute(std::string_view source, CompiledShader* shader, std::string* error);
 
 }  // namespace zwwm::renderer::detail

@@ -76,10 +76,12 @@ bool compile(EShLanguage stage, std::string_view source, CompiledShader* shader,
   glslang::TShader unit(stage);
   const std::string text(source);
   const char* strings = text.c_str();
-  const char* name = stage == EShLangVertex ? "vertex" : "fragment";
+  const char* name = stage == EShLangVertex ? "vertex" : stage == EShLangCompute ? "compute" : "fragment";
   unit.setStringsWithLengthsAndNames(&strings, nullptr, &name, 1);
   unit.setPreamble(stage == EShLangFragment
                        ? "#extension GL_GOOGLE_include_directive : require\n#define ZWWM_FRAGMENT_STAGE 1\n"
+                       : stage == EShLangCompute
+                       ? "#extension GL_GOOGLE_include_directive : require\n#define ZWWM_COMPUTE_STAGE 1\n"
                        : "#extension GL_GOOGLE_include_directive : require\n");
   unit.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, 100);
   unit.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_3);
@@ -111,7 +113,8 @@ bool compile(EShLanguage stage, std::string_view source, CompiledShader* shader,
     return false;
   }
   for (const auto& [slot, count] : interface.bindings) {
-    const bool known = slot == std::pair{0U, 0U} || slot == std::pair{0U, 1U} || slot == std::pair{1U, 0U};
+    const bool known = slot == std::pair{0U, 0U} || slot == std::pair{0U, 1U} || slot == std::pair{1U, 0U} ||
+                       (stage == EShLangCompute && slot == std::pair{2U, 0U});
     if (!known || count > 1) {
       if (error != nullptr)
         *error = "descriptor set " + std::to_string(slot.first) + " binding " + std::to_string(slot.second) +
@@ -164,6 +167,10 @@ bool compile_fragment(std::string_view source, CompiledShader* shader, std::stri
     return false;
   }
   return compile(EShLangFragment, source, shader, error);
+}
+
+bool compile_compute(std::string_view source, CompiledShader* shader, std::string* error) {
+  return compile(EShLangCompute, source, shader, error);
 }
 
 }  // namespace zwwm::renderer::detail

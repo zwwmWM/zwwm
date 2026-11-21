@@ -27,6 +27,7 @@ using ShaderValue = std::variant<bool, std::int32_t, std::array<float, 4>,
 struct ShaderPassSource {
   std::string source;
   std::uint32_t output = 0;
+  bool compute = false;  // GLSL compute shader writing zwwm_output, not a fragment shader
   std::vector<std::pair<std::string, ShaderValue>> values;
 };
 

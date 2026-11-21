@@ -272,6 +272,9 @@ struct Program {
   VkDescriptorPool config_pool = VK_NULL_HANDLE;
   VkDescriptorSet config_set = VK_NULL_HANDLE;
   std::map<std::tuple<VkFormat, bool, int>, VkPipeline> pipelines;
+  // Compute programs keep their module in `fragment` and use this pipeline instead.
+  bool compute = false;
+  VkPipeline compute_pipeline = VK_NULL_HANDLE;
 
   Program() = default;
   Program(const Program&) = delete;
@@ -282,6 +285,7 @@ struct Program {
       (void)key;
       vkDestroyPipeline(device, pipeline, nullptr);
     }
+    if (compute_pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, compute_pipeline, nullptr);
     if (config_pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, config_pool, nullptr);
     if (config_buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, config_buffer, nullptr);
     if (config_memory != VK_NULL_HANDLE) vkFreeMemory(device, config_memory, nullptr);
@@ -328,9 +332,10 @@ struct Arena {
   VkDescriptorSet allocate(VkDescriptorSetLayout layout, std::uint32_t textures) {
     for (;; ++pool) {
       if (pool == pools.size()) {
-        const std::array<VkDescriptorPoolSize, 2> sizes{{
+        const std::array<VkDescriptorPoolSize, 3> sizes{{
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kPoolSets},
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, std::max(kPoolSets * 64U, textures)},
+            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kPoolSets},
         }};
         const VkDescriptorPoolCreateInfo info{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -440,7 +445,9 @@ struct VulkanRenderer::State {
   VkPipelineCache cache = VK_NULL_HANDLE;
   VkDescriptorSetLayout frame_layout = VK_NULL_HANDLE;
   VkDescriptorSetLayout config_layout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout storage_layout = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
+  VkPipelineLayout compute_layout = VK_NULL_HANDLE;
   std::uint32_t maximum_textures = kMaximumTextures;
   std::vector<std::uint32_t> vertex_spirv;
   ProgramRef surface, glass, kawase;
@@ -495,6 +502,8 @@ struct VulkanRenderer::State {
     device->wait_idle();
     const VkDevice handle = device->handle();
     if (layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(handle, layout, nullptr);
+    if (compute_layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(handle, compute_layout, nullptr);
+    if (storage_layout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(handle, storage_layout, nullptr);
     if (config_layout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(handle, config_layout, nullptr);
     if (frame_layout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(handle, frame_layout, nullptr);
     if (sampler != VK_NULL_HANDLE) vkDestroySampler(handle, sampler, nullptr);
@@ -508,9 +517,10 @@ struct VulkanRenderer::State {
                                  limits.maxPerStageDescriptorSampledImages, limits.maxDescriptorSetSamplers,
                                  limits.maxDescriptorSetSampledImages});
     const std::array<VkDescriptorSetLayoutBinding, 2> frame_bindings{{
-        {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-         nullptr},
-        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, maximum_textures, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
+         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, maximum_textures,
+         VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     }};
     const std::array<VkDescriptorBindingFlags, 2> frame_flags{
         0, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
@@ -526,15 +536,34 @@ struct VulkanRenderer::State {
         .pBindings = frame_bindings.data(),
     };
     const VkDescriptorSetLayoutBinding config_binding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
-                                                      VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+                                                      VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+                                                      nullptr};
     const VkDescriptorSetLayoutCreateInfo config_info{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = 1,
         .pBindings = &config_binding,
     };
+    const VkDescriptorSetLayoutBinding storage_binding{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                                                       VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    const VkDescriptorSetLayoutCreateInfo storage_info{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &storage_binding,
+    };
     if (vkCreateDescriptorSetLayout(handle, &frame_info, nullptr, &frame_layout) != VK_SUCCESS ||
-        vkCreateDescriptorSetLayout(handle, &config_info, nullptr, &config_layout) != VK_SUCCESS) {
+        vkCreateDescriptorSetLayout(handle, &config_info, nullptr, &config_layout) != VK_SUCCESS ||
+        vkCreateDescriptorSetLayout(handle, &storage_info, nullptr, &storage_layout) != VK_SUCCESS) {
       error = "could not create Vulkan descriptor set layouts";
+      return false;
+    }
+    const std::array<VkDescriptorSetLayout, 3> compute_sets{frame_layout, config_layout, storage_layout};
+    const VkPipelineLayoutCreateInfo compute_info{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = static_cast<std::uint32_t>(compute_sets.size()),
+        .pSetLayouts = compute_sets.data(),
+    };
+    if (vkCreatePipelineLayout(handle, &compute_info, nullptr, &compute_layout) != VK_SUCCESS) {
+      error = "could not create the Vulkan compute pipeline layout";
       return false;
     }
     const std::array<VkDescriptorSetLayout, 2> sets{frame_layout, config_layout};
@@ -552,12 +581,14 @@ struct VulkanRenderer::State {
 
   [[nodiscard]] ProgramRef make_program(std::string_view source, ShaderRole role,
                                         const std::vector<std::pair<std::string, ShaderValue>>& values,
-                                        std::string& error) {
+                                        std::string& error, bool compute = false) {
     detail::CompiledShader fragment;
-    if (!detail::compile_fragment(source, &fragment, &error)) return nullptr;
+    if (!(compute ? detail::compile_compute(source, &fragment, &error)
+                  : detail::compile_fragment(source, &fragment, &error))) return nullptr;
     auto program = std::make_shared<Program>();
     program->device = device->handle();
     program->role = role;
+    program->compute = compute;
     const auto module = [&](const std::vector<std::uint32_t>& code, VkShaderModule* out) {
       const VkShaderModuleCreateInfo info{
           .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -566,7 +597,7 @@ struct VulkanRenderer::State {
       };
       return vkCreateShaderModule(device->handle(), &info, nullptr, out) == VK_SUCCESS;
     };
-    if (!module(vertex_spirv, &program->vertex) || !module(fragment.spirv, &program->fragment)) {
+    if ((!compute && !module(vertex_spirv, &program->vertex)) || !module(fragment.spirv, &program->fragment)) {
       error = "could not create a Vulkan shader module";
       return nullptr;
     }
@@ -871,7 +902,8 @@ struct VulkanRenderer::State {
     batch->bound_config = nullptr;
   }
 
-  bool bind_frame_set(VkBuffer buffer, VkDeviceSize offset) {
+  bool bind_frame_set(VkBuffer buffer, VkDeviceSize offset,
+                      VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS) {
     if (batch->frame_set == VK_NULL_HANDLE || batch->frame_set_buffer != buffer ||
         batch->frame_set_textures != batch->textures.size()) {
       const auto count = static_cast<std::uint32_t>(batch->textures.size());
@@ -894,8 +926,55 @@ struct VulkanRenderer::State {
       batch->frame_set_textures = count;
     }
     const auto dynamic_offset = static_cast<std::uint32_t>(offset);
-    vkCmdBindDescriptorSets(batch->commands.get(), VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &batch->frame_set,
-                            1, &dynamic_offset);
+    vkCmdBindDescriptorSets(batch->commands.get(), bind_point,
+                            bind_point == VK_PIPELINE_BIND_POINT_COMPUTE ? compute_layout : layout, 0, 1,
+                            &batch->frame_set, 1, &dynamic_offset);
+    return true;
+  }
+
+  // Writes `output` (left in GENERAL layout) with one invocation per pixel, outside dynamic rendering.
+  bool dispatch(const ProgramRef& program_ref, DrawData data, const TextureRef& output) {
+    auto& program = *program_ref;
+    if (program.compute_pipeline == VK_NULL_HANDLE) {
+      const VkComputePipelineCreateInfo info{
+          .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+          .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .module = program.fragment, .pName = "main"},
+          .layout = compute_layout,
+      };
+      if (vkCreateComputePipelines(device->handle(), cache, 1, &info, nullptr, &program.compute_pipeline) != VK_SUCCESS)
+        return false;
+    }
+    if (std::find(batch->kept_programs.begin(), batch->kept_programs.end(), &program) == batch->kept_programs.end()) {
+      batch->kept_programs.push_back(&program);
+      batch->commands.keep(program_ref);
+    }
+    end_rendering();
+    keep(output);
+    const VkCommandBuffer commands = batch->commands.get();
+    output->transition(commands, VK_IMAGE_LAYOUT_GENERAL, true);
+    data.output_size = {static_cast<float>(output->width()), static_cast<float>(output->height())};
+    const auto slice = batch->arena->write(&data, sizeof(data), kDrawSize);
+    if (!slice) return false;
+    const VkDescriptorSet storage = batch->arena->allocate(storage_layout, 0);
+    if (storage == VK_NULL_HANDLE) return false;
+    const VkDescriptorImageInfo image{VK_NULL_HANDLE, output->view(), VK_IMAGE_LAYOUT_GENERAL};
+    const VkWriteDescriptorSet write{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = storage,
+        .dstBinding = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &image,
+    };
+    vkUpdateDescriptorSets(device->handle(), 1, &write, 0, nullptr);
+    vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, program.compute_pipeline);
+    if (!bind_frame_set(slice->first, slice->second, VK_PIPELINE_BIND_POINT_COMPUTE)) return false;
+    if (program.config_set != VK_NULL_HANDLE)
+      vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, compute_layout, 1, 1, &program.config_set, 0,
+                              nullptr);
+    vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, compute_layout, 2, 1, &storage, 0, nullptr);
+    vkCmdDispatch(commands, (output->width() + 7U) / 8U, (output->height() + 7U) / 8U, 1);
     return true;
   }
 
@@ -1074,7 +1153,8 @@ bool VulkanRenderer::prepare_shaders(const ShaderSources& sources) {
     State::CustomProgram custom{std::move(program), source.role, {}, source.target_padding};
     for (std::size_t index = 0; index < source.passes.size(); ++index) {
       const auto& pass = source.passes[index];
-      auto pass_program = pass.output < kPassSlots ? state.make_program(pass.source, source.role, pass.values, error) : nullptr;
+      auto pass_program = pass.output < kPassSlots
+          ? state.make_program(pass.source, source.role, pass.values, error, pass.compute) : nullptr;
       if (pass_program == nullptr) {
         last_error_ = "shader " + source.name + " pass " + std::to_string(index + 1) + ": " +
                       (pass.output < kPassSlots ? error : "output slot out of range");
@@ -1516,7 +1596,8 @@ bool VulkanRenderer::render(const FramePlan& frame, const TextureRef& target,
     for (std::size_t index = 0; index <= slots; ++index) {
       auto& item = targets[index];
       if (item == nullptr || item->width() != width || item->height() != height)
-        item = vlk::Image::create(state.device, width, height, kPassFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, nullptr);
+        item = vlk::Image::create(state.device, width, height, kPassFormat,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT, nullptr);
       if (item == nullptr) {
         complete = false;
         return;
@@ -1546,14 +1627,16 @@ bool VulkanRenderer::render(const FramePlan& frame, const TextureRef& target,
       int free = 0;
       while (std::find(bound.begin(), bound.end(), free) != bound.end()) ++free;
       prepare_bound();
-      state.set_target(targets[static_cast<std::size_t>(free)], std::array<float, 4>{0.0F, 0.0F, 0.0F, 0.0F});
+      if (!pass.program->compute)
+        state.set_target(targets[static_cast<std::size_t>(free)], std::array<float, 4>{0.0F, 0.0F, 0.0F, 0.0F});
       DrawData data = final_data;
       data.draw_rect = data.target_rect = {0.0F, 0.0F, static_cast<float>(width), static_cast<float>(height)};
       data.toplevel_rect = shift(final_data.toplevel_rect);
       data.texture_rect = shift(final_data.texture_rect);
       data.clip_rect = shift(final_data.clip_rect);
       data.target_textures = slot_indices();
-      complete = state.draw(pass.program, data, false) && complete;
+      complete = (pass.program->compute ? state.dispatch(pass.program, data, targets[static_cast<std::size_t>(free)])
+                                        : state.draw(pass.program, data, false)) && complete;
       bound[pass.output] = free;
     }
     prepare_bound();

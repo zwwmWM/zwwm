@@ -61,7 +61,7 @@ layout(set = 0, binding = 0, std140) uniform ZwwmDraw {
 
 layout(set = 0, binding = 1) uniform sampler2D zwwm_textures[];
 
-vec4 zwwm_sample(int index, vec2 uv) { return texture(zwwm_textures[max(index, 0)], uv); }
+vec4 zwwm_sample(int index, vec2 uv) { return textureLod(zwwm_textures[max(index, 0)], uv, 0.0); }
 vec4 zwwm_window(vec2 uv) { return zwwm_sample(zwwm.window_texture, uv); }
 vec4 zwwm_backdrop(vec2 uv) { return zwwm_sample(zwwm.backdrop_texture, uv); }
 vec4 zwwm_blurred_backdrop(vec2 uv) { return zwwm_sample(zwwm.blurred_backdrop_texture, uv); }
@@ -84,6 +84,17 @@ float zwwm_rounded_rect_distance(vec2 point, vec2 size, float radius) {
   vec2 corner = abs(point - half_size) - half_size + vec2(r);
   return length(max(corner, vec2(0.0))) + min(max(corner.x, corner.y), 0.0) - r;
 }
+
+#ifdef ZWWM_COMPUTE_STAGE
+// Compute passes (.comp) write their pass target directly, one invocation per pixel.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 2, binding = 0, rgba16f) uniform writeonly image2D zwwm_output;
+
+bool zwwm_pass_inside() { return all(lessThan(gl_GlobalInvocationID.xy, uvec2(imageSize(zwwm_output)))); }
+// Pixel center in the target, the same as a fragment pass's zwwm_local and zwwm_position.
+vec2 zwwm_pass_pixel() { return vec2(gl_GlobalInvocationID.xy) + 0.5; }
+void zwwm_store(vec4 value) { imageStore(zwwm_output, ivec2(gl_GlobalInvocationID.xy), value); }
+#endif
 
 #ifdef ZWWM_FRAGMENT_STAGE
 layout(location = 0) in vec2 zwwm_uv;        // client texture coordinates

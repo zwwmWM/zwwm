@@ -1220,6 +1220,7 @@ bool load_shader_sources(const RuntimeConfig& config, renderer::ShaderSources* s
     for (const auto& pass : shader.passes) {
       renderer::ShaderPassSource loaded_pass;
       loaded_pass.output = pass.output;
+      loaded_pass.compute = pass.source.ends_with(".comp");
       if (!read_source(shader.name, pass.source, loaded_pass.source)) return false;
       convert_values(pass.values, loaded_pass.values);
       loaded_shader.passes.push_back(std::move(loaded_pass));
