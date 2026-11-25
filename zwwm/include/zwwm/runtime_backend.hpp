@@ -96,6 +96,8 @@ class RuntimeBackend {
   void close_drm_output(DrmOutput& output);
   void close_drm_device(DrmDevice& device);
   void repaint(DrmOutput& output);
+  static std::uint64_t presentation_time_us(const DrmOutput& output);
+  static std::uint64_t next_vblank_us(const DrmOutput& output);
   void page_flip_complete(DrmOutput& output);
   void publish_dmabuf_importer();
   void publish_outputs();

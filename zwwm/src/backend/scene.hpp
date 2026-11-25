@@ -105,6 +105,25 @@ inline void transform_geometry(renderer::DrawCall& draw, const OutputConfig& out
   if (draw.geometry->texture) transform(*draw.geometry->texture);
 }
 
+// Remaps a draw laid out on rounded root bounds onto the unrounded animation bounds.
+inline void subpixel_geometry(renderer::DrawCall& draw, renderer::Rect from, const renderer::FloatRect& to) {
+  if (draw.geometry || from.size.width == 0 || from.size.height == 0) return;
+  if (to.origin.x == from.origin.x && to.origin.y == from.origin.y &&
+      to.size.width == from.size.width && to.size.height == from.size.height) return;
+  const double sx = to.size.width / from.size.width, sy = to.size.height / from.size.height;
+  const auto map = [&](const renderer::Rect& r) -> renderer::FloatRect {
+    return {{to.origin.x + (r.origin.x - from.origin.x) * sx, to.origin.y + (r.origin.y - from.origin.y) * sy},
+            {r.size.width * sx, r.size.height * sy}};
+  };
+  renderer::DrawGeometry geometry;
+  geometry.bounds = map(draw.bounds);
+  geometry.toplevel = draw.toplevel_bounds.size.width == 0 ? renderer::FloatRect(draw.toplevel_bounds)
+                                                            : map(draw.toplevel_bounds);
+  if (draw.clip_bounds) geometry.clip = map(*draw.clip_bounds);
+  if (draw.texture_bounds) geometry.texture = map(*draw.texture_bounds);
+  draw.geometry = geometry;
+}
+
 struct WindowGeometry { int x; int y; int width; int height; };
 
 inline bool intersects(renderer::Rect left, renderer::Rect right) {

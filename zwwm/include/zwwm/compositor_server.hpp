@@ -259,7 +259,8 @@ class CompositorServer {
   void set_dmabuf_feedback(std::vector<std::pair<std::uint32_t, std::uint64_t>> formats,
                            std::optional<dev_t> main_device = std::nullopt);
   // Called by a backend after its target buffer has been committed.
-  void notify_frame_presented(OutputId output = {});
+  // next_frame_us: predicted steady-clock time of the next vblank, 0 when unknown.
+  void notify_frame_presented(OutputId output = {}, std::uint64_t next_frame_us = 0);
   // Backend input is in the target surface's logical coordinates.
   void pointer_motion(std::uint32_t time, std::uint64_t surface_id, std::int32_t x, std::int32_t y);
   // Backend input in compositor-global logical coordinates.

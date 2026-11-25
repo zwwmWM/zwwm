@@ -1,5 +1,6 @@
 #pragma once
 
+#include "zwwm/renderer/frame.hpp"
 #include "zwwm/renderer/scene.hpp"
 
 #include <cstdint>
@@ -58,6 +59,8 @@ struct AnimationTarget {
 
 struct AnimationSample {
   renderer::Rect bounds;
+  // Unrounded bounds, for subpixel motion.
+  renderer::FloatRect precise;
   float opacity = 1.0F;
   bool closing = false;
 };
@@ -72,6 +75,7 @@ struct TagTransitionSample {
 
 struct TagRootSample {
   renderer::Rect bounds;
+  renderer::FloatRect precise;
   float opacity = 1.0F;
 };
 
@@ -79,19 +83,23 @@ struct TagRootSample {
 [[nodiscard]] TagRootSample transform_tag_root(renderer::Rect bounds, std::uint32_t output_width,
                                                 std::uint32_t output_height,
                                                 const TagTransitionSample& transition, bool outgoing);
+[[nodiscard]] TagRootSample transform_tag_root(renderer::FloatRect bounds, std::uint32_t output_width,
+                                                std::uint32_t output_height,
+                                                const TagTransitionSample& transition, bool outgoing);
 
+// Times are steady-clock microseconds; durations in the config stay in milliseconds.
 class AnimationSystem {
  public:
   explicit AnimationSystem(AnimationConfig config = {});
 
-  void set_config(AnimationConfig config, std::uint64_t now_ms);
-  void update(std::span<const AnimationTarget> targets, std::uint64_t now_ms);
-  [[nodiscard]] std::optional<AnimationSample> sample(std::uint64_t id, std::uint64_t now_ms) const;
-  [[nodiscard]] bool active(std::uint64_t now_ms) const;
+  void set_config(AnimationConfig config, std::uint64_t now_us);
+  void update(std::span<const AnimationTarget> targets, std::uint64_t now_us);
+  [[nodiscard]] std::optional<AnimationSample> sample(std::uint64_t id, std::uint64_t now_us) const;
+  [[nodiscard]] bool active(std::uint64_t now_us) const;
   [[nodiscard]] bool retains(std::uint64_t id) const;
   [[nodiscard]] std::vector<std::uint64_t> retained_ids() const;
-  void start_tag_transition(int direction, std::uint64_t now_ms);
-  [[nodiscard]] std::optional<TagTransitionSample> tag_transition(std::uint64_t now_ms) const;
+  void start_tag_transition(int direction, std::uint64_t now_us);
+  [[nodiscard]] std::optional<TagTransitionSample> tag_transition(std::uint64_t now_us) const;
   void remove(std::uint64_t id);
 
  private:
@@ -106,22 +114,22 @@ class AnimationSystem {
           target(goal) {}
     float from_opacity = 1.0F;
     float target_opacity = 1.0F;
-    std::uint64_t started_ms = 0;
+    std::uint64_t started_us = 0;
     Transition transition = Transition::idle;
     Presence presence = Presence::steady;
-    std::uint64_t presence_started_ms = 0;
+    std::uint64_t presence_started_us = 0;
     double from_scale = 1.0, target_scale = 1.0;
     double from_offset = 0.0, target_offset = 0.0;
     bool present = true;
   };
 
-  [[nodiscard]] float progress(const State& state, std::uint64_t now_ms) const;
-  [[nodiscard]] float progress(std::uint64_t started_ms, std::uint32_t duration_ms,
-                               std::uint64_t now_ms) const;
-  [[nodiscard]] AnimationSample sample_state(const State& state, std::uint64_t now_ms) const;
-  [[nodiscard]] float presence_progress(const State& state, std::uint64_t now_ms, bool fade = false) const;
+  [[nodiscard]] float progress(const State& state, std::uint64_t now_us) const;
+  [[nodiscard]] float progress(std::uint64_t started_us, std::uint32_t duration_ms,
+                               std::uint64_t now_us) const;
+  [[nodiscard]] AnimationSample sample_state(const State& state, std::uint64_t now_us) const;
+  [[nodiscard]] float presence_progress(const State& state, std::uint64_t now_us, bool fade = false) const;
   [[nodiscard]] std::uint32_t presence_duration(const State& state, bool fade = false) const;
-  void prune(std::uint64_t now_ms);
+  void prune(std::uint64_t now_us);
 
   AnimationConfig config_;
   std::unordered_map<std::uint64_t, State> states_;

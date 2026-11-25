@@ -354,7 +354,7 @@ void NestedBackend::set_config(std::shared_ptr<const RuntimeConfig> config) {
   logical_width_ = logical.width;
   logical_height_ = logical.height;
   if (input_target_ != nullptr) input_target_->set_output_size(physical_width_, physical_height_);
-  animations_.set_config(config_->animations, monotonic_ms());
+  animations_.set_config(config_->animations, monotonic_us());
   for (auto& window : windows_) window.damaged = true;
   repaint_pending_ = true;
   if (renderer_ != nullptr) repaint_gpu(); else repaint();
@@ -676,7 +676,7 @@ void NestedBackend::present(const ShmBufferView& buffer) {
   if (buffer.tag_transition) {
     if (buffer.tag_transition_ready) {
       tag_transition_preparing_ = false;
-      animations_.start_tag_transition(buffer.tag_transition_direction, monotonic_ms());
+      animations_.start_tag_transition(buffer.tag_transition_direction, monotonic_us());
       repaint_pending_ = true;
       if (renderer_ != nullptr) repaint_gpu(); else repaint();
       return;
@@ -925,7 +925,7 @@ void NestedBackend::present(const ShmBufferView& buffer) {
 void NestedBackend::repaint_gpu() {
   if (camera_frame_preparing_ || tag_transition_preparing_) return;
   if (renderer_ == nullptr || vk_window_ == nullptr || frame_pending_) return;
-  const std::uint64_t now = monotonic_ms();
+  const std::uint64_t now = monotonic_us();
   const auto tag = overview_ ? std::nullopt : animations_.tag_transition(now);
   if (!tag) {
     for (auto& window : windows_) {
@@ -961,13 +961,17 @@ void NestedBackend::repaint_gpu() {
     } else ++it;
   }
   std::vector<layout::Placement> placements;
+  std::unordered_map<std::uint64_t, renderer::FloatRect> precise_bounds;
   for (const auto id : animations_.retained_ids()) {
     const auto sample = animations_.sample(id, now);
-    if (sample) placements.push_back({id, sample->bounds});
+    if (sample) {
+      placements.push_back({id, sample->bounds});
+      precise_bounds.emplace(id, sample->precise);
+    }
   }
   renderer::FramePlan frame;
   frame.draw_background = true;
-  frame.shader_time = static_cast<float>(now % 1000000U) / 1000.0F;
+  frame.shader_time = static_cast<float>(now % 1000000000U) / 1000000.0F;
   frame.overview_backdrop = overview_;
   frame.overview_backdrop_opacity = static_cast<float>(overview_progress_);
   frame.overview_backdrop_blur_radius = config_->overview_backdrop_blur_radius;
@@ -1016,8 +1020,10 @@ void NestedBackend::repaint_gpu() {
     renderer::Rect tag_bounds;
     if (placement != placements.end()) tag_bounds = placement->bounds;
     else continue;
-    const auto tag_root = tag ? transform_tag_root(tag_bounds, logical_width_, logical_height_, *tag, root->tag_outgoing)
-                               : TagRootSample{tag_bounds, 1.0F};
+    const auto precise_root = precise_bounds.find(window.root_id);
+    const renderer::FloatRect root_bounds = precise_root == precise_bounds.end() ? renderer::FloatRect(tag_bounds) : precise_root->second;
+    const auto tag_root = tag ? transform_tag_root(root_bounds, logical_width_, logical_height_, *tag, root->tag_outgoing)
+                               : TagRootSample{tag_bounds, root_bounds, 1.0F};
     tag_bounds = tag_root.bounds;
     const float decoration_scale = animated_decoration_scale(*root, tag_bounds);
     const float border_width = config_->border_width() * decoration_scale;
@@ -1053,6 +1059,7 @@ void NestedBackend::repaint_gpu() {
               (animation ? animation->opacity : 1.0F) * tag_root.opacity * window.compositor_opacity, state,
               frame.shader_time)) {
         backend_scene::camera_geometry(*shadow, *root, window, tag_bounds);
+        backend_scene::subpixel_geometry(*shadow, tag_bounds, tag_root.precise);
         if (root->layer_priority == 0) {
           if (!tiled_shadows_at) tiled_shadows_at = frame.draws.size();
           tiled_shadows.push_back(std::move(*shadow));
@@ -1081,6 +1088,7 @@ void NestedBackend::repaint_gpu() {
     frame.draws.back().background_blur_radius = static_cast<float>(window.background_blur_radius);
     apply_effect_parameters(frame.draws.back(), window.window_shader);
     backend_scene::camera_geometry(frame.draws.back(), *root, window, tag_bounds);
+    backend_scene::subpixel_geometry(frame.draws.back(), tag_bounds, tag_root.precise);
     if (root_window && !root->fullscreen && std::lround(border_width) > 0) backend_scene::extend_under_border(frame.draws.back());
     if (overview_ && !backend_scene::overview_draw_visible(frame.draws.back(), {{0, 0}, {logical_width_, logical_height_}})) frame.draws.pop_back();
     if (window.toplevel && !root->fullscreen) {
@@ -1091,6 +1099,7 @@ void NestedBackend::repaint_gpu() {
         border->shader_name = window.border_shader;
         border->toplevel_id = window.root_id;
         backend_scene::camera_geometry(*border, *root, window, tag_bounds);
+        backend_scene::subpixel_geometry(*border, tag_bounds, tag_root.precise);
         frame.draws.push_back(std::move(*border));
       }
     }
@@ -1138,7 +1147,7 @@ void NestedBackend::repaint() {
   }
   software_logical_.resize(static_cast<std::size_t>(logical_width_) * logical_height_);
   auto* destination = software_logical_.data();
-  const std::uint64_t now = monotonic_ms();
+  const std::uint64_t now = monotonic_us();
   const auto tag = overview_ ? std::nullopt : animations_.tag_transition(now);
   const bool tag_cleanup = !tag &&
                            std::any_of(windows_.begin(), windows_.end(),
@@ -1312,7 +1321,7 @@ void NestedBackend::repaint() {
     }
     if (bounds == nullptr) continue;
     const auto tag_root = tag ? transform_tag_root(*bounds, logical_width_, logical_height_, *tag, root_it->tag_outgoing)
-                              : TagRootSample{*bounds, 1.0F};
+                              : TagRootSample{*bounds, renderer::FloatRect(*bounds), 1.0F};
     tag_bounds = tag_root.bounds;
     bounds = &tag_bounds;
     const auto content = animated_content(*root_it, *bounds);

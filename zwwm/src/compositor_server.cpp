@@ -585,7 +585,7 @@ void apply_window_rules(XdgSurfaceState* x, bool reapply_layout = false) {
   }
   x->background_blur_radius = static_cast<std::uint32_t>(std::clamp(
       observer->config->shader_integer(x->window_shader, "blur_radius"), 0, 64));
-  if (size_rule != nullptr) {
+  if (size_rule != nullptr && x->auto_placed) {
     const Rect work = output_work(observer, x->output);
     const auto width = size_rule->width_percent ? work.width * static_cast<std::int32_t>(size_rule->width) / 100 : static_cast<std::int32_t>(size_rule->width);
     const auto height = size_rule->height_percent ? work.height * static_cast<std::int32_t>(size_rule->height) / 100 : static_cast<std::int32_t>(size_rule->height);
@@ -884,7 +884,7 @@ bool zoom_canvas(Observer* observer, int steps) {
   }
   auto& viewport = output->canvas_viewports[tag - 1];
   const Rect work = output_work(observer, output->info.id);
-  if (observer->camera.zoom_by_steps(viewport, work.width, work.height, steps, timestamp_ms()))
+  if (observer->camera.zoom_by_steps(viewport, work.width, work.height, steps, monotonic_us()))
     configure_canvas_frame(observer, output->info.id);
   if (observer->event_callback != nullptr)
     observer->event_callback(observer->event_data, "camera");
@@ -905,7 +905,7 @@ bool pan_canvas(Observer* observer, double dx, double dy, bool finish) {
   auto& viewport = output->canvas_viewports[output->active_tag - 1];
   const Rect work = output_work(observer, output->info.id);
   const bool changed = finish ? observer->camera.finish_pan(viewport, work.width, work.height) :
-      observer->camera.pan_by(viewport, work.width, work.height, dx, dy, timestamp_ms());
+      observer->camera.pan_by(viewport, work.width, work.height, dx, dy, monotonic_us());
   if (changed) {
     configure_canvas_frame(observer, output->info.id);
     if (observer->event_callback != nullptr)
@@ -1189,7 +1189,11 @@ void configure_layout(Observer* observer, XdgSurfaceState* candidate) {
     // Let the client pick its size instead of the half-screen placeholder.
     const bool client_sized = !x->fullscreen && x->auto_placed &&
         (x->accepted_width <= 1 || x->accepted_height <= 1);
-    if (client_sized) send_configure(x, 0, 0, states);
+    const auto* seat = observer->seat;
+    const bool resizing = !x->fullscreen && seat != nullptr && root(seat->interactive) == surface &&
+        !seat->tiled_resize && seat->resize_edge != protocol::XDG_TOPLEVEL_RESIZE_EDGE_NONE;
+    if (resizing) send_configure(x, x->configured_width, x->configured_height, states);
+    else if (client_sized) send_configure(x, 0, 0, states);
     else send_configure(x, x->content_bounds.width, x->content_bounds.height, states);
     notify_surface_tree(surface);
   }
@@ -1298,7 +1302,7 @@ bool overview_projection(Observer* observer, SurfaceState* surface, renderer::Re
   if (projection != nullptr) *projection = transform;
   return true;
 }
-void refresh_overview(Observer* observer);
+void refresh_overview(Observer* observer, std::uint64_t now = 0);
 void describe_buffer(ShmBufferView& view, const SurfaceState* s) {
      const auto* b = s->current_buffer;
      if (b->pool != nullptr) view.pixels = static_cast<const std::uint8_t*>(b->pool->mapping) + b->offset;
@@ -1622,10 +1626,10 @@ void stop_overview_animation(Observer* observer) {
   observer->overview_scroll = observer->overview_first_tag;
   observer->overview = observer->overview_visible = false;
 }
-void refresh_overview(Observer* observer) {
+void refresh_overview(Observer* observer, std::uint64_t now) {
   if (observer == nullptr || observer->seat == nullptr || observer->callback == nullptr || observer->overview_repainting) return;
   if (observer->seat->session_lock != nullptr) { stop_overview_animation(observer); return; }
-  const auto now = overview_time_ms();
+  if (now == 0) now = monotonic_us();
   if (!observer->config->animations.enabled || observer->config->animations.overview_duration_ms == 0) {
     observer->overview_motion.reset(observer->overview ? 1 : 0);
     observer->overview_scroll_motion.reset(observer->overview_first_tag);
@@ -1655,7 +1659,7 @@ void refresh_overview(Observer* observer) {
 }
 void update_overview(Observer* observer, bool enabled) {
   if (observer == nullptr || observer->seat == nullptr) return;
-  const auto now = overview_time_ms();
+  const auto now = monotonic_us();
   const auto duration = observer->config->animations.enabled ? observer->config->animations.overview_duration_ms : 0;
   if (enabled && !observer->overview_visible) {
     observer->overview_scroll_motion.reset(observer->overview_first_tag);
@@ -2200,6 +2204,22 @@ void surface_commit(zwayland::server::Client*, zwayland::server::Resource* r) {
         }
         x->canvas_bounds.width = width;
         x->canvas_bounds.height = height;
+      } else if (x->toplevel != nullptr && x->mapped && x->floating && !x->fullscreen &&
+                 !endless_canvas(s->observer) && s->observer->seat != nullptr &&
+                 root(s->observer->seat->interactive) == s && !s->observer->seat->tiled_resize &&
+                 s->observer->seat->resize_edge != protocol::XDG_TOPLEVEL_RESIZE_EDGE_NONE) {
+        // Frame follows the committed size, pinned to the edge opposite the grab.
+        const auto* seat = s->observer->seat;
+        const auto& start = seat->interactive_start;
+        const auto border = static_cast<std::int32_t>(s->observer->config->border_width());
+        const auto width = std::max(1, geometry.width + 2 * border);
+        const auto height = std::max(1, geometry.height + 2 * border);
+        canvas_size_changed = x->floating_bounds.width != width || x->floating_bounds.height != height;
+        x->floating_bounds = {
+            (seat->resize_edge & protocol::XDG_TOPLEVEL_RESIZE_EDGE_LEFT) != 0 ? start.x + start.width - width : start.x,
+            (seat->resize_edge & protocol::XDG_TOPLEVEL_RESIZE_EDGE_TOP) != 0 ? start.y + start.height - height : start.y,
+            width, height};
+        x->last_floating_bounds = x->floating_bounds;
       } else if (x->toplevel != nullptr && x->mapped && x->floating && !x->fullscreen && x->auto_placed &&
                  !endless_canvas(s->observer) &&
                  (s->observer->seat == nullptr || root(s->observer->seat->interactive) != s) &&
@@ -2520,6 +2540,13 @@ void top_destroyed(zwayland::server::Resource* r) {
   if (x->surface != nullptr) notify_surface(x->surface);
   if (was_mapped && x->surface != nullptr) configure_layout(x->surface->observer);
 }
+// A grabbed tile floats where it already is instead of jumping to screen center.
+void float_in_place(XdgSurfaceState* x) {
+  if (x == nullptr || x->floating || x->fullscreen) return;
+  if (x->tile_bounds.width > 0 && x->tile_bounds.height > 0)
+    x->floating_bounds = x->last_floating_bounds = x->tile_bounds;
+  x->auto_placed = false;
+}
 void set_floating(XdgSurfaceState* x, bool floating) {
   if (x == nullptr || x->fullscreen || x->floating == floating) return;
   x->floating = floating;
@@ -2606,7 +2633,7 @@ void begin_interactive(XdgSurfaceState* x, zwayland::server::Client* client, std
   if (!x->floating && edge != protocol::XDG_TOPLEVEL_RESIZE_EDGE_NONE &&
       begin_external_tiled_resize(x->surface->observer, x->surface, x->output, x->tile_bounds, edge, serial)) return;
   if (endless_canvas(x->surface->observer)) configure_layout(x->surface->observer, x);
-  else set_floating(x, true);
+  else { float_in_place(x); set_floating(x, true); }
   auto* seat = x->surface->observer->seat;
   seat->interactive = x->surface; seat->resize_edge = edge;
   seat->interactive_start = endless_canvas(x->surface->observer) ? x->tile_bounds : x->floating_bounds;
@@ -4036,9 +4063,9 @@ bool frame_hidden(Observer* observer, SurfaceState* scene_root, OutputId assigne
   return uncovered.rects.empty();
 }
 }  // namespace detail
-void CompositorServer::notify_frame_presented(OutputId output) {
-  if (impl_->observer.overview_animating) refresh_overview(&impl_->observer);
-  const auto now = timestamp_ms();
+void CompositorServer::notify_frame_presented(OutputId output, std::uint64_t next_frame_us) {
+  const auto now = next_frame_us != 0 ? next_frame_us : monotonic_us();
+  if (impl_->observer.overview_animating) refresh_overview(&impl_->observer, now);
   if (impl_->observer.camera.is_animating() &&
       (!output || output == impl_->observer.camera_output)) {
     auto* state = output_state(&impl_->observer, impl_->observer.camera_output);
@@ -4405,7 +4432,7 @@ bool CompositorServer::pointer_pan_motion(double dx, double dy) {
   }
   auto& viewport = output->canvas_viewports[output->active_tag - 1];
   const Rect work = output_work(&observer, output->info.id);
-  if (observer.camera.pan_by(viewport, work.width, work.height, dx, dy, timestamp_ms())) {
+  if (observer.camera.pan_by(viewport, work.width, work.height, dx, dy, monotonic_us())) {
     configure_canvas_frame(&observer, output->info.id);
     if (observer.event_callback != nullptr) observer.event_callback(observer.event_data, "camera");
   }
@@ -4493,7 +4520,7 @@ void CompositorServer::pointer_motion_global(std::uint32_t time, std::int32_t x,
       const double dx = static_cast<double>(x) - impl_->seat_state.pointer_x;
       const double dy = static_cast<double>(y) - impl_->seat_state.pointer_y;
       const Rect work = output_work(&observer, output->info.id);
-      if (observer.camera.pan_by(viewport, work.width, work.height, dx, dy, timestamp_ms())) {
+      if (observer.camera.pan_by(viewport, work.width, work.height, dx, dy, monotonic_us())) {
         configure_canvas_frame(&observer, output->info.id);
         if (observer.event_callback != nullptr) observer.event_callback(observer.event_data, "camera");
       }
@@ -4580,9 +4607,17 @@ void CompositorServer::pointer_motion_global(std::uint32_t time, std::int32_t x,
         bounds.x = impl_->seat_state.interactive_start.x + impl_->seat_state.interactive_start.width - bounds.width;
       if ((edge & protocol::XDG_TOPLEVEL_RESIZE_EDGE_TOP) != 0)
         bounds.y = impl_->seat_state.interactive_start.y + impl_->seat_state.interactive_start.height - bounds.height;
-      xdg->floating_bounds = position_window(bounds, work);
-      xdg->last_floating_bounds = xdg->floating_bounds;
-      configure_layout(&impl_->observer, xdg);
+      if (edge == protocol::XDG_TOPLEVEL_RESIZE_EDGE_NONE) {
+        xdg->floating_bounds = position_window(bounds, work);
+        xdg->last_floating_bounds = xdg->floating_bounds;
+        configure_layout(&impl_->observer, xdg);
+      } else {
+        // Only request the size; the commit moves the frame once the buffer matches.
+        const auto content = impl_->config->content_bounds(
+            {{bounds.x, bounds.y}, {static_cast<std::uint32_t>(bounds.width), static_cast<std::uint32_t>(bounds.height)}});
+        send_configure(xdg, static_cast<std::int32_t>(content.size.width),
+                       static_cast<std::int32_t>(content.size.height), xdg->configured_states);
+      }
       }
     }
 #ifdef ZWWM_XWAYLAND
@@ -4702,7 +4737,7 @@ void CompositorServer::pointer_button(std::uint32_t time, std::uint32_t button, 
   if (impl_->observer.overview_visible) {
     if (state == protocol::WL_POINTER_BUTTON_STATE_PRESSED) {
       seat.consumed_buttons.push_back(button);
-      if (button == BTN_LEFT && impl_->observer.overview && !impl_->observer.overview_motion.active(overview_time_ms())) {
+      if (button == BTN_LEFT && impl_->observer.overview && !impl_->observer.overview_motion.active(monotonic_us())) {
         for (const auto& output : impl_->outputs) {
           const auto& info = output->info;
           const auto contains = [&seat](renderer::Rect rect) {
@@ -4971,7 +5006,7 @@ void CompositorServer::pointer_button(std::uint32_t time, std::uint32_t button, 
             ? protocol::XDG_TOPLEVEL_RESIZE_EDGE_LEFT : protocol::XDG_TOPLEVEL_RESIZE_EDGE_RIGHT;
         if (begin_external_tiled_resize(&impl_->observer, top, xdg->output, xdg->tile_bounds, edge, 0, button)) return;
       }
-      if (impl_->observer.external_layout) set_floating(xdg, true);
+      if (impl_->observer.external_layout) { float_in_place(xdg); set_floating(xdg, true); }
       if (seat.keyboard_focus != top) set_keyboard_focus(&seat, top);
       seat.compositor_interactive = true;
       seat.interactive_button = button;
@@ -5248,7 +5283,7 @@ void CompositorServer::keyboard_key_from_source(std::uint64_t source, std::uint3
     seat.consumed_keys.push_back(key);
     if (!impl_->observer.overview && key != KEY_ESC) return;
     if (impl_->config->overview_stack_master && (key == KEY_UP || key == KEY_DOWN)) return;
-    if (key >= KEY_1 && key <= KEY_9 && impl_->observer.overview_motion.active(overview_time_ms())) return;
+    if (key >= KEY_1 && key <= KEY_9 && impl_->observer.overview_motion.active(monotonic_us())) return;
     if (key == KEY_ESC) update_overview(&impl_->observer, false);
     else if (key == KEY_UP || key == KEY_DOWN) {
       impl_->observer.overview_first_tag = std::clamp(impl_->observer.overview_first_tag + (key == KEY_DOWN ? 1 : -1), 0.0, 6.0);

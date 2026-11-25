@@ -288,6 +288,8 @@ struct RuntimeBackend::DrmOutput {
   int pending_buffer = -1;
   bool flip_pending = false;
   bool needs_repaint = false;
+  // CLOCK_MONOTONIC time of the last completed flip, from the DRM event.
+  std::uint64_t last_vblank_us = 0;
   std::uint32_t scanout_bit_depth = 8;
   AnimationSystem animations;
   renderer::TextureRef cursor_texture;
@@ -578,10 +580,9 @@ const std::string& RuntimeBackend::last_error() const { return last_error_; }
 void RuntimeBackend::set_config(std::shared_ptr<const RuntimeConfig> config) {
   if (config == nullptr) return;
   config_ = std::move(config);
-  const std::uint64_t now = monotonic_ms();
   for (auto& device : devices_) for (auto& output : device->outputs) {
     output->capture_ready = false;
-    output->animations.set_config(config_->animations, now);
+    output->animations.set_config(config_->animations, presentation_time_us(*output));
     const auto& configured = config_->output_for(output->output.connector);
     const auto logical = configured.logical_size({static_cast<std::uint32_t>(output->mode.hdisplay),
                                                    static_cast<std::uint32_t>(output->mode.vdisplay)});
@@ -974,7 +975,7 @@ void RuntimeBackend::present(const ShmBufferView& buffer) {
     if (buffer.tag_transition) {
       if (buffer.tag_transition_ready) {
         card->tag_transition_preparing = false;
-        card->animations.start_tag_transition(buffer.tag_transition_direction, monotonic_ms());
+        card->animations.start_tag_transition(buffer.tag_transition_direction, presentation_time_us(*card));
         repaint(*card);
         continue;
       }
@@ -1560,13 +1561,32 @@ void RuntimeBackend::dispatch_libinput() {
 void RuntimeBackend::dispatch_drm(DrmDevice& device) {
   drmEventContext events{};
   events.version = DRM_EVENT_CONTEXT_VERSION;
-  events.page_flip_handler = [](int, unsigned int, unsigned int, unsigned int, void* data) {
+  events.page_flip_handler = [](int, unsigned int, unsigned int sec, unsigned int usec, void* data) {
     auto* output = static_cast<DrmOutput*>(data);
+    output->last_vblank_us = std::uint64_t{sec} * 1000000U + usec;
     output->device->backend->page_flip_complete(*output);
   };
   if (drmHandleEvent(device.fd, &events) != 0) {
     std::fprintf(stderr, "zwwm: failed to dispatch DRM event for %s\n", device.path.c_str());
   }
+}
+
+// Vblank after the one that just completed a flip, 0 when the timing is unknown.
+std::uint64_t RuntimeBackend::next_vblank_us(const DrmOutput& card) {
+  const auto millihz = card.output.refresh_millihz;
+  if (card.last_vblank_us == 0 || millihz == 0) return 0;
+  return card.last_vblank_us + 1000000000ULL / millihz;
+}
+
+// A frame rendered now is shown at the next vblank; animating to that instant keeps steps even.
+std::uint64_t RuntimeBackend::presentation_time_us(const DrmOutput& card) {
+  const auto now = monotonic_us();
+  const auto millihz = card.output.refresh_millihz;
+  if (card.last_vblank_us == 0 || millihz == 0 || card.last_vblank_us > now ||
+      now - card.last_vblank_us > 1000000U) return now;
+  const std::uint64_t period = 1000000000ULL / millihz;
+  if (period == 0) return now;
+  return card.last_vblank_us + ((now - card.last_vblank_us) / period + 1) * period;
 }
 
 void RuntimeBackend::repaint(DrmOutput& card) {
@@ -1580,8 +1600,8 @@ void RuntimeBackend::repaint(DrmOutput& card) {
   frame.draw_background = true;
   frame.damage.push_back({{0, 0}, {static_cast<std::uint32_t>(card.mode.hdisplay), static_cast<std::uint32_t>(card.mode.vdisplay)}});
   const renderer::Size physical{static_cast<std::uint32_t>(card.mode.hdisplay), static_cast<std::uint32_t>(card.mode.vdisplay)};
-  const std::uint64_t now = monotonic_ms();
-  frame.shader_time = static_cast<float>(now % 1000000U) / 1000.0F;
+  const std::uint64_t now = presentation_time_us(card);
+  frame.shader_time = static_cast<float>(now % 1000000000U) / 1000000.0F;
   frame.overview_backdrop = card.overview;
   frame.overview_backdrop_opacity = static_cast<float>(card.overview_progress);
   frame.overview_backdrop_blur_radius = config_->overview_backdrop_blur_radius;
@@ -1627,9 +1647,13 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     } else ++it;
   }
   std::vector<layout::Placement> placements;
+  std::unordered_map<std::uint64_t, renderer::FloatRect> precise_bounds;
   for (const auto id : card.animations.retained_ids()) {
     const auto sample = card.animations.sample(id, now);
-    if (sample) placements.push_back({id, sample->bounds});
+    if (sample) {
+      placements.push_back({id, sample->bounds});
+      precise_bounds.emplace(id, sample->precise);
+    }
   }
   const auto apply_blur_parameters = [&](renderer::DrawCall& draw, std::string_view shader = {}) {
     draw.background_blur_passes = static_cast<std::uint32_t>(std::clamp(
@@ -1672,8 +1696,10 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     renderer::Rect tag_bounds;
     if (placement != placements.end()) tag_bounds = placement->bounds;
     else continue;
-    const auto tag_root = tag ? transform_tag_root(tag_bounds, card.output.logical_width, card.output.logical_height, *tag, root->tag_outgoing)
-                               : TagRootSample{tag_bounds, 1.0F};
+    const auto precise_root = precise_bounds.find(surface.root_id);
+    const renderer::FloatRect root_bounds = precise_root == precise_bounds.end() ? renderer::FloatRect(tag_bounds) : precise_root->second;
+    const auto tag_root = tag ? transform_tag_root(root_bounds, card.output.logical_width, card.output.logical_height, *tag, root->tag_outgoing)
+                               : TagRootSample{tag_bounds, root_bounds, 1.0F};
     tag_bounds = tag_root.bounds;
     const float decoration_scale = animated_decoration_scale(*root, tag_bounds);
     const float border_width = config_->border_width() * decoration_scale;
@@ -1708,6 +1734,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
               (animation ? animation->opacity : 1.0F) * tag_root.opacity * surface.compositor_opacity, state,
               frame.shader_time)) {
         backend_scene::camera_geometry(*shadow, *root, surface, tag_bounds);
+        backend_scene::subpixel_geometry(*shadow, tag_bounds, tag_root.precise);
         if (root->layer_priority == 0) {
           if (!tiled_shadows_at) tiled_shadows_at = frame.draws.size();
           tiled_shadows.push_back(std::move(*shadow));
@@ -1738,6 +1765,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     frame.draws.back().background_blur_radius = static_cast<float>(surface.background_blur_radius);
     apply_blur_parameters(frame.draws.back(), surface.window_shader);
     backend_scene::camera_geometry(frame.draws.back(), *root, surface, tag_bounds);
+    backend_scene::subpixel_geometry(frame.draws.back(), tag_bounds, tag_root.precise);
     if (root_surface && !root->fullscreen && std::lround(border_width) > 0) backend_scene::extend_under_border(frame.draws.back());
     if (card.overview && !backend_scene::overview_draw_visible(frame.draws.back(),
         {{card.output.logical_x, card.output.logical_y}, {card.output.logical_width, card.output.logical_height}})) frame.draws.pop_back();
@@ -1749,6 +1777,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
         border->shader_name = surface.border_shader;
         border->toplevel_id = surface.root_id;
         backend_scene::camera_geometry(*border, *root, surface, tag_bounds);
+        backend_scene::subpixel_geometry(*border, tag_bounds, tag_root.precise);
         frame.draws.push_back(std::move(*border));
       }
     }
@@ -1785,7 +1814,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
   transform_frame(cursor_frame, output_config, physical, logical_origin);
 
   if (!card.overview && !tag && !continue_animation && !error_popup_visible_ && cursor_frame.draws.empty() &&
-      !card.needs_modeset && now - last_capture_ms_ > 2000U && try_direct_scanout(card)) return;
+      !card.needs_modeset && monotonic_ms() - last_capture_ms_ > 2000U && try_direct_scanout(card)) return;
   int next = -1;
   for (int index = 0; index < static_cast<int>(card.scanout.size()); ++index)
     if (index != card.front_buffer && index != card.pending_buffer) { next = index; break; }
@@ -1817,7 +1846,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     if (!commit_atomic_output(card, buffer.framebuffer, true)) return;
     card.front_buffer = next;
     card.needs_modeset = false;
-    if (input_target_ != nullptr) input_target_->notify_frame_presented(card.output.id);
+    if (input_target_ != nullptr) input_target_->notify_frame_presented(card.output.id, presentation_time_us(card));
     if (continue_animation || card.needs_repaint) repaint(card);
     return;
   }
@@ -1860,7 +1889,7 @@ void RuntimeBackend::page_flip_complete(DrmOutput& card) {
                    std::strerror(errno));
     return;
   }
-  if (input_target_ != nullptr) input_target_->notify_frame_presented(card.output.id);
+  if (input_target_ != nullptr) input_target_->notify_frame_presented(card.output.id, next_vblank_us(card));
   if (card.needs_repaint) repaint(card);
   if (card.cursor_dirty) update_cursor(card);
 }

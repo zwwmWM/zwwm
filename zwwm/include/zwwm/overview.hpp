@@ -11,22 +11,23 @@
 
 namespace zwwm {
 
-inline std::uint64_t overview_time_ms() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now().time_since_epoch()).count();
+// Steady-clock microseconds, shared by every compositor-side animation clock.
+inline std::uint64_t monotonic_us() {
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 struct OverviewMotion {
   double from = 0, target = 0;
-  std::uint64_t started = 0;
-  std::uint32_t duration = 0;
+  std::uint64_t started = 0;  // microseconds
+  std::uint32_t duration = 0;  // milliseconds
 
   bool active(std::uint64_t now) const {
-    return duration != 0 && from != target && (now < started || now - started < duration);
+    return duration != 0 && from != target && (now < started || now - started < std::uint64_t{duration} * 1000U);
   }
   double sample(std::uint64_t now) const {
     if (!active(now)) return target;
-    const double t = now <= started ? 0 : std::clamp(static_cast<double>(now - started) / duration, 0.0, 1.0);
+    const double t = now <= started ? 0 : std::clamp(static_cast<double>(now - started) / (duration * 1000.0), 0.0, 1.0);
     // A critically damped response, normalized to settle exactly at the endpoint.
     const double eased = (1 - (1 + 8 * t) * std::exp(-8 * t)) / (1 - 9 * std::exp(-8.0));
     return from + (target - from) * eased;

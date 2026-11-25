@@ -13,8 +13,10 @@ bool same_rect(const renderer::Rect& left, const renderer::Rect& right) {
          left.size.width == right.size.width && left.size.height == right.size.height;
 }
 
-bool duration_expired(std::uint64_t started_ms, std::uint32_t duration_ms, std::uint64_t now_ms) {
-  return now_ms >= started_ms && now_ms - started_ms >= duration_ms;
+constexpr double kMicrosPerMilli = 1000.0;
+
+bool duration_expired(std::uint64_t started_us, std::uint32_t duration_ms, std::uint64_t now_us) {
+  return now_us >= started_us && now_us - started_us >= std::uint64_t{duration_ms} * 1000U;
 }
 
 std::int32_t rounded_coordinate(double value) {
@@ -28,19 +30,16 @@ std::uint32_t rounded_dimension(double value) {
       std::round(value), 1.0, static_cast<double>(std::numeric_limits<std::int32_t>::max())));
 }
 
-renderer::Rect scaled(renderer::Rect bounds, double scale) {
-  const double width = static_cast<double>(bounds.size.width) * scale;
-  const double height = static_cast<double>(bounds.size.height) * scale;
-  return {{rounded_coordinate(bounds.origin.x + (bounds.size.width - width) * 0.5),
-           rounded_coordinate(bounds.origin.y + (bounds.size.height - height) * 0.5)},
-          {rounded_dimension(width), rounded_dimension(height)}};
+renderer::FloatRect scaled(renderer::FloatRect bounds, double scale) {
+  const double width = bounds.size.width * scale;
+  const double height = bounds.size.height * scale;
+  return {{bounds.origin.x + (bounds.size.width - width) * 0.5, bounds.origin.y + (bounds.size.height - height) * 0.5},
+          {width, height}};
 }
 
-renderer::Rect transformed(renderer::Rect bounds, double scale, double offset_y) {
-  bounds = scaled(bounds, scale);
-  const double y = static_cast<double>(bounds.origin.y) + offset_y;
-  bounds.origin.y = rounded_coordinate(y);
-  return bounds;
+renderer::Rect rounded(const renderer::FloatRect& rect) {
+  return {{rounded_coordinate(rect.origin.x), rounded_coordinate(rect.origin.y)},
+          {rounded_dimension(rect.size.width), rounded_dimension(rect.size.height)}};
 }
 
 std::array<double, 4> coordinates(renderer::Rect rect) {
@@ -61,10 +60,10 @@ renderer::Rect interpolate(const std::array<double, 4>& from, renderer::Rect to,
           {rounded_dimension(values[2]), rounded_dimension(values[3])}};
 }
 
-double tracking_progress(std::uint64_t started_ms, std::uint64_t now_ms) {
+double tracking_progress(std::uint64_t started_us, std::uint64_t now_us) {
   constexpr double rate_per_second = 12.5;
-  if (now_ms <= started_ms) return 0.0;
-  const double elapsed = static_cast<double>(now_ms - started_ms) / 1000.0;
+  if (now_us <= started_us) return 0.0;
+  const double elapsed = static_cast<double>(now_us - started_us) / 1000000.0;
   return 1.0 - std::exp(-rate_per_second * elapsed);
 }
 
@@ -90,17 +89,17 @@ double bezier_progress(double elapsed, const AnimationConfig& config) {
 
 AnimationSystem::AnimationSystem(AnimationConfig config) : config_(config) {}
 
-void AnimationSystem::set_config(AnimationConfig config, std::uint64_t now_ms) {
+void AnimationSystem::set_config(AnimationConfig config, std::uint64_t now_us) {
   if (config == config_) return;
   for (auto& [id, state] : states_) {
     (void)id;
-    state.from = interpolate_values(state.from, state.target, progress(state, now_ms));
-    const float presence_amount = presence_progress(state, now_ms);
-    state.from_opacity += (state.target_opacity - state.from_opacity) * presence_progress(state, now_ms, true);
+    state.from = interpolate_values(state.from, state.target, progress(state, now_us));
+    const float presence_amount = presence_progress(state, now_us);
+    state.from_opacity += (state.target_opacity - state.from_opacity) * presence_progress(state, now_us, true);
     state.from_scale += (state.target_scale - state.from_scale) * presence_amount;
     state.from_offset += (state.target_offset - state.from_offset) * presence_amount;
-    state.started_ms = now_ms;
-    state.presence_started_ms = now_ms;
+    state.started_us = now_us;
+    state.presence_started_us = now_us;
   }
   config_ = config;
   if (!config_.enabled || config_.duration_ms == 0) {
@@ -120,12 +119,12 @@ void AnimationSystem::set_config(AnimationConfig config, std::uint64_t now_ms) {
   }
 }
 
-void AnimationSystem::prune(std::uint64_t now_ms) {
+void AnimationSystem::prune(std::uint64_t now_us) {
   for (auto it = states_.begin(); it != states_.end();) {
     auto& state = it->second;
     if (state.presence != Presence::steady &&
-        duration_expired(state.presence_started_ms,
-                         std::max(presence_duration(state), presence_duration(state, true)), now_ms)) {
+        duration_expired(state.presence_started_us,
+                         std::max(presence_duration(state), presence_duration(state, true)), now_us)) {
       if (!state.present) { it = states_.erase(it); continue; }
       state.from_opacity = state.target_opacity;
       state.from_scale = state.target_scale;
@@ -133,12 +132,12 @@ void AnimationSystem::prune(std::uint64_t now_ms) {
       state.presence = Presence::steady;
     }
     if (it->second.transition == Transition::tracking &&
-        same_rect(interpolate(state.from, state.target, progress(state, now_ms)), state.target)) {
+        same_rect(interpolate(state.from, state.target, progress(state, now_us)), state.target)) {
       it->second.from = coordinates(it->second.target);
       it->second.transition = Transition::idle;
     } else if (it->second.transition == Transition::resizing &&
-        duration_expired(it->second.started_ms,
-                         config_.move_duration_ms ? config_.move_duration_ms : config_.duration_ms, now_ms)) {
+        duration_expired(it->second.started_us,
+                         config_.move_duration_ms ? config_.move_duration_ms : config_.duration_ms, now_us)) {
       it->second.from = coordinates(it->second.target);
       it->second.transition = Transition::idle;
     }
@@ -146,8 +145,8 @@ void AnimationSystem::prune(std::uint64_t now_ms) {
   }
 }
 
-void AnimationSystem::update(std::span<const AnimationTarget> targets, std::uint64_t now_ms) {
-  prune(now_ms);
+void AnimationSystem::update(std::span<const AnimationTarget> targets, std::uint64_t now_us) {
+  prune(now_us);
   std::unordered_set<std::uint64_t> present;
   present.reserve(targets.size());
   for (const auto& target : targets) {
@@ -160,27 +159,27 @@ void AnimationSystem::update(std::span<const AnimationTarget> targets, std::uint
         state.from_scale = config_.open_scale_per_mille / 1000.0;
         state.from_offset = config_.open_offset_px;
         state.from_opacity = 0.0F;
-        state.presence_started_ms = now_ms;
+        state.presence_started_us = now_us;
         state.presence = Presence::opening;
       }
       states_.emplace(target.id, state);
       continue;
     }
     State& state = item->second;
-    const auto current_bounds = interpolate_values(state.from, state.target, progress(state, now_ms));
+    const auto current_bounds = interpolate_values(state.from, state.target, progress(state, now_us));
     const bool changed = !same_rect(state.target, target.bounds);
     const bool returning = !state.present;
     state.present = true;
     state.target = target.bounds;
     if (returning) {
-      const float amount = presence_progress(state, now_ms);
-      state.from_opacity += (state.target_opacity - state.from_opacity) * presence_progress(state, now_ms, true);
+      const float amount = presence_progress(state, now_us);
+      state.from_opacity += (state.target_opacity - state.from_opacity) * presence_progress(state, now_us, true);
       state.from_scale += (state.target_scale - state.from_scale) * amount;
       state.from_offset += (state.target_offset - state.from_offset) * amount;
       state.target_opacity = 1.0F;
       state.target_scale = 1.0;
       state.target_offset = 0.0;
-      state.presence_started_ms = now_ms;
+      state.presence_started_us = now_us;
       state.presence = Presence::opening;
       if (!target.animate_presence || !config_.enabled || config_.duration_ms == 0) {
         state.from_opacity = 1.0F;
@@ -200,7 +199,7 @@ void AnimationSystem::update(std::span<const AnimationTarget> targets, std::uint
       state.transition = Transition::idle;
     } else if (target.track && (changed || state.transition != Transition::tracking)) {
       state.from = current_bounds;
-      state.started_ms = now_ms;
+      state.started_us = now_us;
       state.transition = Transition::tracking;
     } else if (returning && !target.animate_presence) {
       state.from = coordinates(target.bounds);
@@ -209,7 +208,7 @@ void AnimationSystem::update(std::span<const AnimationTarget> targets, std::uint
                ((changed && config_.resize && target.animate) ||
                 (returning && target.animate_presence))) {
       state.from = current_bounds;
-      state.started_ms = now_ms;
+      state.started_us = now_us;
       state.transition = Transition::resizing;
     } else if (changed || returning) {
       state.from = coordinates(target.bounds);
@@ -223,49 +222,52 @@ void AnimationSystem::update(std::span<const AnimationTarget> targets, std::uint
       it = states_.erase(it);
       continue;
     }
-    const auto current_bounds = interpolate(state.from, state.target, progress(state, now_ms));
-    const float amount = presence_progress(state, now_ms);
+    const auto current_bounds = interpolate(state.from, state.target, progress(state, now_us));
+    const float amount = presence_progress(state, now_us);
     state.present = false;
     state.from = coordinates(current_bounds);
     state.target = current_bounds;
     state.transition = Transition::idle;
-    state.from_opacity += (state.target_opacity - state.from_opacity) * presence_progress(state, now_ms, true);
+    state.from_opacity += (state.target_opacity - state.from_opacity) * presence_progress(state, now_us, true);
     state.from_scale += (state.target_scale - state.from_scale) * amount;
     state.from_offset += (state.target_offset - state.from_offset) * amount;
     state.target_opacity = 0.0F;
     state.target_scale = config_.close_scale_per_mille / 1000.0;
     state.target_offset = -static_cast<double>(config_.close_offset_px);
-    state.presence_started_ms = now_ms;
+    state.presence_started_us = now_us;
     state.presence = Presence::closing;
     ++it;
   }
 }
 
-float AnimationSystem::progress(const State& state, std::uint64_t now_ms) const {
+float AnimationSystem::progress(const State& state, std::uint64_t now_us) const {
   if (state.transition == Transition::idle || !config_.enabled || config_.duration_ms == 0) return 1.0F;
   if (state.transition == Transition::tracking)
-    return static_cast<float>(tracking_progress(state.started_ms, now_ms));
-  return progress(state.started_ms, config_.move_duration_ms ? config_.move_duration_ms : config_.duration_ms, now_ms);
+    return static_cast<float>(tracking_progress(state.started_us, now_us));
+  return progress(state.started_us, config_.move_duration_ms ? config_.move_duration_ms : config_.duration_ms, now_us);
 }
 
-float AnimationSystem::progress(std::uint64_t started_ms, std::uint32_t duration_ms,
-                                std::uint64_t now_ms) const {
+float AnimationSystem::progress(std::uint64_t started_us, std::uint32_t duration_ms,
+                                std::uint64_t now_us) const {
   if (!config_.enabled || duration_ms == 0) return 1.0F;
-  if (now_ms <= started_ms) return 0.0F;
-  const double elapsed = std::clamp(static_cast<double>(now_ms - std::min(now_ms, started_ms)) /
-                                        static_cast<double>(duration_ms),
+  if (now_us <= started_us) return 0.0F;
+  const double elapsed = std::clamp(static_cast<double>(now_us - std::min(now_us, started_us)) /
+                                        (static_cast<double>(duration_ms) * kMicrosPerMilli),
                                     0.0, 1.0);
   if (elapsed >= 1.0) return 1.0F;
   return static_cast<float>(bezier_progress(elapsed, config_));
 }
 
-AnimationSample AnimationSystem::sample_state(const State& state, std::uint64_t now_ms) const {
-  const float amount = progress(state, now_ms);
-  const float presence_amount = presence_progress(state, now_ms);
-  const float opacity_amount = presence_progress(state, now_ms, true);
+AnimationSample AnimationSystem::sample_state(const State& state, std::uint64_t now_us) const {
+  const float amount = progress(state, now_us);
+  const float presence_amount = presence_progress(state, now_us);
+  const float opacity_amount = presence_progress(state, now_us, true);
   const double scale = state.from_scale + (state.target_scale - state.from_scale) * presence_amount;
   const double offset = state.from_offset + (state.target_offset - state.from_offset) * presence_amount;
-  return {transformed(interpolate(state.from, state.target, amount), scale, offset),
+  const auto values = interpolate_values(state.from, state.target, amount);
+  auto precise = scaled(renderer::FloatRect{{values[0], values[1]}, {std::max(1.0, values[2]), std::max(1.0, values[3])}}, scale);
+  precise.origin.y += offset;
+  return {rounded(precise), precise,
           std::clamp(state.from_opacity + (state.target_opacity - state.from_opacity) * opacity_amount, 0.0F, 1.0F),
           !state.present};
 }
@@ -276,32 +278,32 @@ std::uint32_t AnimationSystem::presence_duration(const State& state, bool fade) 
   return duration ? duration : config_.duration_ms;
 }
 
-float AnimationSystem::presence_progress(const State& state, std::uint64_t now_ms, bool fade) const {
+float AnimationSystem::presence_progress(const State& state, std::uint64_t now_us, bool fade) const {
   if (state.presence == Presence::steady || !config_.enabled || config_.duration_ms == 0) return 1.0F;
-  const double elapsed = static_cast<double>(now_ms - std::min(now_ms, state.presence_started_ms)) /
-                          presence_duration(state, fade);
+  const double elapsed = static_cast<double>(now_us - std::min(now_us, state.presence_started_us)) /
+                          (presence_duration(state, fade) * kMicrosPerMilli);
   if (elapsed >= 1.0) return 1.0F;
   if (elapsed <= 0.0) return 0.0F;
   return static_cast<float>(bezier_progress(elapsed, config_));
 }
 
-std::optional<AnimationSample> AnimationSystem::sample(std::uint64_t id, std::uint64_t now_ms) const {
+std::optional<AnimationSample> AnimationSystem::sample(std::uint64_t id, std::uint64_t now_us) const {
   const auto item = states_.find(id);
-  return item == states_.end() ? std::nullopt : std::optional<AnimationSample>{sample_state(item->second, now_ms)};
+  return item == states_.end() ? std::nullopt : std::optional<AnimationSample>{sample_state(item->second, now_us)};
 }
 
-bool AnimationSystem::active(std::uint64_t now_ms) const {
-  if (tag_transition(now_ms).has_value()) return true;
-  return std::any_of(states_.begin(), states_.end(), [this, now_ms](const auto& item) {
+bool AnimationSystem::active(std::uint64_t now_us) const {
+  if (tag_transition(now_us).has_value()) return true;
+  return std::any_of(states_.begin(), states_.end(), [this, now_us](const auto& item) {
     if (item.second.presence != Presence::steady &&
-        !duration_expired(item.second.presence_started_ms,
-                          std::max(presence_duration(item.second), presence_duration(item.second, true)), now_ms)) return true;
+        !duration_expired(item.second.presence_started_us,
+                          std::max(presence_duration(item.second), presence_duration(item.second, true)), now_us)) return true;
     if (item.second.transition == Transition::tracking)
-      return !same_rect(interpolate(item.second.from, item.second.target, progress(item.second, now_ms)),
+      return !same_rect(interpolate(item.second.from, item.second.target, progress(item.second, now_us)),
                         item.second.target);
     return item.second.transition != Transition::idle &&
-            !duration_expired(item.second.started_ms,
-                              config_.move_duration_ms ? config_.move_duration_ms : config_.duration_ms, now_ms);
+            !duration_expired(item.second.started_us,
+                              config_.move_duration_ms ? config_.move_duration_ms : config_.duration_ms, now_us);
   });
 }
 
@@ -314,14 +316,14 @@ std::vector<std::uint64_t> AnimationSystem::retained_ids() const {
   return ids;
 }
 
-void AnimationSystem::start_tag_transition(int direction, std::uint64_t now_ms) {
-  tag_transition_ = std::pair{direction < 0 ? -1 : 1, now_ms};
+void AnimationSystem::start_tag_transition(int direction, std::uint64_t now_us) {
+  tag_transition_ = std::pair{direction < 0 ? -1 : 1, now_us};
 }
 
-std::optional<TagTransitionSample> AnimationSystem::tag_transition(std::uint64_t now_ms) const {
+std::optional<TagTransitionSample> AnimationSystem::tag_transition(std::uint64_t now_us) const {
   if (!tag_transition_ || !config_.enabled || config_.tag_duration_ms == 0) return std::nullopt;
-  if (duration_expired(tag_transition_->second, config_.tag_duration_ms, now_ms)) return std::nullopt;
-  const float amount = std::clamp(progress(tag_transition_->second, config_.tag_duration_ms, now_ms),
+  if (duration_expired(tag_transition_->second, config_.tag_duration_ms, now_us)) return std::nullopt;
+  const float amount = std::clamp(progress(tag_transition_->second, config_.tag_duration_ms, now_us),
                                   0.0F, 1.0F);
   return TagTransitionSample{tag_transition_->first, amount, config_.tag_scale_per_mille,
                              config_.tag_parallax_per_mille, config_.tag_fade_per_mille,
@@ -329,6 +331,12 @@ std::optional<TagTransitionSample> AnimationSystem::tag_transition(std::uint64_t
 }
 
 TagRootSample transform_tag_root(renderer::Rect bounds, std::uint32_t output_width,
+                                 std::uint32_t output_height,
+                                 const TagTransitionSample& transition, bool outgoing) {
+  return transform_tag_root(renderer::FloatRect(bounds), output_width, output_height, transition, outgoing);
+}
+
+TagRootSample transform_tag_root(renderer::FloatRect bounds, std::uint32_t output_width,
                                  std::uint32_t output_height,
                                  const TagTransitionSample& transition, bool outgoing) {
   const double progress = std::clamp(static_cast<double>(transition.progress), 0.0, 1.0);
@@ -341,11 +349,10 @@ TagRootSample transform_tag_root(renderer::Rect bounds, std::uint32_t output_wid
                             ? -transition.direction * progress * extent *
                                   (transition.parallax_per_mille / 1000.0)
                             : transition.direction * (1.0 - progress) * extent;
-  auto& coordinate = transition.axis == TagTransitionAxis::vertical ? bounds.origin.y : bounds.origin.x;
-  coordinate = rounded_coordinate(static_cast<double>(coordinate) + travel);
+  (transition.axis == TagTransitionAxis::vertical ? bounds.origin.y : bounds.origin.x) += travel;
   const double fade = transition.fade_per_mille / 1000.0;
   const double opacity = outgoing ? 1.0 - fade * progress : 1.0 - fade * (1.0 - progress);
-  return {bounds, static_cast<float>(std::clamp(opacity, 0.0, 1.0))};
+  return {rounded(bounds), bounds, static_cast<float>(std::clamp(opacity, 0.0, 1.0))};
 }
 
 void AnimationSystem::remove(std::uint64_t id) { states_.erase(id); }

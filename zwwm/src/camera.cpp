@@ -14,6 +14,8 @@ constexpr double kPanFriction = 12.0;
 constexpr double kPanEpsilon = 0.05;
 constexpr double kPanStopSpeed = 4.0;
 constexpr double kPanMaximumSpeed = 3500.0;
+// Assumed previous frame when motion starts from rest.
+constexpr std::uint64_t kFrameUs = 16667;
 
 }  // namespace
 
@@ -28,7 +30,7 @@ void Camera::set_config(const CameraConfig& config) {
 }
 
 bool Camera::zoom_by_steps(layout::CanvasViewport& viewport, std::int32_t width,
-                           std::int32_t height, int steps, std::uint64_t now_ms) {
+                           std::int32_t height, int steps, std::uint64_t now_us) {
   if (steps == 0) return false;
 
   if (pan_coasting_) {
@@ -46,12 +48,12 @@ bool Camera::zoom_by_steps(layout::CanvasViewport& viewport, std::int32_t width,
   }
   zoom_velocity_ = std::clamp(zoom_velocity_ + steps * impulse, -limit, limit);
   animating_ = true;
-  if (last_update_ms_ == 0) last_update_ms_ = now_ms > 16 ? now_ms - 16 : 0;
-  return tick(viewport, width, height, now_ms);
+  if (last_update_us_ == 0) last_update_us_ = now_us > kFrameUs ? now_us - kFrameUs : 0;
+  return tick(viewport, width, height, now_us);
 }
 
 bool Camera::pan_by(layout::CanvasViewport& viewport, std::int32_t width,
-                    std::int32_t height, double dx, double dy, std::uint64_t now_ms) {
+                    std::int32_t height, double dx, double dy, std::uint64_t now_us) {
   if (dx == 0.0 && dy == 0.0) return false;
   // Grabbing a coasting canvas catches it where it is.
   if (pan_coasting_) {
@@ -69,8 +71,8 @@ bool Camera::pan_by(layout::CanvasViewport& viewport, std::int32_t width,
   target_center_y_ -= dy / viewport.scale;
   animating_ = true;
   if (!starting) return false;
-  last_update_ms_ = now_ms > 16 ? now_ms - 16 : 0;
-  return tick(viewport, width, height, now_ms);
+  last_update_us_ = now_us > kFrameUs ? now_us - kFrameUs : 0;
+  return tick(viewport, width, height, now_us);
 }
 
 bool Camera::finish_pan(layout::CanvasViewport& viewport, std::int32_t width,
@@ -92,14 +94,14 @@ bool Camera::finish_pan(layout::CanvasViewport& viewport, std::int32_t width,
 }
 
 bool Camera::tick(layout::CanvasViewport& viewport, std::int32_t width,
-                  std::int32_t height, std::uint64_t now_ms) {
+                  std::int32_t height, std::uint64_t now_us) {
   if (!animating_) return false;
 
-  const double elapsed = now_ms >= last_update_ms_
-      ? static_cast<double>(now_ms - last_update_ms_) / 1000.0
-      : 1.0 / 60.0;
-  const double dt = std::clamp(elapsed, 1.0 / 240.0, 1.0 / 20.0);
-  last_update_ms_ = now_ms;
+  // Frame ticks run at the predicted vblank, input at the current time; never count time twice.
+  const double elapsed = now_us > last_update_us_
+      ? static_cast<double>(now_us - last_update_us_) / 1000000.0 : 0.0;
+  const double dt = std::min(elapsed, 1.0 / 20.0);
+  last_update_us_ = std::max(last_update_us_, now_us);
 
   const double old_scale = std::clamp(viewport.scale, config_.min_zoom, config_.max_zoom);
   const double requested_scale = old_scale * std::exp(zoom_velocity_ * dt);
@@ -138,7 +140,7 @@ bool Camera::tick(layout::CanvasViewport& viewport, std::int32_t width,
   if (zoom_velocity_ == 0.0 && !pan_coasting_ &&
       live_x == target_center_x_ && live_y == target_center_y_) {
     animating_ = false;
-    last_update_ms_ = 0;
+    last_update_us_ = 0;
     pan_coasting_ = false;
   }
   return changed;
@@ -147,7 +149,7 @@ bool Camera::tick(layout::CanvasViewport& viewport, std::int32_t width,
 void Camera::stop() {
   zoom_velocity_ = 0.0;
   pan_velocity_x_ = pan_velocity_y_ = 0.0;
-  last_update_ms_ = 0;
+  last_update_us_ = 0;
   pan_coasting_ = false;
   animating_ = false;
 }
