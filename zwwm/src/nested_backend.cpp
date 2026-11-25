@@ -1088,7 +1088,7 @@ void NestedBackend::repaint_gpu() {
     frame.draws.back().background_blur_radius = static_cast<float>(window.background_blur_radius);
     apply_effect_parameters(frame.draws.back(), window.window_shader);
     backend_scene::camera_geometry(frame.draws.back(), *root, window, tag_bounds);
-    backend_scene::subpixel_geometry(frame.draws.back(), tag_bounds, tag_root.precise);
+    backend_scene::subpixel_geometry(frame.draws.back(), tag_bounds, tag_root.precise, backend_scene::PixelGrid{config_->output_for(kNestedConnector).scale_per_mille / 1000.0, {}});
     if (root_window && !root->fullscreen && std::lround(border_width) > 0) backend_scene::extend_under_border(frame.draws.back());
     if (overview_ && !backend_scene::overview_draw_visible(frame.draws.back(), {{0, 0}, {logical_width_, logical_height_}})) frame.draws.pop_back();
     if (window.toplevel && !root->fullscreen) {

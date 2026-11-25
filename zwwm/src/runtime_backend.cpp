@@ -1765,7 +1765,7 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     frame.draws.back().background_blur_radius = static_cast<float>(surface.background_blur_radius);
     apply_blur_parameters(frame.draws.back(), surface.window_shader);
     backend_scene::camera_geometry(frame.draws.back(), *root, surface, tag_bounds);
-    backend_scene::subpixel_geometry(frame.draws.back(), tag_bounds, tag_root.precise);
+    backend_scene::subpixel_geometry(frame.draws.back(), tag_bounds, tag_root.precise, backend_scene::PixelGrid{output_config.scale_per_mille / 1000.0, {card.output.logical_x, card.output.logical_y}});
     if (root_surface && !root->fullscreen && std::lround(border_width) > 0) backend_scene::extend_under_border(frame.draws.back());
     if (card.overview && !backend_scene::overview_draw_visible(frame.draws.back(),
         {{card.output.logical_x, card.output.logical_y}, {card.output.logical_width, card.output.logical_height}})) frame.draws.pop_back();

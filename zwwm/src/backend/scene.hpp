@@ -105,8 +105,15 @@ inline void transform_geometry(renderer::DrawCall& draw, const OutputConfig& out
   if (draw.geometry->texture) transform(*draw.geometry->texture);
 }
 
+// Pins a surface's pixels to whole physical pixels so text never resamples mid-motion.
+struct PixelGrid {
+  double scale = 1.0;
+  renderer::Point origin{};
+};
+
 // Remaps a draw laid out on rounded root bounds onto the unrounded animation bounds.
-inline void subpixel_geometry(renderer::DrawCall& draw, renderer::Rect from, const renderer::FloatRect& to) {
+inline void subpixel_geometry(renderer::DrawCall& draw, renderer::Rect from, const renderer::FloatRect& to,
+                              std::optional<PixelGrid> content_grid = std::nullopt) {
   if (draw.geometry || from.size.width == 0 || from.size.height == 0) return;
   if (to.origin.x == from.origin.x && to.origin.y == from.origin.y &&
       to.size.width == from.size.width && to.size.height == from.size.height) return;
@@ -121,6 +128,17 @@ inline void subpixel_geometry(renderer::DrawCall& draw, renderer::Rect from, con
                                                             : map(draw.toplevel_bounds);
   if (draw.clip_bounds) geometry.clip = map(*draw.clip_bounds);
   if (draw.texture_bounds) geometry.texture = map(*draw.texture_bounds);
+  if (content_grid) {
+    const double scale = content_grid->scale > 0.0 ? content_grid->scale : 1.0;
+    const auto snap = [&](double value, std::int32_t origin) {
+      return origin + std::round((value - origin) * scale) / scale;
+    };
+    // Content keeps its buffer size; only the frame around it scales fractionally.
+    auto& content = geometry.texture ? *geometry.texture : geometry.bounds;
+    const auto& source = draw.texture_bounds ? *draw.texture_bounds : draw.bounds;
+    content = {{snap(content.origin.x, content_grid->origin.x), snap(content.origin.y, content_grid->origin.y)},
+               {static_cast<double>(source.size.width), static_cast<double>(source.size.height)}};
+  }
   draw.geometry = geometry;
 }
 
