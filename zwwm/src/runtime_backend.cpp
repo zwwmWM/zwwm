@@ -440,6 +440,8 @@ struct RuntimeBackend::DrmDevice {
   std::unordered_map<std::uint64_t, DmabufTexture> dmabuf_textures;
   std::vector<std::unique_ptr<DrmOutput>> outputs;
   std::vector<std::unique_ptr<DrmOutput>> retired_outputs;
+  // A config change waits for in-flight flips so the output is never briefly unpublished.
+  bool rescan_pending = false;
   int source = -1;
 };
 
@@ -582,6 +584,8 @@ void RuntimeBackend::set_config(std::shared_ptr<const RuntimeConfig> config) {
   const bool outputs_changed = config_ == nullptr || config_->output != config->output ||
                                config_->outputs != config->outputs;
   config_ = std::move(config);
+  if (outputs_changed && active_)
+    for (auto& device : devices_) device->rescan_pending = true;
   for (auto& device : devices_) for (auto& output : device->outputs) {
     output->capture_ready = false;
     output->animations.set_config(config_->animations, presentation_time_us(*output));
@@ -596,15 +600,18 @@ void RuntimeBackend::set_config(std::shared_ptr<const RuntimeConfig> config) {
     repaint(*output);
   }
   // Mode and bit-depth changes need new scanouts, so outputs are rebuilt like a hotplug.
-  if (outputs_changed && active_) {
-    for (auto& device : devices_) {
-      if (!select_scanout_format(*device)) continue;
-      rescan_drm_device(*device);
-    }
-    publish_dmabuf_importer();
-    for (auto& device : devices_) for (auto& output : device->outputs) repaint(*output);
-  }
   publish_outputs();
+  for (auto& device : devices_) if (device->rescan_pending) rescan_when_idle(*device);
+}
+void RuntimeBackend::rescan_when_idle(DrmDevice& device) {
+  const auto flipping = [](const auto& output) { return output->flip_pending; };
+  if (std::ranges::any_of(device.outputs, flipping) || std::ranges::any_of(device.retired_outputs, flipping)) return;
+  device.rescan_pending = false;
+  if (!select_scanout_format(device)) return;
+  rescan_drm_device(device);
+  publish_outputs();
+  publish_dmabuf_importer();
+  for (auto& output : device.outputs) repaint(*output);
 }
 bool RuntimeBackend::rebuild_switch_shaders(std::string* error) {
   if (!prepare_config_shaders(*config_, error)) return false;
@@ -1610,7 +1617,10 @@ std::uint64_t RuntimeBackend::presentation_time_us(const DrmOutput& card) {
 
 void RuntimeBackend::repaint(DrmOutput& card) {
   if (!active_ || card.retired || card.powered_off) return;
-  if (card.camera_frame_preparing || card.tag_transition_preparing) { card.needs_repaint = true; return; }
+  if (card.camera_frame_preparing || card.tag_transition_preparing || card.device->rescan_pending) {
+    card.needs_repaint = true;
+    return;
+  }
   auto& device = *card.device;
   const auto& output_config = config_->output_for(card.output.connector);
   if (card.flip_pending) { card.needs_repaint = true; return; }
@@ -1906,10 +1916,19 @@ void RuntimeBackend::page_flip_complete(DrmOutput& card) {
     auto* retired = &card;
     close_drm_output(card);
     std::erase_if(device.retired_outputs, [retired](const auto& output) { return output.get() == retired; });
+    if (device.rescan_pending) {
+      rescan_when_idle(device);
+      return;
+    }
     rescan_drm_device(device);
     publish_outputs();
     publish_dmabuf_importer();
     for (auto& output : device.outputs) repaint(*output);
+    return;
+  }
+  if (device.rescan_pending) {
+    // The rescan may replace this output, so nothing below may touch it afterwards.
+    rescan_when_idle(device);
     return;
   }
   if (card.powered_off) {
