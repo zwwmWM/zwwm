@@ -86,6 +86,7 @@ class RuntimeBackend {
   void suspend_drm_devices();
   void resume_drm_devices();
   void rescan_drm_device(DrmDevice& device);
+  bool select_scanout_format(DrmDevice& device);
   bool initialize_atomic_output(DrmOutput& output, const std::vector<std::uint32_t>& reserved_planes);
   bool create_scanout(DrmOutput& output);
   void create_cursor_plane(DrmOutput& output, const std::vector<std::uint32_t>& reserved_planes);

@@ -122,6 +122,8 @@ struct OutputMode {
   std::uint32_t width = 0;
   std::uint32_t height = 0;
   std::uint32_t refresh_millihz = 0;
+
+  bool operator==(const OutputMode&) const = default;
 };
 
 struct OutputConfig {
@@ -130,6 +132,7 @@ struct OutputConfig {
   std::uint32_t bit_depth = 8;
   OutputTransform transform = OutputTransform::normal;
 
+  bool operator==(const OutputConfig&) const = default;
   [[nodiscard]] renderer::Size logical_size(renderer::Size physical) const;
   [[nodiscard]] renderer::Point logical_to_physical(renderer::Point point, renderer::Size physical) const;
   [[nodiscard]] renderer::Point physical_to_logical(renderer::Point point, renderer::Size physical) const;

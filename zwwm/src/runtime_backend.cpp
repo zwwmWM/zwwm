@@ -579,6 +579,8 @@ bool RuntimeBackend::active() const { return active_; }
 const std::string& RuntimeBackend::last_error() const { return last_error_; }
 void RuntimeBackend::set_config(std::shared_ptr<const RuntimeConfig> config) {
   if (config == nullptr) return;
+  const bool outputs_changed = config_ == nullptr || config_->output != config->output ||
+                               config_->outputs != config->outputs;
   config_ = std::move(config);
   for (auto& device : devices_) for (auto& output : device->outputs) {
     output->capture_ready = false;
@@ -592,6 +594,15 @@ void RuntimeBackend::set_config(std::shared_ptr<const RuntimeConfig> config) {
     output->output.transform = configured.transform;
     output->output.refresh_millihz = mode_refresh_millihz(output->mode);
     repaint(*output);
+  }
+  // Mode and bit-depth changes need new scanouts, so outputs are rebuilt like a hotplug.
+  if (outputs_changed && active_) {
+    for (auto& device : devices_) {
+      if (!select_scanout_format(*device)) continue;
+      rescan_drm_device(*device);
+    }
+    publish_dmabuf_importer();
+    for (auto& device : devices_) for (auto& output : device->outputs) repaint(*output);
   }
   publish_outputs();
 }
@@ -2004,6 +2015,21 @@ void RuntimeBackend::probe_outputs() {
   for (auto& drm_device : devices_) for (auto& output : drm_device->outputs) repaint(*output);
 }
 
+bool RuntimeBackend::select_scanout_format(DrmDevice& device) {
+  const bool wants_ten_bit = config_->output.bit_depth == 10 ||
+      std::any_of(config_->outputs.begin(), config_->outputs.end(), [](const auto& configured) {
+        return configured.second.bit_depth == 10;
+      });
+  if (wants_ten_bit && !device.vulkan->render_modifiers(DRM_FORMAT_XRGB2101010).empty()) {
+    device.scanout_format = DRM_FORMAT_XRGB2101010;
+    device.scanout_bit_depth = 10;
+  } else if (!device.vulkan->render_modifiers(DRM_FORMAT_XRGB8888).empty()) {
+    device.scanout_format = DRM_FORMAT_XRGB8888;
+    device.scanout_bit_depth = 8;
+  } else return false;
+  return true;
+}
+
 void RuntimeBackend::add_drm_device(const char* path) {
   if (!is_drm_card(path) || std::any_of(devices_.begin(), devices_.end(), [path](const auto& device) { return device->path == path; })) {
     return;
@@ -2043,17 +2069,7 @@ void RuntimeBackend::add_drm_device(const char* path) {
     close_drm_device(*device);
     return;
   }
-  const bool wants_ten_bit = config_->output.bit_depth == 10 ||
-      std::any_of(config_->outputs.begin(), config_->outputs.end(), [](const auto& configured) {
-        return configured.second.bit_depth == 10;
-      });
-  if (wants_ten_bit && !device->vulkan->render_modifiers(DRM_FORMAT_XRGB2101010).empty()) {
-    device->scanout_format = DRM_FORMAT_XRGB2101010;
-    device->scanout_bit_depth = 10;
-  } else if (!device->vulkan->render_modifiers(DRM_FORMAT_XRGB8888).empty()) {
-    device->scanout_format = DRM_FORMAT_XRGB8888;
-    device->scanout_bit_depth = 8;
-  } else {
+  if (!select_scanout_format(*device)) {
     std::fprintf(stderr, "zwwm: DRM %s: %s cannot render to any scanout format\n", path,
                  device->vulkan->name().c_str());
     close_drm_device(*device);
@@ -2514,7 +2530,7 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
   for (const auto& output : device.outputs) if (output->flip_pending && output->crtc_index < crtc_count) {
     const auto candidate = std::find_if(candidates.begin(), candidates.end(), [&](const Candidate& item) {
       return item.key == output->connector_key && item.connector_id == output->connector_id &&
-             same_drm_mode(item.mode, output->mode);
+             same_drm_mode(item.mode, output->mode) && output->scanout_bit_depth == device.scanout_bit_depth;
     });
     if (candidate == candidates.end()) crtc_locked[output->crtc_index] = true;
   }
@@ -2523,7 +2539,7 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
     auto& candidate = candidates[index];
     const auto existing = std::find_if(device.outputs.begin(), device.outputs.end(), [&](const auto& output) {
       return output->connector_key == candidate.key && output->connector_id == candidate.connector_id &&
-             same_drm_mode(output->mode, candidate.mode);
+             same_drm_mode(output->mode, candidate.mode) && output->scanout_bit_depth == device.scanout_bit_depth;
     });
     if (existing == device.outputs.end() || (*existing)->crtc_index >= crtc_count || (*existing)->crtc_index >= 32 ||
         (candidate.possible_crtcs & (1U << (*existing)->crtc_index)) == 0 || crtc_locked[(*existing)->crtc_index] ||
@@ -2561,7 +2577,8 @@ void RuntimeBackend::rescan_drm_device(DrmDevice& device) {
     if (candidate.crtc_index == std::numeric_limits<std::uint32_t>::max()) continue;
     const auto existing = std::find_if(device.outputs.begin(), device.outputs.end(), [&](const auto& output) {
       return output != nullptr && output->connector_key == candidate.key && output->connector_id == candidate.connector_id &&
-             output->crtc_index == candidate.crtc_index && same_drm_mode(output->mode, candidate.mode);
+             output->crtc_index == candidate.crtc_index && same_drm_mode(output->mode, candidate.mode) &&
+             output->scanout_bit_depth == device.scanout_bit_depth;
     });
     if (existing != device.outputs.end()) {
       (*existing)->output.modes = candidate.modes;
