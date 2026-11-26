@@ -1,0 +1,85 @@
+protocol zwwm_tags_unstable_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+)";
+
+/// compositor tag state and control
+///
+/// A tag is identified by its stable unsigned integer id. The compositor
+/// sends the complete current tag list followed by done after binding and
+/// after each change to that list. Global visibility is compositor policy.
+interface zwwm_tags_v1 version 1 {
+  request ~destroy();
+
+  /// observe a toplevel's tag membership
+  ///
+  /// The toplevel must be visible to this manager binding.
+  request get_toplevel_tags(object<xdg_toplevel> toplevel);
+
+  /// select tags visible on the focused output
+  ///
+  /// The tags array contains packed uint32 tag ids. An empty array is valid
+  /// and requests that no tagged toplevels are visible.
+  request set_active_tags(
+    array tags  ///< packed uint32 tag ids
+  );
+
+  /// replace a toplevel's tag membership
+  ///
+  /// The tags array contains packed uint32 tag ids. The compositor validates
+  /// ids before applying the complete replacement.
+  request set_toplevel_tags(
+    object<xdg_toplevel> toplevel,
+    array tags                      ///< packed uint32 tag ids
+  );
+
+  /// a tag exists
+  ///
+  /// Tag ids are never reused for the lifetime of this manager binding.
+  event tag(
+    uint id,     ///< stable tag id
+    string name  ///< user-visible tag name
+  );
+
+  event tag_removed(
+    uint id  ///< removed tag id
+  );
+
+  /// end of an atomic tag-list update
+  event done();
+
+  event active_tags(
+    array tags  ///< packed uint32 tag ids
+  );
+
+  /// complete membership replacement for one toplevel
+  ///
+  /// The tags array contains packed uint32 tag ids in compositor-defined
+  /// order.
+  event toplevel_tags(
+    object<xdg_toplevel> toplevel,
+    array tags                      ///< packed uint32 tag ids
+  );
+
+  /// the observed toplevel was destroyed
+  event toplevel_closed(object<xdg_toplevel> toplevel);
+}

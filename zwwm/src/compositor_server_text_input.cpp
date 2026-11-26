@@ -4,7 +4,6 @@
 #include <text-input-v3-zwayland-server.h>
 
 #include <algorithm>
-#include <new>
 
 namespace protocol = zwayland::generated;
 namespace zwwm::detail {
@@ -112,17 +111,12 @@ struct TextInputManagerHandler {
   void get_text_input(zwayland::server::Client& client, zwayland::server::Resource& manager, std::uint32_t id,
                       zwayland::server::Resource* seat_resource) {
     auto* seat = manager.data<SeatState>();
-    if (seat_resource == nullptr || seat_resource->data<SeatState>() != seat) {
+    if (seat_resource->data<SeatState>() != seat) {
       manager.post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "unknown seat");
       return;
     }
     auto* resource = client.create_resource(&protocol::zwp_text_input_v3_interface, id, manager.version);
-    auto* input = resource == nullptr ? nullptr : new (std::nothrow) TextInputState;
-    if (input == nullptr) {
-      if (resource != nullptr) resource->destroy();
-      client.post_no_memory();
-      return;
-    }
+    auto* input = new TextInputState;
     input->seat = seat;
     input->resource = resource;
     seat->text_inputs.push_back(input);
@@ -175,7 +169,6 @@ struct InputMethodHandler {
   void get_input_popup_surface(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id,
                                zwayland::server::Resource*) {
     auto* popup = client.create_resource(&protocol::zwp_input_popup_surface_v2_interface, id, 1);
-    if (popup == nullptr) { client.post_no_memory(); return; }
     auto* method = state(resource);
     popup->set_data(method);
     popup->set_handler(protocol::zwp_input_popup_surface_v2_handler(PopupHandler{}));
@@ -189,7 +182,6 @@ struct InputMethodHandler {
   void grab_keyboard(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id) {
     auto* method = state(resource);
     auto* grab = client.create_resource(&protocol::zwp_input_method_keyboard_grab_v2_interface, id, 1);
-    if (grab == nullptr) { client.post_no_memory(); return; }
     grab->set_data(method);
     grab->set_handler(protocol::zwp_input_method_keyboard_grab_v2_handler(GrabHandler{}));
     grab->set_destroy_handler([](zwayland::server::Resource& destroyed) {
@@ -222,14 +214,12 @@ struct InputMethodManagerHandler {
                         zwayland::server::Resource* seat_resource, std::uint32_t id) {
     auto* seat = manager.data<SeatState>();
     auto* resource = client.create_resource(&protocol::zwp_input_method_v2_interface, id, 1);
-    if (resource == nullptr) { client.post_no_memory(); return; }
     resource->set_handler(protocol::zwp_input_method_v2_handler(InputMethodHandler{}));
-    if (seat_resource == nullptr || seat_resource->data<SeatState>() != seat || seat->input_method != nullptr) {
+    if (seat_resource->data<SeatState>() != seat || seat->input_method != nullptr) {
       protocol::zwp_input_method_v2_send_unavailable(*resource);
       return;
     }
-    auto* method = new (std::nothrow) InputMethodState;
-    if (method == nullptr) { resource->destroy(); client.post_no_memory(); return; }
+    auto* method = new InputMethodState;
     method->seat = seat;
     method->resource = resource;
     seat->input_method = method;
@@ -267,14 +257,12 @@ void input_method_grab_modifiers(SeatState& seat) {
 
 void bind_text_input_manager(zwayland::server::Client* client, void* data, std::uint32_t, std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::zwp_text_input_manager_v3_interface, id, 1);
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_data(static_cast<SeatState*>(data));
   resource->set_handler(protocol::zwp_text_input_manager_v3_handler(TextInputManagerHandler{}));
 }
 
 void bind_input_method_manager(zwayland::server::Client* client, void* data, std::uint32_t, std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::zwp_input_method_manager_v2_interface, id, 1);
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_data(static_cast<SeatState*>(data));
   resource->set_handler(protocol::zwp_input_method_manager_v2_handler(InputMethodManagerHandler{}));
 }

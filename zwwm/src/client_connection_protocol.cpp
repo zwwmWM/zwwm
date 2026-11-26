@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
-#include <new>
 #include <stdexcept>
 #include <sys/socket.h>
 #include <unordered_map>
@@ -39,7 +38,6 @@ struct ClientConnectionProtocol::Impl {
   }
   Resource* connection(Client& client, std::uint32_t id) {
     auto* resource = client.create_resource(&p::zwwm_client_connection_v1_interface, id, 1);
-    if (!resource) { client.post_no_memory(); return nullptr; }
     resource->set_handler(p::zwwm_client_connection_v1_handler(Destroy{}));
     return resource;
   }
@@ -60,8 +58,7 @@ struct ClientConnectionProtocol::Impl {
   }
   void register_daemon(Client& client, std::uint32_t id, const std::string& name) {
     auto* resource = client.create_resource(&p::zwwm_client_daemon_v1_interface, id, 1);
-    auto* daemon = resource ? new (std::nothrow) Daemon{this,resource,name,false} : nullptr;
-    if (!resource || !daemon) { if (resource) resource->destroy(); client.post_no_memory(); return; }
+    auto* daemon = new Daemon{this, resource, name, false};
     daemons.push_back(daemon);
     resource->set_data(daemon); resource->set_handler(p::zwwm_client_daemon_v1_handler(Destroy{}));
     resource->set_destroy_handler([](Resource& object) {
@@ -107,7 +104,6 @@ ClientConnectionProtocol::ClientConnectionProtocol(zwayland::server::Display* di
   impl_->global = display->add_global(&p::zwwm_client_connection_manager_v1_interface, 1,
     [self = impl_.get()](Client& client, std::uint32_t version, std::uint32_t id) {
       auto* resource = client.create_resource(&p::zwwm_client_connection_manager_v1_interface, id, version);
-      if (!resource) { client.post_no_memory(); return; }
       self->managers.push_back(resource); resource->set_data(self);
       resource->set_handler(p::zwwm_client_connection_manager_v1_handler(Impl::Manager{}));
       resource->set_destroy_handler([](Resource& object) { if (auto* owner = object.data<Impl>()) std::erase(owner->managers, &object); });

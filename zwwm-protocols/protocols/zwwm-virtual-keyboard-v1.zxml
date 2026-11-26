@@ -1,0 +1,58 @@
+protocol zwwm_virtual_keyboard_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx. SPDX-License-Identifier: BSD-3-Clause
+)";
+
+/// create native on-screen keyboards
+///
+/// Virtual keyboards use the compositor's current XKB keymap. They inject
+/// Linux evdev keycodes into the selected seat, with normal modifier and
+/// compositor-binding handling. Client-supplied keymaps are not used.
+/// Key injection is unavailable during session lock.
+interface zwwm_virtual_keyboard_manager_v1 version 1 {
+  enum error {
+    invalid_seat = 0,
+  }
+
+  request create_keyboard(new<zwwm_virtual_keyboard_v1> id, object<wl_seat> seat);
+  request ~destroy();
+}
+
+interface zwwm_virtual_keyboard_v1 version 1 {
+  enum error {
+    invalid_key = 0,
+    invalid_state = 1,
+  }
+
+  enum key_state {
+    released = 0,
+    pressed = 1,
+  }
+
+  /// press or release an evdev key
+  ///
+  /// Time is a monotonic timestamp in milliseconds. Keycodes use evdev
+  /// numbering; add 8 when looking up a key in the supplied XKB keymap.
+  /// Modifiers are pressed/released as ordinary keys. Duplicate presses
+  /// and unmatched releases are ignored. Destroying this object releases
+  /// all keys held by it without releasing keys held by other devices.
+  request key(uint time, uint key, uint<key_state> state);
+
+  request ~destroy();
+
+  /// current compositor keymap
+  ///
+  /// Sent at creation and when the configured keymap changes. Format is
+  /// wl_keyboard.keymap_format.xkb_v1. The descriptor contains a NUL-terminated
+  /// XKB keymap; size includes the NUL. The receiving client owns the fd.
+  event keymap(uint format, fd fd, uint size);
+
+  event modifiers(uint depressed, uint latched, uint locked, uint group);
+
+  /// held keys were cleared
+  ///
+  /// Clear the on-screen pressed-key indicators. Sent when the seat resets
+  /// or the session locks. Future presses begin a new key sequence.
+  event reset();
+}

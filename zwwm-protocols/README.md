@@ -1,11 +1,10 @@
 # zwwm-protocols
 
 This target generates native zwayland client and server headers with the
-repository's `zwayland-scanner`. Both upstream and project XML use the same
-generator. Complete snapshots of Wayland 1.26.0 protocol data and
-wayland-protocols 1.49 live in `protocols/upstream/`; project protocols live
-directly in `protocols/`. Protocol generation does not depend on installed
-Wayland protocol data packages.
+repository's `zwayland-scanner`. Project protocols live directly in
+`protocols/` as [zxml](ZXML.md); complete snapshots of Wayland 1.26.0 protocol
+data and wayland-protocols 1.49 stay XML in `protocols/upstream/`. The scanner
+reads both and needs no XML library or installed protocol packages.
 
 ## Project protocols
 
@@ -22,7 +21,7 @@ Wayland protocol data packages.
 - `zwwm-window-manager-v1`: runtime configuration, window control, and external policy ownership
 - `zwwm-layout-manager-v1`: external placement algorithms with versioned atomic batches
 - `xwlr-layer-shell-v1`: optional layer-surface priority, opacity, and exclusive-edge hints
-- `zwwm_xwayland_shell`: compositor-owned Xwayland surface association
+- `zwwm-xwayland-shell-v1`: Xwayland window-to-surface association (`xwayland_shell_v1` wire names)
 
 Private capture globals are restricted to the compositor-authenticated portal
 client. The canonical `zwlr_screencopy_manager_v1` remains public for direct
@@ -30,8 +29,8 @@ clients such as `grim`.
 
 Generated sources are build artifacts and are not committed.
 
-The layer-shell and companion extension XML are installed in
-`share/zwwm/protocols/` for clients. The core protocol provides the layer,
+The layer-shell and companion extension XML are generated from zxml and
+installed in `share/zwwm/protocols/` for clients. The core protocol provides the layer,
 anchor, keyboard-interactivity, error, and
 configure/closed types and requests corresponding to zwlr layer shell, under
 `zwwm_layer_shell_v1` and `zwwm_layer_surface_v1` names. Clients must bind
@@ -48,7 +47,7 @@ create a `zwwm_surface_decoration_v1` using `get_decoration(wl_surface)`, then
 receive `configure` with the selected mode. `set_mode` requests a preference;
 zwwm selects `server_side` and clients should stop drawing titlebars, borders,
 and decoration shadows. Both manager and decoration objects support `destroy`.
-The XML is installed in `share/zwwm/protocols/`.
+Its generated XML is installed in `share/zwwm/protocols/`.
 
 Existing xdg-decoration negotiation remains available. A small native wire
 adapter advertises `org_kde_kwin_server_decoration_manager` for clients such as
@@ -160,7 +159,7 @@ effects; master/stack presents all nine scenes without strip scrolling.
   A scalar color is `0xRRGGBBAA`; a color array contains RGBA bytes for one to
   twenty colors; a vector array contains two to four signed 32-bit integers.
 
-The XML is installed in `share/zwwm/protocols/`. The dedicated implementation is
+Its generated XML is installed in `share/zwwm/protocols/`. The dedicated implementation is
 `zwwm/src/window_manager_protocol.cpp`. This protocol preserves the current
 layout configuration; external placement belongs to `zwwm-layout-manager-v1`.
 

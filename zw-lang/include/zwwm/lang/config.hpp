@@ -114,8 +114,7 @@ class ValidationContext {
   std::vector<Diagnostic>& diagnostics_;
 };
 
-// Component validators add semantic checks without coupling them to zw-lang.
-// Parsing resolves $VARIABLES and "${VARIABLE}" splices, so validators see plain values.
+// Component validators add semantic checks; variables are already resolved when they run.
 using ValidationRule = std::function<void(const Assignment&, ValidationContext&)>;
 
 [[nodiscard]] ParseResult parse_config(const std::string& input);

@@ -10,10 +10,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set(CMAKE_CXX_EXTENSIONS OFF)
 endif()
 
-find_package(LibXml2 REQUIRED)
-
-add_executable(zwayland-scanner main.cpp)
-target_link_libraries(zwayland-scanner PRIVATE LibXml2::LibXml2)
+add_executable(zwayland-scanner main.cpp xml.cpp zxml.cpp)
 target_compile_options(zwayland-scanner PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

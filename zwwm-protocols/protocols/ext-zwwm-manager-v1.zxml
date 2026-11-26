@@ -1,0 +1,128 @@
+protocol ext_zwwm_manager_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx
+)";
+
+/// zwwm control and state manager
+///
+/// Provides typed compositor state snapshots, control actions, and event
+/// subscriptions to clients connected to the compositor Wayland socket.
+interface ext_zwwm_manager_v1 version 7 {
+  enum snapshot_type {
+    status = 0,
+    outputs = 1,
+    toplevels = 2,
+    tags = 3,
+    layers = 4,
+    cameras = 5,
+    keyboard = 6,
+    live [[since(6)]] = 7,
+    windows [[since(7)]] = 8,
+  }
+
+  [[bitfield]] enum event_mask {
+    ready = 1,
+    config = 2,
+    tag = 4,
+    window = 8,
+    layer = 16,
+    output = 32,
+    shutdown = 64,
+    camera [[since(6)]] = 128,
+    keyboard [[since(6)]] = 256,
+  }
+
+  request ~destroy();
+  request get_snapshot(new<ext_zwwm_snapshot_v1> id, uint<snapshot_type> type);
+  request reload(new<ext_zwwm_result_v1> id);
+  [[since(2)]] request rebuild_switch_shaders(new<ext_zwwm_result_v1> id);
+  request dispatch(new<ext_zwwm_result_v1> id, string action, string argument);
+  request subscribe(new<ext_zwwm_subscription_v1> id, uint<event_mask> events);
+  [[since(3)]] request set_cursor(new<ext_zwwm_result_v1> id, string theme, uint size);
+}
+
+/// one compositor state snapshot
+interface ext_zwwm_snapshot_v1 version 2 {
+  request ~destroy();
+
+  event status(uint protocol_version, uint outputs, uint toplevels, uint layers);
+  event output(
+    string connector,
+    uint id_hi,
+    uint id_lo,
+    int x,
+    int y,
+    uint logical_width,
+    uint logical_height,
+    uint physical_width,
+    uint physical_height,
+    uint refresh_millihz,
+    uint scale_per_mille,
+    uint transform,
+    uint bit_depth,
+    uint enabled,
+    uint mode_count
+  );
+  event mode(uint width, uint height, uint refresh_millihz, uint preferred);
+  event toplevel(
+    uint id_hi,
+    uint id_lo,
+    string app_id,
+    string title,
+    uint output_hi,
+    uint output_lo,
+    int x,
+    int y,
+    int width,
+    int height,
+    uint state
+  );
+  event tag(string connector, uint output_hi, uint output_lo, uint active);
+  event layer(
+    uint id_hi,
+    uint id_lo,
+    uint output_hi,
+    uint output_lo,
+    string namespace_name,
+    uint layer,
+    int priority,
+    int exclusive_zone,
+    uint blur_radius,
+    uint opacity_millionths,
+    uint mapped
+  );
+  event camera(
+    string connector,
+    uint output_hi,
+    uint output_lo,
+    uint tag,
+    string x,
+    string y,
+    string zoom,
+    uint active
+  );
+  event keyboard(string layout, uint group);
+  event done();
+  event failed(string message);
+
+  /// one managed window, for the windows snapshot
+  ///
+  /// Every top-level window, including those on inactive tags. state is
+  /// a bitfield: 1 mapped, 2 focused, 4 floating, 8 fullscreen, 16
+  /// modal, 32 hidden (not on an active tag).
+  [[since(2)]] event window(uint id_hi, uint id_lo, string app_id, string title, uint tag, uint state);
+}
+
+interface ext_zwwm_result_v1 version 1 {
+  request ~destroy();
+
+  event succeeded(string message);
+  event failed(string message);
+}
+
+interface ext_zwwm_subscription_v1 version 1 {
+  request ~destroy();
+
+  event event(string name);
+}

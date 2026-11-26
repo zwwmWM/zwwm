@@ -1577,8 +1577,7 @@ bool VulkanRenderer::render(const FramePlan& frame, const TextureRef& target,
     const int quality = static_cast<int>(std::clamp<std::uint32_t>(draw.glass_quality, 1, 3));
     complete = state.draw(state.glass, data, true, quality) && complete;
   };
-  // Runs a shader's passes into float targets covering its clip rect plus padding, then
-  // hands their slots to the final draw. Pass coordinates are local to the targets.
+  // Runs shader passes into padded float targets (target-local coords) for the final draw.
   const auto run_passes = [&](const State::CustomProgram& custom, const RenderDraw& draw, DrawData& final_data) {
     const FloatRect area = draw.clip_bounds.value_or(draw.bounds);
     const double padding = static_cast<double>(custom.target_padding);

@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <new>
 
 namespace protocol = zwayland::generated;
 
@@ -62,8 +61,8 @@ void viewport_destination(zwayland::server::Client*, zwayland::server::Resource*
 }
 
 struct WpViewportKViewportHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void set_source(zwayland::server::Client& client, zwayland::server::Resource& resource, double x, double y, double width, double height) {
     (viewport_source)(&client, &resource, x, y, width, height);
@@ -74,7 +73,7 @@ struct WpViewportKViewportHandler {
 };
 
 void get_viewport(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, zwayland::server::Resource* surface_resource) {
-  auto* surface = compositor_surface_from_resource(client, surface_resource);
+  auto* surface = compositor_surface_from_resource(surface_resource);
   if (surface == nullptr) {
     manager->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "not a zwwm wl_surface for this client");
     return;
@@ -84,15 +83,14 @@ void get_viewport(zwayland::server::Client* client, zwayland::server::Resource* 
     return;
   }
   auto* resource = client->create_resource(&protocol::wp_viewport_interface, id, 1);
-  auto* viewport = resource == nullptr ? nullptr : new (std::nothrow) ViewportState{resource, surface, surface->alive};
-  if (resource == nullptr || viewport == nullptr) { if (resource != nullptr) resource->destroy(); client->post_no_memory(); return; }
+  auto* viewport = new ViewportState{resource, surface, surface->alive};
   surface->viewport = viewport;
   resource->set_data(viewport); resource->set_handler(protocol::wp_viewport_handler(WpViewportKViewportHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (viewport_destroyed)(&destroyed); });
 }
 
 struct WpViewporterKViewporterHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void get_viewport(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* surface) {
     (::zwwm::detail::get_viewport)(&client, &resource, id, surface);
@@ -107,14 +105,14 @@ void fractional_scale_destroyed(zwayland::server::Resource* resource) {
 }
 
 struct WpFractionalScaleV1KFractionalScaleHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 
 void get_fractional_scale(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id,
                           zwayland::server::Resource* surface_resource) {
-  auto* surface = compositor_surface_from_resource(client, surface_resource);
+  auto* surface = compositor_surface_from_resource(surface_resource);
   if (surface == nullptr) {
     manager->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "not a zwwm wl_surface for this client");
     return;
@@ -125,16 +123,15 @@ void get_fractional_scale(zwayland::server::Client* client, zwayland::server::Re
     return;
   }
   auto* resource = client->create_resource(&protocol::wp_fractional_scale_v1_interface, id, 1);
-  auto* fractional = resource == nullptr ? nullptr : new (std::nothrow) FractionalScaleState{resource, surface, surface->alive};
-  if (resource == nullptr || fractional == nullptr) { if (resource != nullptr) resource->destroy(); client->post_no_memory(); return; }
+  auto* fractional = new FractionalScaleState{resource, surface, surface->alive};
   surface->fractional_scale = fractional;
   resource->set_data(fractional); resource->set_handler(protocol::wp_fractional_scale_v1_handler(WpFractionalScaleV1KFractionalScaleHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (fractional_scale_destroyed)(&destroyed); });
   send_preferred_scale(surface);
 }
 
 struct WpFractionalScaleManagerV1KFractionalScaleManagerHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void get_fractional_scale(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* surface) {
     (::zwwm::detail::get_fractional_scale)(&client, &resource, id, surface);
@@ -145,13 +142,11 @@ struct WpFractionalScaleManagerV1KFractionalScaleManagerHandler {
 
 void bind_viewporter(zwayland::server::Client* client, void*, std::uint32_t version, std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::wp_viewporter_interface, id, std::min(version, 1U));
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_handler(protocol::wp_viewporter_handler(WpViewporterKViewporterHandler{}));
 }
 
 void bind_fractional_scale_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::wp_fractional_scale_manager_v1_interface, id, std::min(version, 1U));
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_data(static_cast<Observer*>(data)); resource->set_handler(protocol::wp_fractional_scale_manager_v1_handler(WpFractionalScaleManagerV1KFractionalScaleManagerHandler{}));
 }
 

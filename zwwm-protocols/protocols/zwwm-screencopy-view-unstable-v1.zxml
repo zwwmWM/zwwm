@@ -1,0 +1,157 @@
+protocol zwwm_screencopy_view_unstable_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+)";
+
+interface zwlr_screencopy_manager_v1 version 3 {
+  request capture_output(new<zwlr_screencopy_frame_v1> frame, int overlay_cursor, object<wl_output> output);
+  request capture_output_region(
+    new<zwlr_screencopy_frame_v1> frame,
+    int overlay_cursor,
+    object<wl_output> output,
+    int x,
+    int y,
+    int width,
+    int height
+  );
+  request ~destroy();
+}
+
+interface zwlr_screencopy_frame_v1 version 3 {
+  enum error {
+    already_used = 0,
+    invalid_buffer = 1,
+  }
+
+  [[bitfield]] enum flags {
+    y_invert = 1,
+  }
+
+  request copy(object<wl_buffer> buffer);
+  request ~destroy();
+  [[since(2)]] request copy_with_damage(object<wl_buffer> buffer);
+
+  event buffer(uint<wl_shm.format> format, uint width, uint height, uint stride);
+  event flags(uint<flags> flags);
+  event ready(uint tv_sec_hi, uint tv_sec_lo, uint tv_nsec);
+  event failed();
+  [[since(2)]] event damage(uint x, uint y, uint width, uint height);
+  [[since(3)]] event linux_dmabuf(uint format, uint width, uint height);
+  [[since(3)]] event buffer_done();
+}
+
+/// zwwm output capture
+///
+/// Captures completed output compositions and reports presentation timing.
+/// Global visibility is compositor policy outside this wire contract.
+interface zwwm_screencopy_view_manager_v1 version 1 {
+  [[bitfield]] enum cursor_mode {
+    hidden = 1,
+    embedded = 2,
+  }
+
+  /// destroy the manager
+  ///
+  /// Existing frame objects remain valid one-shot snapshots and must still
+  /// be destroyed by the client.
+  request ~destroy();
+
+  /// capture the current completed output composition
+  ///
+  /// The compositor captures without the cursor unless overlay_cursor is
+  /// non-zero. An unsupported cursor overlay produces a nonfatal unavailable
+  /// failure on the frame.
+  request capture_output(new<zwwm_screencopy_frame_v1> frame, object<wl_output> output, int overlay_cursor);
+
+  /// capture a logical output region
+  ///
+  /// Coordinates are in the output's logical coordinate space. The
+  /// compositor clips the region to the output extent and
+  /// advertises the resulting physical pixel size after scale and
+  /// transform. An empty clipped region fails with unavailable.
+  request capture_output_region(
+    new<zwwm_screencopy_frame_v1> frame,
+    object<wl_output> output,
+    int overlay_cursor,
+    int x,
+    int y,
+    int width,
+    int height
+  );
+
+  /// cursor modes supported by this compositor backend
+  ///
+  /// Sent once after binding. Embedded is omitted when the active backend
+  /// cannot capture a compositor-owned cursor, including nested mode where
+  /// the parent compositor owns the visible cursor.
+  event cursor_modes(uint<cursor_mode> modes);
+
+  /// a new output composition was presented
+  ///
+  /// Sent after presentation completion. Stream clients should coalesce
+  /// these events and request a capture only when their consumer has a
+  /// released buffer. The timestamp uses CLOCK_MONOTONIC.
+  event presented(object<wl_output> output, uint tv_sec_hi, uint tv_sec_lo, uint tv_nsec);
+}
+
+/// one capture result
+///
+/// The compositor sends buffer and flags before the client copies. A frame
+/// accepts exactly one copy request, using a wl_shm buffer matching the
+/// advertised format, dimensions, and stride. ready or failed is terminal;
+/// clients must destroy the frame after either terminal event. The source is
+/// always compositor output, never a captured client's backing buffer.
+interface zwwm_screencopy_frame_v1 version 1 {
+  enum error {
+    already_used = 0,
+    invalid_buffer = 1,
+  }
+
+  [[bitfield]] enum flags {
+    y_invert = 1,  ///< contents are y-inverted
+  }
+
+  enum failure {
+    unknown = 0,
+    source_lost = 1,
+    revoked = 2,
+    unavailable = 3,
+  }
+
+  /// cancel or release the frame
+  ///
+  /// Destroying before a terminal event cancels interest in the snapshot
+  /// and no further events are sent for this object.
+  request ~destroy();
+
+  /// copy into the advertised wl_shm buffer
+  ///
+  /// Supplying a non-SHM buffer or one whose format, size, stride, offset,
+  /// or storage is insufficient is a protocol error. A second copy is a
+  /// protocol error. Source loss, compositor inability to capture, and
+  /// capture cancellation are nonfatal failed events instead.
+  request copy(object<wl_buffer> buffer);
+
+  event buffer(uint<wl_shm.format> format, uint width, uint height, uint stride);
+  event flags(uint<flags> flags);
+
+  /// copy completed
+  ///
+  /// The timestamp uses CLOCK_MONOTONIC and identifies the completed
+  /// compositor snapshot copied into the client buffer.
+  event ready(uint tv_sec_hi, uint tv_sec_lo, uint tv_nsec);
+
+  /// capture could not be completed or was revoked
+  event failed(uint<failure> reason);
+}

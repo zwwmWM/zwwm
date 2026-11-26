@@ -1,0 +1,78 @@
+/// zwwm's link between X11 windows and Wayland surfaces
+///
+/// Xwayland draws every X11 window into an ordinary wl_surface. This protocol
+/// tells zwwm which X11 window a surface belongs to, so window management,
+/// focus and stacking from the X11 side reach the right surface.
+///
+/// The interface names, request order and signatures match what stock
+/// Xwayland binds; they are a fixed wire contract and must not change.
+protocol zwwm_xwayland_shell_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx. SPDX-License-Identifier: BSD-3-Clause
+)";
+
+/// Xwayland's entry point for marking surfaces
+///
+/// zwwm advertises one xwayland_shell_v1 global, and only the Xwayland
+/// server it spawned can see or bind it. Any other client that binds it is
+/// disconnected with a protocol error.
+///
+/// Xwayland uses it to give surfaces the X11-window role. Once bound,
+/// Xwayland identifies windows by serial (xwayland_surface_v1.set_serial)
+/// and not by the WL_SURFACE_ID atom.
+interface xwayland_shell_v1 version 1 {
+  enum error {
+    role = 0,  ///< the wl_surface already has a role
+  }
+
+  /// release the shell
+  ///
+  /// Surfaces that already have the role keep it, and their
+  /// xwayland_surface_v1 objects stay usable.
+  request ~destroy();
+
+  /// give a surface the X11-window role
+  ///
+  /// Creates the xwayland_surface_v1 for the surface. The surface must
+  /// belong to the same client and must not already be an xdg surface,
+  /// layer surface, subsurface or drag icon; otherwise the `role` error is
+  /// raised.
+  request get_xwayland_surface(new<xwayland_surface_v1> id, object<wl_surface> surface);
+}
+
+/// one surface's X11 window binding
+///
+/// Carries the serial that ties a wl_surface to an X11 window. The serial is
+/// pending until the next wl_surface.commit.
+///
+/// zwwm matches a committed serial against the serials Xwayland announces
+/// on X11 windows. Whichever side arrives second completes the match. A
+/// window that is unmapped and mapped again gets a new surface, and that
+/// surface replaces the old one and keeps the window's floating state and
+/// geometry the user chose.
+interface xwayland_surface_v1 version 1 {
+  enum error {
+    already_associated = 0,  ///< a serial was already committed for this surface
+    invalid_serial = 1,      ///< the serial is zero
+  }
+
+  /// name the X11 window this surface shows
+  ///
+  /// The serial is a non-zero 64-bit value that Xwayland also sends on the
+  /// X11 window as a WL_SURFACE_SERIAL client message, low half in l[0] and
+  /// high half in l[1]. A zero serial raises `invalid_serial`.
+  ///
+  /// The serial takes effect on the next wl_surface.commit. Each surface
+  /// can commit a serial only once; a second one raises
+  /// `already_associated`.
+  request set_serial(
+    uint serial_lo,  ///< low 32 bits of the serial
+    uint serial_hi   ///< high 32 bits of the serial
+  );
+
+  /// drop the role object
+  ///
+  /// A surface that is already linked to its X11 window stays linked.
+  request ~destroy();
+}

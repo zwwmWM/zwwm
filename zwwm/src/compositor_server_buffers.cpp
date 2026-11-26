@@ -9,7 +9,6 @@
 #include <fcntl.h>
 #include <limits>
 #include <linux/memfd.h>
-#include <new>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -79,8 +78,8 @@ void pool_resize(zwayland::server::Client*, zwayland::server::Resource* resource
 }
 
 struct WlBufferKShmBufferHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 
@@ -97,26 +96,15 @@ void create_buffer(zwayland::server::Client* client, zwayland::server::Resource*
     return;
   }
   auto* buffer_resource = client->create_resource(&protocol::wl_buffer_interface, id, 1);
-  if (buffer_resource == nullptr) {
-    client->post_no_memory();
-    return;
-  }
-  auto* buffer = new (std::nothrow) Buffer;
-  if (buffer != nullptr) register_buffer(buffer);
-  if (buffer != nullptr) {
-    buffer->pool = pool;
-    buffer->resource = buffer_resource;
-    buffer->offset = offset;
-    buffer->width = width;
-    buffer->height = height;
-    buffer->stride = stride;
-    buffer->format = format;
-  }
-  if (buffer == nullptr) {
-    buffer_resource->destroy();
-    client->post_no_memory();
-    return;
-  }
+  auto* buffer = new Buffer;
+  register_buffer(buffer);
+  buffer->pool = pool;
+  buffer->resource = buffer_resource;
+  buffer->offset = offset;
+  buffer->width = width;
+  buffer->height = height;
+  buffer->stride = stride;
+  buffer->format = format;
   ++pool->buffers;
   buffer_resource->set_data(buffer); buffer_resource->set_handler(protocol::wl_buffer_handler(WlBufferKShmBufferHandler{})); buffer_resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (buffer_destroyed)(&destroyed); });
 }
@@ -133,20 +121,13 @@ void create_pool(zwayland::server::Client* client, zwayland::server::Resource*, 
     return;
   }
   auto* resource = client->create_resource(&protocol::wl_shm_pool_interface, id, 1);
-  auto* pool = resource == nullptr ? nullptr :
-      new (std::nothrow) Pool{mapping, static_cast<std::size_t>(size), std::move(owned_fd)};
-  if (resource == nullptr || pool == nullptr) {
-    if (resource != nullptr) resource->destroy();
-    if (mapping != MAP_FAILED) (void)munmap(mapping, size);
-    client->post_no_memory();
-    return;
-  }
+  auto* pool = new Pool{mapping, static_cast<std::size_t>(size), std::move(owned_fd)};
   struct WlShmPoolImplementationHandler {
   void create_buffer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, std::int32_t offset, std::int32_t width, std::int32_t height, std::int32_t stride, std::uint32_t format) {
     (::zwwm::detail::create_buffer)(&client, &resource, id, offset, width, height, stride, format);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* item) { item->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void resize(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t size) {
     (pool_resize)(&client, &resource, size);
@@ -159,8 +140,8 @@ struct WlShmKShmHandler {
   void create_pool(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, int fd, std::int32_t size) {
     (::zwwm::detail::create_pool)(&client, &resource, id, fd, size);
   }
-  void release(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void release(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 
@@ -223,9 +204,8 @@ Buffer* import_params(zwayland::server::Resource* resource, std::int32_t width, 
   renderer::DmabufAttributes attributes{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height),
                                         format, params->planes};
   if (!attributes.valid()) return nullptr;
-  auto* buffer = new (std::nothrow) Buffer;
-  if (buffer != nullptr) register_buffer(buffer);
-  if (buffer == nullptr) return nullptr;
+  auto* buffer = new Buffer;
+  register_buffer(buffer);
   buffer->width = width;
   buffer->height = height;
   buffer->format = format;
@@ -235,8 +215,8 @@ Buffer* import_params(zwayland::server::Resource* resource, std::int32_t width, 
 }
 
 struct WlBufferKDmabufBufferHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 
@@ -268,18 +248,13 @@ void params_create_immed(zwayland::server::Client* client, zwayland::server::Res
     return;
   }
   auto* buffer_resource = client->create_resource(&protocol::wl_buffer_interface, id, 1);
-  if (buffer_resource == nullptr) {
-    unref_buffer(buffer);
-    client->post_no_memory();
-    return;
-  }
   buffer->resource = buffer_resource;
   buffer_resource->set_data(buffer); buffer_resource->set_handler(protocol::wl_buffer_handler(WlBufferKDmabufBufferHandler{})); buffer_resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (buffer_destroyed)(&destroyed); });
 }
 
 struct ZwpLinuxBufferParamsV1KParamsHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void add(zwayland::server::Client& client, zwayland::server::Resource& resource, int fd, std::uint32_t plane_idx, std::uint32_t offset, std::uint32_t stride, std::uint32_t modifier_hi, std::uint32_t modifier_lo) {
     (params_add)(&client, &resource, fd, plane_idx, offset, stride, modifier_hi, modifier_lo);
@@ -298,13 +273,8 @@ struct ZwpLinuxBufferParamsV1KParamsHandler {
 void dmabuf_params(zwayland::server::Client* client, zwayland::server::Resource* resource, std::uint32_t id) {
   auto* state = resource->data<DmabufState>();
   auto* params_resource = client->create_resource(&protocol::zwp_linux_buffer_params_v1_interface, id, 3);
-  auto* params = params_resource == nullptr ? nullptr : new (std::nothrow) Params;
-  if (params != nullptr) params->state = state;
-  if (params_resource == nullptr || params == nullptr) {
-    if (params_resource != nullptr) params_resource->destroy();
-    client->post_no_memory();
-    return;
-  }
+  auto* params = new Params;
+  params->state = state;
   params_resource->set_data(params); params_resource->set_handler(protocol::zwp_linux_buffer_params_v1_handler(ZwpLinuxBufferParamsV1KParamsHandler{})); params_resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (params_destroyed)(&destroyed); });
 }
 
@@ -340,8 +310,8 @@ UniqueFd create_format_table(const DmabufState& state) {
 }
 
 struct ZwpLinuxDmabufFeedbackV1KFeedbackHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 
@@ -371,16 +341,11 @@ void dmabuf_feedback(zwayland::server::Client* client, zwayland::server::Resourc
   auto* state = manager->data<DmabufState>();
   auto* surface_state = surface == nullptr ? nullptr : surface->data<SurfaceState>();
   if (state == nullptr || !state->main_device.has_value() ||
-      (surface != nullptr && (surface->client != client || surface_state == nullptr ||
-                              surface_state->resource != surface))) {
+      (surface != nullptr && surface_state == nullptr)) {
     client->post_error(0, "invalid linux-dmabuf feedback request");
     return;
   }
   auto* feedback = client->create_resource(&protocol::zwp_linux_dmabuf_feedback_v1_interface, id, 1);
-  if (feedback == nullptr) {
-    client->post_no_memory();
-    return;
-  }
   feedback->set_handler(protocol::zwp_linux_dmabuf_feedback_v1_handler(ZwpLinuxDmabufFeedbackV1KFeedbackHandler{}));
   if (!send_feedback(client, feedback, *state)) feedback->destroy();
 }
@@ -395,8 +360,8 @@ void dmabuf_surface_feedback(zwayland::server::Client* client, zwayland::server:
 }
 
 struct ZwpLinuxDmabufV1KDmabufHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void create_params(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t params_id) {
     (dmabuf_params)(&client, &resource, params_id);
@@ -450,10 +415,6 @@ void unref_buffer(Buffer* buffer) {
 
 void bind_shm(zwayland::server::Client* client, void*, std::uint32_t version, std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::wl_shm_interface, id, std::min(version, kShmVersion));
-  if (resource == nullptr) {
-    client->post_no_memory();
-    return;
-  }
   resource->set_handler(protocol::wl_shm_handler(WlShmKShmHandler{}));
   protocol::wl_shm_send_format(*resource, protocol::WL_SHM_FORMAT_ARGB8888);
   protocol::wl_shm_send_format(*resource, protocol::WL_SHM_FORMAT_XRGB8888);
@@ -463,10 +424,6 @@ void bind_dmabuf(zwayland::server::Client* client, void* data, std::uint32_t req
   auto* state = static_cast<DmabufState*>(data);
   const auto version = std::min(requested_version, state->main_device.has_value() ? 4U : 3U);
   auto* resource = client->create_resource(&protocol::zwp_linux_dmabuf_v1_interface, id, version);
-  if (resource == nullptr) {
-    client->post_no_memory();
-    return;
-  }
   resource->set_data(state); resource->set_handler(protocol::zwp_linux_dmabuf_v1_handler(ZwpLinuxDmabufV1KDmabufHandler{}));
   if (version >= 4) return;
   for (const auto& [format, modifier] : state->formats) {
@@ -485,9 +442,8 @@ bool copy_shm_capture_buffer(zwayland::server::Resource* resource, const OutputC
       source_x > capture.width || source_y > capture.height || width > capture.width - source_x ||
       height > capture.height - source_y)
     return false;
-  if (resource->interface != &protocol::wl_buffer_interface) return false;
   auto* buffer = resource->data<Buffer>();
-  if (buffer == nullptr || buffer->resource != resource || buffer->pool == nullptr ||
+  if (buffer == nullptr || buffer->pool == nullptr ||
       buffer->format != protocol::WL_SHM_FORMAT_XRGB8888 || buffer->width != static_cast<std::int32_t>(width) ||
       buffer->height != static_cast<std::int32_t>(height) ||
       buffer->stride != static_cast<std::int32_t>(width * 4U) || buffer->offset < 0 ||

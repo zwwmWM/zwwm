@@ -1,0 +1,40 @@
+protocol zwwm_data_control_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx. SPDX-License-Identifier: MIT
+)";
+
+/// privileged zwwm clipboard control
+///
+/// Provides clipboard access without pointer or keyboard focus.
+interface zwwm_data_control_manager_v1 version 1 {
+  request create_source(new<zwwm_data_control_source_v1> id);
+  request get_device(new<zwwm_data_control_device_v1> id, object<wl_seat> seat);
+  request ~destroy();
+}
+
+interface zwwm_data_control_device_v1 version 1 {
+  request set_selection(object<zwwm_data_control_source_v1>? source);
+  request set_primary_selection(object<zwwm_data_control_source_v1>? source);
+  request ~destroy();
+
+  event data_offer(new<zwwm_data_control_offer_v1> id);
+  event selection(object<zwwm_data_control_offer_v1>? offer);
+  event primary_selection(object<zwwm_data_control_offer_v1>? offer);
+  event finished();
+}
+
+interface zwwm_data_control_source_v1 version 1 {
+  request offer(string mime_type);
+  request ~destroy();
+
+  event send(string mime_type, fd fd);
+  event cancelled();
+}
+
+interface zwwm_data_control_offer_v1 version 1 {
+  request receive(string mime_type, fd fd);
+  request ~destroy();
+
+  event offer(string mime_type);
+}

@@ -57,8 +57,7 @@ int main(int argc, char** argv) {
     std::printf("%s: ok\n", argv[2]);
     return EXIT_SUCCESS;
   }
-  // A clipboard recipient may close its pipe during a transfer. Let write()
-  // report EPIPE so transfer cleanup runs instead of terminating the session.
+  // Clipboard readers may close the pipe mid-transfer; take EPIPE instead of dying on SIGPIPE.
   struct sigaction pipe_action {};
   pipe_action.sa_handler = SIG_IGN;
   sigemptyset(&pipe_action.sa_mask);

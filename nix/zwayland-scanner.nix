@@ -1,4 +1,4 @@
-{ lib, stdenv, cmake, ninja, pkg-config, libxml2 }:
+{ lib, stdenv, cmake, ninja, pkg-config }:
 
 stdenv.mkDerivation {
   pname = "zwayland-scanner";
@@ -11,7 +11,6 @@ stdenv.mkDerivation {
   postUnpack = ''sourceRoot+=/zwayland-scanner'';
 
   nativeBuildInputs = [ cmake ninja pkg-config ];
-  buildInputs = [ libxml2 ];
 
   meta = {
     description = "Native C++23 Wayland client/server binding generator";

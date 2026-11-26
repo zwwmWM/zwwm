@@ -1,0 +1,48 @@
+/// control data devices
+///
+/// This protocol allows privileged clients to manage clipboard selections without keyboard or pointer focus.
+protocol wlr_data_control_unstable_v1;
+
+copyright R"(
+Copyright 2018 Simon Ser and 2019 Ivan Molodetskikh. SPDX-License-Identifier: MIT
+)";
+
+interface zwlr_data_control_manager_v1 version 2 {
+  request create_data_source(new<zwlr_data_control_source_v1> id);
+  request get_data_device(new<zwlr_data_control_device_v1> id, object<wl_seat> seat);
+  request ~destroy();
+}
+
+interface zwlr_data_control_device_v1 version 2 {
+  enum error {
+    used_source = 1,  ///< source was previously used
+  }
+
+  request set_selection(object<zwlr_data_control_source_v1>? source);
+  request ~destroy();
+  [[since(2)]] request set_primary_selection(object<zwlr_data_control_source_v1>? source);
+
+  event data_offer(new<zwlr_data_control_offer_v1> id);
+  event selection(object<zwlr_data_control_offer_v1>? id);
+  event finished();
+  [[since(2)]] event primary_selection(object<zwlr_data_control_offer_v1>? id);
+}
+
+interface zwlr_data_control_source_v1 version 1 {
+  enum error {
+    invalid_offer = 1,  ///< offer sent after selection
+  }
+
+  request offer(string mime_type);
+  request ~destroy();
+
+  event send(string mime_type, fd fd);
+  event cancelled();
+}
+
+interface zwlr_data_control_offer_v1 version 1 {
+  request receive(string mime_type, fd fd);
+  request ~destroy();
+
+  event offer(string mime_type);
+}

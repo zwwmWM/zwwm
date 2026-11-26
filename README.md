@@ -67,8 +67,8 @@ Available independently as `packages.<system>` outputs and through
 `overlays.default`:
 
 - `zwayland`: C++23 client/server/wire libraries, headers, CMake and pkg-config exports.
-- `zwayland-scanner`: standalone native C++ binding generator.
-- `zwwm-protocols`: project and upstream XML, usable with any language generator.
+- `zwayland-scanner`: standalone native C++ binding generator for Wayland XML and [zxml](zwwm-protocols/ZXML.md).
+- `zwwm-protocols`: project zxml with generated XML, plus upstream XML, usable with any language generator.
 
 ```sh
 nix build .#zwayland .#zwayland-scanner .#zwwm-protocols

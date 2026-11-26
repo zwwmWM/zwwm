@@ -44,7 +44,7 @@ struct DecorationHandler {
 
 void create_decoration(zwayland::server::Client& client, zwayland::server::Resource& manager,
                        std::uint32_t id, zwayland::server::Resource* surface, bool compatibility) {
-  if (compositor_surface_from_resource(&client, surface) == nullptr) {
+  if (compositor_surface_from_resource(surface) == nullptr) {
     manager.post_error(compatibility ? protocol::WL_DISPLAY_ERROR_INVALID_OBJECT :
                        protocol::ZWWM_DECORATION_MANAGER_V1_ERROR_INVALID_SURFACE,
                        "decoration requires a live wl_surface");
@@ -52,7 +52,6 @@ void create_decoration(zwayland::server::Client& client, zwayland::server::Resou
   }
   auto* resource = client.create_resource(compatibility ? &compat_decoration :
                                            &protocol::zwwm_surface_decoration_v1_interface, id, 1);
-  if (resource == nullptr) { client.post_no_memory(); return; }
   if (compatibility) {
     resource->set_handler([](zwayland::server::Client&, zwayland::server::Resource& resource,
                              std::uint32_t opcode, zwayland::wire::MessageParser& parser) {
@@ -84,7 +83,6 @@ struct ManagerHandler {
 void bind_zwwm_decoration_manager(zwayland::server::Client* client, void*, std::uint32_t,
                                  std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::zwwm_decoration_manager_v1_interface, id, 1);
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_handler(protocol::zwwm_decoration_manager_v1_handler(ManagerHandler{}));
   send_server_mode(*resource);
 }
@@ -94,7 +92,6 @@ const zwayland::server::Interface& decoration_compat_interface() { return compat
 void bind_decoration_compat_manager(zwayland::server::Client* client, void*, std::uint32_t,
                                     std::uint32_t id) {
   auto* resource = client->create_resource(&compat_manager, id, 1);
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_handler([](zwayland::server::Client& client, zwayland::server::Resource& manager,
                            std::uint32_t, zwayland::wire::MessageParser& parser) {
     const auto id = parser.read_new_id();

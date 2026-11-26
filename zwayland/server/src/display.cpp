@@ -409,6 +409,10 @@ Display::Display(const std::string& socket_name) {
         registry.post_error(0, "invalid version for global");
         return;
       }
+      if (!client.valid_new_id(id)) {
+        registry.post_error(0, "invalid new object id");
+        return;
+      }
       if (global.bind) global.bind(client, version, id);
       return;
     }

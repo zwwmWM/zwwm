@@ -144,7 +144,6 @@ struct LayoutManagerProtocol::Impl {
     void create_provider(zwayland::server::Client& client, zwayland::server::Resource& manager, std::uint32_t id) {
       auto* self = manager.data<Impl>();
       auto* resource = client.create_resource(&protocol::zwwm_layout_provider_v1_interface, id, 1);
-      if (resource == nullptr) { client.post_no_memory(); return; }
       self->resources.push_back(resource);
       resource->set_data(self);
       resource->set_handler(protocol::zwwm_layout_provider_v1_handler(ProviderHandler{}));
@@ -171,7 +170,6 @@ LayoutManagerProtocol::LayoutManagerProtocol(zwayland::server::Display* display,
   impl_->global = display->add_global(&protocol::zwwm_layout_manager_v1_interface, 1,
       [self = impl_.get()](zwayland::server::Client& client, std::uint32_t, std::uint32_t id) {
         auto* resource = client.create_resource(&protocol::zwwm_layout_manager_v1_interface, id, 1);
-        if (resource == nullptr) { client.post_no_memory(); return; }
         self->resources.push_back(resource); resource->set_data(self);
         resource->set_handler(protocol::zwwm_layout_manager_v1_handler(Impl::ManagerHandler{}));
         resource->set_destroy_handler([self](zwayland::server::Resource& resource) { std::erase(self->resources, &resource); });

@@ -11,7 +11,6 @@
 #include <filesystem>
 #include <cstring>
 #include <span>
-#include <new>
 #include <vector>
 
 namespace protocol = zwayland::generated;
@@ -110,7 +109,6 @@ struct WindowManagerProtocol::Impl {
                                   const zwayland::server::Interface* interface, std::uint32_t id,
                                   std::uint32_t version = 1) {
     auto* resource = client.create_resource(interface, id, version);
-    if (resource == nullptr) { client.post_no_memory(); return nullptr; }
     resources.push_back(resource);
     resource->set_data(this);
     resource->set_destroy_handler([this](zwayland::server::Resource& resource) {
@@ -398,8 +396,7 @@ struct WindowManagerProtocol::Impl {
       auto base = self->current();
       auto* resource = self->make(client, &protocol::zwwm_configuration_v1_interface, id);
       if (resource == nullptr) return;
-      auto* transaction = new (std::nothrow) Transaction{self, base, *base, self->revision, {}, false};
-      if (transaction == nullptr) { resource->destroy(); client.post_no_memory(); return; }
+      auto* transaction = new Transaction{self, base, *base, self->revision, {}, false};
       resource->set_data(transaction);
       resource->set_handler(protocol::zwwm_configuration_v1_handler(ConfigurationHandler{}));
       resource->set_destroy_handler([self](zwayland::server::Resource& resource) {

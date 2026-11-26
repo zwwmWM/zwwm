@@ -1,0 +1,52 @@
+protocol zwwm_client_connection_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx
+)";
+
+/// native client connections and daemon discovery
+///
+/// Brokers client launch sockets and named daemon channels through the
+/// compositor Wayland connection. Daemon names are scoped to this compositor.
+interface zwwm_client_connection_manager_v1 version 1 {
+  enum failure {
+    unavailable = 0,
+    already_registered = 1,
+    invalid_name = 2,
+    connection_failed = 3,
+  }
+
+  request ~destroy();
+  request create_connection(new<zwwm_client_connection_v1> id);
+  request register_daemon(new<zwwm_client_daemon_v1> id, string name);
+  request connect_daemon(new<zwwm_client_connection_v1> id, string name);
+}
+
+/// one prepared client or daemon connection
+///
+/// create_connection supplies a preconnected Wayland socket suitable for
+/// WAYLAND_SOCKET. connect_daemon supplies an opaque stream socket paired
+/// with the named daemon; the client and daemon define its message format.
+/// Exactly one connected or failed event is sent. The receiver owns the fd.
+/// Handed-off sockets remain valid independently of this object.
+interface zwwm_client_connection_v1 version 1 {
+  request ~destroy();
+
+  event connected(fd socket);
+  event failed(uint<zwwm_client_connection_manager_v1.failure> reason, string message);
+}
+
+/// a named client daemon registered with zwwm
+///
+/// ready confirms registration. connection delivers one endpoint of a
+/// newly connected client's stream. The daemon owns the received fd.
+/// Names contain 1..128 ASCII letters, digits, dots, underscores or hyphens.
+/// Destroying the object or disconnecting unregisters the name; existing
+/// handed-off channels remain valid. Failed registrations reserve no name.
+interface zwwm_client_daemon_v1 version 1 {
+  request ~destroy();
+
+  event ready();
+  event failed(uint<zwwm_client_connection_manager_v1.failure> reason, string message);
+  event connection(fd socket);
+}

@@ -1,0 +1,44 @@
+protocol zwwm_focus_grab_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx. SPDX-License-Identifier: BSD-3-Clause
+)";
+
+/// dismissible keyboard focus for layer panels
+///
+/// A client can grab keyboard focus for its own layer surface and its
+/// subsurfaces/popups. Clicking or touching outside dismisses the grab;
+/// the client handles dismissed by hiding or unmapping its panel. Outside
+/// activation is consumed, including the matching pointer release.
+interface zwwm_focus_grab_manager_v1 version 1 {
+  enum error {
+    invalid_surface = 0,
+  }
+
+  request ~destroy();
+  request get_grab(new<zwwm_focus_grab_v1> id, object<wl_surface> surface);
+}
+
+interface zwwm_focus_grab_v1 version 1 {
+  enum reason {
+    outside = 0,
+    unmapped = 1,
+    replaced = 2,
+    locked = 3,
+    released = 4,
+  }
+
+  request ~destroy();
+
+  /// activate or arm a grab
+  ///
+  /// A mapped panel receives focus immediately. An unmapped panel is armed
+  /// until it maps. One grab is active per seat; another activation dismisses
+  /// the previous grab. A dismissed object can be activated again.
+  request activate();
+
+  request release();
+
+  event activated();
+  event dismissed(uint<reason> reason);
+}

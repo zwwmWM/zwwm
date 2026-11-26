@@ -1,0 +1,98 @@
+protocol zwwm_layer_shell_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+)";
+
+/// create desktop layer surfaces
+///
+/// Assigns a layer role to an uncommitted wl_surface. Layers are ordered
+/// background, bottom, top, overlay. Ordinary windows lie between bottom
+/// and top. Each layer surface belongs to an output, chosen by the compositor
+/// when output is null. The initial wl_surface commit must have no buffer;
+/// the client must wait for configure and acknowledge it before mapping.
+interface zwwm_layer_shell_v1 version 1 {
+  enum error {
+    role = 0,
+    invalid_layer = 1,
+    already_constructed = 2,
+  }
+
+  enum layer {
+    background = 0,
+    bottom = 1,
+    top = 2,
+    overlay = 3,
+  }
+
+  request get_layer_surface(
+    new<zwwm_layer_surface_v1> id,
+    object<wl_surface> surface,
+    object<wl_output>? output,
+    uint<layer> layer,
+    string name_space
+  );
+  request ~destroy();
+}
+
+/// double-buffered layer surface state
+///
+/// Size, anchors, exclusive zone, margins, keyboard mode, and layer are
+/// applied together on wl_surface.commit. A null buffer unmaps the surface;
+/// remapping requires another bufferless commit and configure exchange.
+/// A zero dimension requires anchors on both opposite edges of that axis.
+/// Positive exclusive zones reserve space when anchored to one edge (or
+/// that edge and both perpendicular edges). Zone zero avoids reserved space;
+/// zone -1 permits extending underneath it.
+interface zwwm_layer_surface_v1 version 1 {
+  enum error {
+    invalid_surface_state = 0,
+    invalid_size = 1,
+    invalid_anchor = 2,
+    invalid_keyboard_interactivity = 3,
+  }
+
+  [[bitfield]] enum anchor {
+    top = 1,
+    bottom = 2,
+    left = 4,
+    right = 8,
+  }
+
+  enum keyboard_interactivity {
+    none = 0,
+    exclusive = 1,
+    on_demand = 2,
+  }
+
+  request set_size(uint width, uint height);
+  request set_anchor(uint<anchor> anchor);
+  request set_exclusive_zone(int zone);
+  request set_margin(int top, int right, int bottom, int left);
+  request set_keyboard_interactivity(uint<keyboard_interactivity> keyboard_interactivity);
+  request get_popup(object<xdg_popup> popup);
+  request ack_configure(uint serial);
+  request ~destroy();
+  request set_layer(uint<zwwm_layer_shell_v1.layer> layer);
+
+  event configure(uint serial, uint width, uint height);
+  event closed();
+}

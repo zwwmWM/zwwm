@@ -3,8 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-// Plugins are C++ shared libraries exporting zwwm_plugin_init with C linkage.
-// This C-compatible boundary keeps the ABI independent of the compositor's C++ classes.
+// Plugins export zwwm_plugin_init with C linkage, keeping the ABI off compositor classes.
 inline constexpr std::uint32_t ZWWM_PLUGIN_ABI_VERSION = 2;
 
 enum class ZwwmGestureKind : std::uint32_t { swipe = 1, pinch = 2, hold = 3 };

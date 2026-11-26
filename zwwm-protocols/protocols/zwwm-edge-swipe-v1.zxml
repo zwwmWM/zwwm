@@ -1,0 +1,76 @@
+protocol zwwm_edge_swipe_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including the next
+paragraph) shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+)";
+
+/// compositor-owned touch edge swipes
+///
+/// Lets a shell follow touch swipes that start at an output edge. The
+/// compositor recognises the swipe and keeps the touch sequence away from
+/// other clients; the shell only animates and decides what the swipe does.
+interface zwwm_edge_swipe_manager_v1 version 1 {
+  [[bitfield]] enum edge {
+    top = 1,
+    bottom = 2,
+    left = 4,
+    right = 8,
+  }
+
+  request ~destroy();
+
+  /// listen for swipes from the given edges
+  ///
+  /// Touches that start within the configured edge zone of any edge in
+  /// `edges` become swipes delivered to this object instead of clients.
+  request get_edge_swipe(new<zwwm_edge_swipe_v1> id, uint<edge> edges);
+}
+
+/// edge swipe events
+///
+/// Each swipe is one began event, any number of progress events, then
+/// exactly one ended event. Offsets are logical pixels from the touch-down
+/// point, positive towards the inside of the output for the swipe's edge.
+interface zwwm_edge_swipe_v1 version 1 {
+  request ~destroy();
+  request set_edges(uint<zwwm_edge_swipe_manager_v1.edge> edges);
+
+  event began(
+    uint time,                                   ///< milliseconds
+    object<wl_output>? output,
+    uint<zwwm_edge_swipe_manager_v1.edge> edge,
+    fixed x,                                     ///< output-local touch-down position
+    fixed y
+  );
+  event progress(
+    uint time,
+    fixed distance,  ///< offset along the swipe direction
+    fixed lateral    ///< offset across the swipe direction
+  );
+  event ended(
+    uint time,
+    fixed distance,
+    fixed lateral,
+    fixed velocity,  ///< logical pixels per second along the swipe
+    uint cancelled   ///< 1 when the touch was cancelled
+  );
+}

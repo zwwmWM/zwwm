@@ -1,0 +1,83 @@
+protocol ext_zwwm_toplevels_unstable_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+)";
+
+/// capturable toplevel enumeration
+///
+/// Enumerates toplevels available to this manager binding. Availability and
+/// global visibility are compositor policy rather than part of this wire
+/// contract.
+interface ext_zwwm_toplevels_v1 version 1 {
+  /// stop inventory observation
+  ///
+  /// All handles created by this manager are closed. No manager done event
+  /// follows destruction; clients should normally destroy handles first.
+  request ~destroy();
+
+  /// a capturable toplevel became available
+  ///
+  /// The handle is opaque, is not a wl_surface or client object id, and is
+  /// valid only until its closed event. Its initial metadata is sent as
+  /// handle events before the manager done boundary.
+  event toplevel(new<ext_zwwm_toplevel_handle_v1> toplevel);
+
+  /// atomic inventory or update boundary
+  ///
+  /// Sent after all initial handles and their metadata, and after each batch
+  /// of live additions, changes, and closures. Clients must not present a
+  /// partially received batch.
+  event done();
+
+  /// the inventory ended; no more events follow
+  event finished();
+}
+
+/// one toplevel capture source
+///
+/// Metadata may be empty when unavailable. A handle cannot be used after
+/// closed, and closed is terminal.
+interface ext_zwwm_toplevel_handle_v1 version 1 {
+  [[bitfield]] enum state {
+    maximized = 1,
+    fullscreen = 2,
+    activated = 4,
+    minimized = 8,
+  }
+
+  request ~destroy();
+
+  /// capture the next toplevel frame
+  ///
+  /// This one-shot capture renders the selected client surface tree at
+  /// client-logical size. It excludes compositor decoration, effects,
+  /// opacity, animation, occlusion, and unrelated scene nodes. The cursor is
+  /// included only when requested and supported. The returned frame
+  /// advertises a SHM buffer contract; source loss is a nonfatal failure.
+  request capture(new<zwwm_screencopy_frame_v1> frame, int overlay_cursor);
+
+  event title(string title);
+  event app_id(string app_id);
+
+  /// decorated logical rectangle in the current output
+  event geometry(int x, int y, int width, int height);
+
+  event state(uint<state> state);
+
+  /// current output, if it is available to this client
+  event output(object<wl_output>? output);
+
+  /// the toplevel is no longer available; terminal
+  event closed();
+}

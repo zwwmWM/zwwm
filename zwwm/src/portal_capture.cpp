@@ -153,13 +153,11 @@ struct PortalCapture::Impl {
     const auto selected = output == nullptr ? self->resolve_output(self->output(client, {})) : self->resolve_output(output);
     if (!selected || (output != nullptr && output != self->output(client, selected->id))) { manager->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "unknown output capture"); return; }
     auto* resource = client->create_resource(&protocol::zwwm_screencopy_frame_v1_interface, id, 1);
-    if (resource == nullptr) { client->post_no_memory(); return; }
-    auto* frame = new (std::nothrow) Frame;
-    if (frame == nullptr) { resource->destroy(); client->post_no_memory(); return; }
+    auto* frame = new Frame;
     frame->owner = self; frame->resource = resource;
     struct ZwwmScreencopyFrameV1FrameImplHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void copy(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* buffer) {
     (frame_copy)(&client, &resource, buffer);
@@ -217,23 +215,21 @@ struct PortalCapture::Impl {
                                         std::int32_t y, std::int32_t width, std::int32_t height) {
     auto* self = manager->data<Impl>();
     if (self == nullptr) return;
-    const auto selected = output == nullptr ? std::nullopt : self->resolve_output(output);
+    const auto selected = self->resolve_output(output);
     if (!selected || output != self->output(client, selected->id)) {
       manager->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "unknown output capture");
       return;
     }
     auto* resource = client->create_resource(&protocol::zwlr_screencopy_frame_v1_interface, id, manager->version);
-    if (resource == nullptr) { client->post_no_memory(); return; }
-    auto* frame = new (std::nothrow) CanonicalFrame;
-    if (frame == nullptr) { resource->destroy(); client->post_no_memory(); return; }
+    auto* frame = new CanonicalFrame;
     frame->owner = self;
     frame->resource = resource;
     struct ZwlrScreencopyFrameV1FrameImplHandler {
   void copy(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* buffer) {
     (canonical_frame_copy)(&client, &resource, buffer);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void copy_with_damage(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* buffer) {
     canonical_frame_copy(&client, &resource, buffer, true);
@@ -265,21 +261,15 @@ struct PortalCapture::Impl {
   static void bind_canonical_screencopy(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
     auto* self = static_cast<Impl*>(data);
     auto* resource = client->create_resource(&protocol::zwlr_screencopy_manager_v1_interface, id, std::min(version, 3U));
-    if (resource == nullptr) { client->post_no_memory(); return; }
     struct ZwlrScreencopyManagerV1ImplHandler {
   void capture_output(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, std::int32_t overlay_cursor, zwayland::server::Resource* output) {
-    ([](zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t frame, std::int32_t cursor, zwayland::server::Resource* output) {
-          canonical_capture_request(c, r, frame, cursor, output, 0, 0, -1, -1);
-        })(&client, &resource, frame, overlay_cursor, output);
+    canonical_capture_request(&client, &resource, frame, overlay_cursor, output, 0, 0, -1, -1);
   }
   void capture_output_region(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, std::int32_t overlay_cursor, zwayland::server::Resource* output, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
-    ([](zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t frame, std::int32_t cursor, zwayland::server::Resource* output,
-           std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
-          canonical_capture_request(c, r, frame, cursor, output, x, y, width, height);
-        })(&client, &resource, frame, overlay_cursor, output, x, y, width, height);
+    canonical_capture_request(&client, &resource, frame, overlay_cursor, output, x, y, width, height);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
     resource->set_data(self); resource->set_handler(protocol::zwlr_screencopy_manager_v1_handler(ZwlrScreencopyManagerV1ImplHandler{}));
@@ -287,31 +277,27 @@ struct PortalCapture::Impl {
   static void get_xdg_output(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, zwayland::server::Resource* output) {
     auto* self = manager->data<Impl>();
     if (self == nullptr) return;
-    const auto info = output == nullptr ? std::nullopt : self->resolve_output(output);
-    if (!info || output->client != client) {
+    const auto info = self->resolve_output(output);
+    if (!info) {
       manager->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "unknown wl_output");
       return;
     }
     auto* resource = client->create_resource(&protocol::zxdg_output_v1_interface, id, std::min(manager->version, 3U));
-    if (resource == nullptr) { client->post_no_memory(); return; }
     struct ZxdgOutputV1ImplHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
-    resource->set_data(self); resource->set_handler(protocol::zxdg_output_v1_handler(ZxdgOutputV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { ([](zwayland::server::Resource* r) {
-      auto* owner = r->data<Impl>();
-       if (owner != nullptr) std::erase_if(owner->xdg_outputs, [r](const auto& item) { return item.first == r; });
-    })(&destroyed); });
+    resource->set_data(self); resource->set_handler(protocol::zxdg_output_v1_handler(ZxdgOutputV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { auto* owner = destroyed.data<Impl>();
+       if (owner != nullptr) std::erase_if(owner->xdg_outputs, [&destroyed](const auto& item) { return item.first == &destroyed; }); });
     self->xdg_outputs.emplace_back(resource, *info);
     send_xdg_output(resource, *info, output);
   }
   static void bind_xdg_output_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
     auto* resource = client->create_resource(&protocol::zxdg_output_manager_v1_interface, id, std::min(version, 3U));
-    if (resource == nullptr) { client->post_no_memory(); return; }
     struct ZxdgOutputManagerV1ImplHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void get_xdg_output(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* output) {
     (Impl::get_xdg_output)(&client, &resource, id, output);
@@ -323,23 +309,20 @@ struct PortalCapture::Impl {
     auto* self = static_cast<Impl*>(data);
     if (!self->trusted(client)) { client->post_error(0, "unauthorized screencopy bind"); return; }
     auto* resource = client->create_resource(&protocol::zwwm_screencopy_view_manager_v1_interface, id, std::min(version, 1U));
-    if (resource == nullptr) { client->post_no_memory(); return; }
     struct ZwwmScreencopyViewManagerV1ImplHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void capture_output(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, zwayland::server::Resource* output, std::int32_t overlay_cursor) {
-    ([](zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id, zwayland::server::Resource* o, std::int32_t cursor) { capture_request(c, r, id, o, cursor, 0, 0, -1, -1); })(&client, &resource, frame, output, overlay_cursor);
+    capture_request(&client, &resource, frame, output, overlay_cursor, 0, 0, -1, -1);
   }
   void capture_output_region(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, zwayland::server::Resource* output, std::int32_t overlay_cursor, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
-    ([](zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id, zwayland::server::Resource* o, std::int32_t cursor, std::int32_t x, std::int32_t y, std::int32_t w, std::int32_t h) { capture_request(c, r, id, o, cursor, x, y, w, h); })(&client, &resource, frame, output, overlay_cursor, x, y, width, height);
+    capture_request(&client, &resource, frame, output, overlay_cursor, x, y, width, height);
   }
 };
     self->screencopy_managers.push_back(resource);
-    resource->set_data(self); resource->set_handler(protocol::zwwm_screencopy_view_manager_v1_handler(ZwwmScreencopyViewManagerV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { ([](zwayland::server::Resource* item) {
-      auto* owner = item->data<Impl>();
-      if (owner != nullptr) std::erase(owner->screencopy_managers, item);
-    })(&destroyed); });
+    resource->set_data(self); resource->set_handler(protocol::zwwm_screencopy_view_manager_v1_handler(ZwwmScreencopyViewManagerV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { auto* owner = destroyed.data<Impl>();
+      if (owner != nullptr) std::erase(owner->screencopy_managers, &destroyed); });
     protocol::zwwm_screencopy_view_manager_v1_send_cursor_modes(*resource,
         protocol::ZWWM_SCREENCOPY_VIEW_MANAGER_V1_CURSOR_MODE_HIDDEN |
         (self->embedded_cursor ? protocol::ZWWM_SCREENCOPY_VIEW_MANAGER_V1_CURSOR_MODE_EMBEDDED : 0));
@@ -358,12 +341,11 @@ struct PortalCapture::Impl {
   static void send_handle(zwayland::server::Client* client, zwayland::server::Resource* manager, const ToplevelInfo& info) {
     auto* resource = client->create_resource(&protocol::ext_zwwm_toplevel_handle_v1_interface, client->alloc_id(), 1);
     if (resource == nullptr) { client->post_no_memory(); return; }
-    auto* handle = new (std::nothrow) Handle;
-    if (handle == nullptr) { resource->destroy(); client->post_no_memory(); return; }
+    auto* handle = new Handle;
     handle->owner = manager->data<Impl>(); handle->resource = resource; handle->manager = manager; handle->info = info;
     struct ExtZwwmToplevelHandleV1ImplHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void capture(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, std::int32_t overlay_cursor) {
     (handle_capture)(&client, &resource, frame, overlay_cursor);
@@ -382,13 +364,12 @@ struct PortalCapture::Impl {
     auto* self = static_cast<Impl*>(data);
     if (!self->trusted(client)) { client->post_error(0, "unauthorized toplevel bind"); return; }
     auto* resource = client->create_resource(&protocol::ext_zwwm_toplevels_v1_interface, id, std::min(version, 1U));
-    if (resource == nullptr) { client->post_no_memory(); return; }
     struct ExtZwwmToplevelsV1ImplHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
-    resource->set_data(self); resource->set_handler(protocol::ext_zwwm_toplevels_v1_handler(ExtZwwmToplevelsV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { ([](zwayland::server::Resource* r) { auto* self = r->data<Impl>(); if (self == nullptr) return; for (auto* handle : self->handles) if (handle->manager == r && !handle->closed) { handle->closed = true; protocol::ext_zwwm_toplevel_handle_v1_send_closed(*handle->resource); } std::erase(self->managers, r); })(&destroyed); });
+    resource->set_data(self); resource->set_handler(protocol::ext_zwwm_toplevels_v1_handler(ExtZwwmToplevelsV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { auto* self = destroyed.data<Impl>(); if (self == nullptr) return; for (auto* handle : self->handles) if (handle->manager == &destroyed && !handle->closed) { handle->closed = true; protocol::ext_zwwm_toplevel_handle_v1_send_closed(*handle->resource); } std::erase(self->managers, &destroyed); });
     self->managers.push_back(resource);
     for (const auto& info : self->toplevels()) send_handle(client, resource, info);
     protocol::ext_zwwm_toplevels_v1_send_done(*resource);
@@ -448,7 +429,6 @@ struct PortalCapture::Impl {
 
   static void bind_access(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
     auto* resource = client->create_resource(&protocol::zwwm_capture_access_v1_interface, id, std::min(version, 1U));
-    if (resource == nullptr) { client->post_no_memory(); return; }
     struct Handler {
       void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) { resource.destroy(); }
       void authenticate(zwayland::server::Client& client, zwayland::server::Resource& resource,
@@ -460,9 +440,7 @@ struct PortalCapture::Impl {
     resource->set_handler(protocol::zwwm_capture_access_v1_handler(Handler{}));
   }
 
-  // Writes a fresh token to $XDG_RUNTIME_DIR/<WAYLAND_DISPLAY>.capture-token,
-  // readable only by this user, and names it in ZWWM_CAPTURE_TOKEN for the
-  // clients zwwm starts. False leaves capture to the portal alone.
+  // Writes a user-only $XDG_RUNTIME_DIR/<WAYLAND_DISPLAY>.capture-token exported as ZWWM_CAPTURE_TOKEN.
   bool create_token() {
     const char* runtime = std::getenv("XDG_RUNTIME_DIR");
     const char* socket_name = std::getenv("WAYLAND_DISPLAY");

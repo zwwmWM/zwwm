@@ -1,0 +1,225 @@
+protocol zwwm_window_manager_v1;
+
+copyright R"(
+Copyright 2026 binarylinuxx. SPDX-License-Identifier: BSD-3-Clause
+)";
+
+/// runtime configuration for external interpreters
+///
+/// Configuration clients translate their own language into typed requests.
+/// This interface does not interpret config.zw and does not own layout
+/// algorithms or window placements; those belong to a layout manager.
+/// Updates are runtime-only and do not write the user's configuration file.
+interface zwwm_window_manager_v1 version 2 {
+  enum window_action {
+    focus = 0,
+    close = 1,
+    raise = 2,
+    floating = 3,
+    fullscreen = 4,
+    hidden = 5,
+  }
+
+  [[bitfield]] enum change {
+    window = 1,
+    output = 2,
+    tag = 4,
+    config = 8,
+    camera = 16,
+    keyboard = 32,
+    session = 64,
+  }
+
+  request ~destroy();
+  request create_configuration(new<zwwm_configuration_v1> id);
+  [[since(2)]] request get_state(new<zwwm_window_state_v1> id);
+  [[since(2)]] request claim_policy(new<zwwm_window_result_v1> id);
+  [[since(2)]] request release_policy();
+  [[since(2)]] request window_action(
+    new<zwwm_window_result_v1> id,
+    uint window_hi,
+    uint window_lo,
+    uint<window_action> action,
+    uint enabled
+  );
+  [[since(2)]] request assign_window(
+    new<zwwm_window_result_v1> id,
+    uint window_hi,
+    uint window_lo,
+    uint output_hi,
+    uint output_lo,
+    uint tag
+  );
+  [[since(2)]] request select_tag(new<zwwm_window_result_v1> id, uint output_hi, uint output_lo, uint tag);
+  [[since(2)]] request dispatch(new<zwwm_window_result_v1> id, string action, string argument);
+
+  event revision(uint revision);
+  [[since(2)]] event changed(uint serial, uint<change> changes);
+  [[since(2)]] event pointer_motion(uint time, uint window_hi, uint window_lo, int x, int y);
+  [[since(2)]] event pointer_button(uint time, uint button, uint state, uint window_hi, uint window_lo);
+  [[since(2)]] event binding(string name, uint time, uint state, uint code);
+  [[since(2)]] event touch(uint time, int id, uint state, int x, int y);
+  [[since(2)]] event gesture(
+    uint kind,
+    uint phase,
+    uint fingers,
+    uint time_hi,
+    uint time_lo,
+    fixed dx,
+    fixed dy,
+    fixed scale,
+    fixed angle,
+    uint cancelled,
+    string device,
+    string output
+  );
+
+  /// application policy request
+  ///
+  /// Kind is 0 for fullscreen, 1 for maximized, 2 for minimized, 3 for
+  /// move, or 4 for resize. Value is a boolean for the first three kinds
+  /// and an xdg_toplevel.resize_edge for resize. Input serial is provided
+  /// for validated interactive move/resize requests; otherwise it is zero.
+  /// Tiled resize is forwarded while external policy and layout are owned;
+  /// floating resize remains compositor-managed. Compositor-initiated tiled
+  /// resize (Super+right-drag) has input serial zero. Use pointer motion and
+  /// release events to update the tiled layout without switching to floating.
+  /// The policy owner decides whether to apply it using control/layout requests.
+  [[since(2)]] event window_request(
+    uint window_hi,
+    uint window_lo,
+    uint kind,
+    uint value,
+    uint input_serial,
+    uint output_hi,
+    uint output_lo
+  );
+}
+
+/// revision-checked configuration transaction
+///
+/// Starts as a copy of the current runtime configuration. Setters edit only
+/// this draft. The first invalid request makes the draft uncommittable.
+/// Commit is one-shot: validation and shader preparation precede application.
+/// Stale drafts fail if another configuration was applied since creation.
+/// Destroying an uncommitted draft cancels it. Strings are literal values;
+/// variable expansion and imports are responsibilities of the interpreter.
+interface zwwm_configuration_v1 version 1 {
+  enum shader_role {
+    window = 0,
+    border = 1,
+    background = 2,
+  }
+
+  request ~destroy();
+  request set_integer(string name, int value);
+  request set_boolean(string name, uint value);
+  request set_string(string name, string value);
+  request clear_bindings();
+  request add_binding(string modifiers, string key, string action, string argument);
+  request clear_window_rules();
+
+  /// append a matching window policy
+  ///
+  /// Floating and opacity use -1 for unspecified. Floating otherwise uses
+  /// 0 or 1; opacity otherwise uses a percentage from 0 to 100. Shader names
+  /// may be empty to leave the choice unchanged. No placement is specified.
+  request add_window_rule(
+    string app_id,
+    string title,
+    int floating,
+    int opacity,
+    string window_shader,
+    string border_shader
+  );
+
+  request clear_layer_rules();
+  request add_layer_rule(string name_space, uint blur_radius, uint opacity, uint ignore_alpha);
+
+  /// set live output scale and transform
+  ///
+  /// Empty connector configures defaults. Named entries inherit defaults
+  /// when first added. Transform is 0, 1, 2, or 3 for normal, 90, 180, or
+  /// 270 degrees. This request does not configure placement or DRM modes.
+  request set_output(string connector, uint scale_per_mille, uint transform);
+
+  request clear_outputs();
+  request clear_shaders();
+
+  /// define or replace a named shader
+  ///
+  /// Source must be an absolute local filename. Values on a replaced
+  /// definition are cleared. Selected shaders must exist with matching roles.
+  request define_shader(string name, uint<shader_role> role, string source);
+
+  request shader_integer(string shader, string name, int value);
+  request shader_boolean(string shader, string name, uint value);
+
+  /// set a color using 0xRRGGBBAA
+  request shader_color(string shader, string name, uint rgba);
+
+  /// set a one-to-twenty color gradient
+  ///
+  /// The array contains one to twenty groups of four bytes in R, G, B, A order.
+  request shader_colors(string shader, string name, array rgba);
+
+  /// set a two-to-four integer vector
+  ///
+  /// The array contains two to four signed 32-bit integers in native wire byte order.
+  request shader_vector(string shader, string name, array components);
+
+  request commit(new<zwwm_configuration_result_v1> id);
+
+  event base_revision(uint revision);
+}
+
+interface zwwm_configuration_result_v1 version 1 {
+  request ~destroy();
+
+  event applied(uint revision);
+  event failed(string message);
+}
+
+interface zwwm_window_result_v1 version 1 {
+  request ~destroy();
+
+  event done();
+  event failed(string message);
+}
+
+interface zwwm_window_state_v1 version 1 {
+  [[bitfield]] enum window_state {
+    mapped = 1,
+    focused = 2,
+    floating = 4,
+    fullscreen = 8,
+    modal = 16,
+    hidden = 32,
+  }
+
+  request ~destroy();
+
+  event output(uint id_hi, uint id_lo, string connector, int x, int y, uint width, uint height, uint tag);
+  event window(
+    uint id_hi,
+    uint id_lo,
+    uint output_hi,
+    uint output_lo,
+    uint tag,
+    uint<window_state> state,
+    string app_id,
+    string title,
+    uint parent_hi,
+    uint parent_lo,
+    int x,
+    int y,
+    uint width,
+    uint height,
+    int min_width,
+    int min_height,
+    int max_width,
+    int max_height
+  );
+  event session_locked(uint locked);
+  event done(uint serial);
+}

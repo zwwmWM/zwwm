@@ -60,12 +60,9 @@ if freebsd
 endif
 python = import('python').find_installation()
 
-libxml = dependency('libxml-2.0')
-
 zwayland_scanner = executable(
   'zwayland-scanner',
-  'zwayland-scanner/main.cpp',
-  dependencies: libxml,
+  ['zwayland-scanner/main.cpp', 'zwayland-scanner/xml.cpp', 'zwayland-scanner/zxml.cpp'],
   cpp_args: strict_cpp,
   native: true,
 )
@@ -152,26 +149,26 @@ protocol_specs = [
   ['keyboard-shortcuts-inhibit', join_paths(wayland_protocols_dir, 'unstable/keyboard-shortcuts-inhibit/keyboard-shortcuts-inhibit-unstable-v1.xml')],
   ['drm-lease', join_paths(wayland_protocols_dir, 'staging/drm-lease/drm-lease-v1.xml')],
   ['session-lock', join_paths(wayland_protocols_dir, 'staging/ext-session-lock/ext-session-lock-v1.xml')],
-  ['zwwm-tags-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-tags-unstable-v1.xml')],
-  ['zwwm-data-control-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-data-control-v1.xml')],
-  ['wlr-data-control-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/wlr-data-control-unstable-v1.xml')],
-  ['zwwm-layer-shell-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-layer-shell-v1.xml')],
-  ['zwwm-focus-grab-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-focus-grab-v1.xml')],
-  ['zwwm-decoration-manager-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-decoration-manager-v1.xml')],
-  ['zwwm-virtual-keyboard-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-virtual-keyboard-v1.xml')],
-  ['zwwm-window-manager-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-window-manager-v1.xml')],
-  ['zwwm-layout-manager-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-layout-manager-v1.xml')],
-  ['xwlr-layer-shell-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/xwlr-layer-shell-v1.xml')],
-  ['zwwm-screencopy-view-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-screencopy-view-unstable-v1.xml')],
-  ['ext-zwwm-toplevels-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/ext-zwwm-toplevels-unstable-v1.xml')],
-  ['ext-zwwm-manager-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/ext-zwwm-manager-v1.xml')],
-  ['zwwm-client-connection-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-client-connection-v1.xml')],
-  ['xwayland-shell', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm_xwayland_shell.xml')],
-  ['wlr-output-power-management-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/wlr-output-power-management-unstable-v1.xml')],
-  ['input-method-unstable-v2', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/input-method-unstable-v2.xml')],
-  ['virtual-keyboard-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/virtual-keyboard-unstable-v1.xml')],
-  ['zwwm-edge-swipe-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-edge-swipe-v1.xml')],
-  ['zwwm-capture-access-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-capture-access-v1.xml')],
+  ['zwwm-tags-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-tags-unstable-v1.zxml')],
+  ['zwwm-data-control-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-data-control-v1.zxml')],
+  ['wlr-data-control-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/wlr-data-control-unstable-v1.zxml')],
+  ['zwwm-layer-shell-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-layer-shell-v1.zxml')],
+  ['zwwm-focus-grab-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-focus-grab-v1.zxml')],
+  ['zwwm-decoration-manager-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-decoration-manager-v1.zxml')],
+  ['zwwm-virtual-keyboard-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-virtual-keyboard-v1.zxml')],
+  ['zwwm-window-manager-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-window-manager-v1.zxml')],
+  ['zwwm-layout-manager-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-layout-manager-v1.zxml')],
+  ['xwlr-layer-shell-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/xwlr-layer-shell-v1.zxml')],
+  ['zwwm-screencopy-view-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-screencopy-view-unstable-v1.zxml')],
+  ['ext-zwwm-toplevels-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/ext-zwwm-toplevels-unstable-v1.zxml')],
+  ['ext-zwwm-manager-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/ext-zwwm-manager-v1.zxml')],
+  ['zwwm-client-connection-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-client-connection-v1.zxml')],
+  ['xwayland-shell', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-xwayland-shell-v1.zxml')],
+  ['wlr-output-power-management-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/wlr-output-power-management-unstable-v1.zxml')],
+  ['input-method-unstable-v2', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/input-method-unstable-v2.zxml')],
+  ['virtual-keyboard-unstable-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/virtual-keyboard-unstable-v1.zxml')],
+  ['zwwm-edge-swipe-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-edge-swipe-v1.zxml')],
+  ['zwwm-capture-access-v1', join_paths(meson.project_source_root(), 'zwwm-protocols/protocols/zwwm-capture-access-v1.zxml')],
 ]
 
 protocol_server_headers = []
@@ -554,14 +551,18 @@ install_data(
 )
 install_data('zwwm/data/zwwm.desktop', install_dir: get_option('datadir') / 'wayland-sessions')
 install_headers('zwwm/include/zwwm/plugin.hpp', subdir: 'zwwm')
-install_data('zwwm-protocols/protocols/zwwm-layer-shell-v1.xml',
-  'zwwm-protocols/protocols/zwwm-client-connection-v1.xml',
-  'zwwm-protocols/protocols/xwlr-layer-shell-v1.xml',
-  'zwwm-protocols/protocols/zwwm-decoration-manager-v1.xml',
-  'zwwm-protocols/protocols/zwwm-virtual-keyboard-v1.xml',
-  'zwwm-protocols/protocols/zwwm-window-manager-v1.xml',
-  'zwwm-protocols/protocols/zwwm-layout-manager-v1.xml',
-  install_dir: get_option('datadir') / 'zwwm/protocols')
+foreach installed_protocol : ['zwwm-layer-shell-v1', 'zwwm-client-connection-v1', 'xwlr-layer-shell-v1',
+                              'zwwm-decoration-manager-v1', 'zwwm-virtual-keyboard-v1', 'zwwm-window-manager-v1',
+                              'zwwm-layout-manager-v1']
+  custom_target(
+    installed_protocol + '-xml',
+    input: 'zwwm-protocols/protocols/' + installed_protocol + '.zxml',
+    output: installed_protocol + '.xml',
+    command: [zwayland_scanner, 'xml', '@INPUT@', '@OUTPUT@'],
+    install: true,
+    install_dir: get_option('datadir') / 'zwwm/protocols',
+  )
+endforeach
 install_data(
   'LICENSE',
   install_dir: get_option('datadir') / 'doc/zwwm',

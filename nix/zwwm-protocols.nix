@@ -1,4 +1,4 @@
-{ lib, stdenvNoCC }:
+{ lib, stdenvNoCC, zwayland-scanner }:
 
 stdenvNoCC.mkDerivation {
   pname = "zwwm-protocols";
@@ -13,12 +13,17 @@ stdenvNoCC.mkDerivation {
     ];
   };
 
+  nativeBuildInputs = [ zwayland-scanner ];
   dontConfigure = true;
   dontBuild = true;
   installPhase = ''
     runHook preInstall
     mkdir -p "$out/share/zwwm-protocols" "$out/share/pkgconfig" "$out/share/doc/zwwm-protocols"
     cp -r zwwm-protocols/protocols/. "$out/share/zwwm-protocols/"
+    # zxml sources also ship as Wayland XML for third-party generators.
+    for zxml in zwwm-protocols/protocols/*.zxml; do
+      zwayland-scanner xml "$zxml" "$out/share/zwwm-protocols/$(basename "$zxml" .zxml).xml"
+    done
     cp LICENSE THIRD_PARTY.md "$out/share/doc/zwwm-protocols/"
     substitute zwwm-protocols/zwwm-protocols.pc.in "$out/share/pkgconfig/zwwm-protocols.pc" \
       --subst-var-by prefix "$out" --subst-var-by version "$version"

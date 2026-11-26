@@ -3,7 +3,6 @@
 #include <zwwm-edge-swipe-v1-zwayland-server.h>
 
 #include <algorithm>
-#include <new>
 
 namespace protocol = zwayland::generated;
 namespace zwwm::detail {
@@ -52,12 +51,7 @@ struct EdgeSwipeManagerHandler {
                       std::uint32_t edges) {
     auto* seat = manager.data<SeatState>();
     auto* resource = client.create_resource(&protocol::zwwm_edge_swipe_v1_interface, id, 1);
-    auto* swipe = resource == nullptr ? nullptr : new (std::nothrow) EdgeSwipeState{seat, resource, edges};
-    if (swipe == nullptr) {
-      if (resource != nullptr) resource->destroy();
-      client.post_no_memory();
-      return;
-    }
+    auto* swipe = new EdgeSwipeState{seat, resource, edges};
     seat->edge_swipes.push_back(swipe);
     resource->set_data(swipe);
     resource->set_handler(protocol::zwwm_edge_swipe_v1_handler(EdgeSwipeHandler{}));
@@ -132,7 +126,6 @@ void edge_swipe_cancel(SeatState* seat, std::uint32_t time) { finish(seat, time,
 
 void bind_edge_swipe_manager(zwayland::server::Client* client, void* data, std::uint32_t, std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::zwwm_edge_swipe_manager_v1_interface, id, 1);
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_data(static_cast<SeatState*>(data));
   resource->set_handler(protocol::zwwm_edge_swipe_manager_v1_handler(EdgeSwipeManagerHandler{}));
 }

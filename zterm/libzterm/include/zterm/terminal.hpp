@@ -80,8 +80,7 @@ class Terminal {
   std::uint64_t revision() const { return revision_; }
   std::uint64_t selection_revision() const { return selection_revision_; }
   std::string take_output();
-  // True while the app holds a synchronized update (mode 2026); renderers should
-  // not present until it ends or times out.
+  // True during a synchronized update (mode 2026); renderers hold presents until it ends.
   bool synchronized() const;
   // Milliseconds until a held synchronized update times out, or -1.
   int synchronized_timeout() const;

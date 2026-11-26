@@ -7,7 +7,6 @@
 #include <wlr-data-control-unstable-v1-zwayland-server.h>
 
 #include <algorithm>
-#include <new>
 #include <unistd.h>
 
 namespace protocol = zwayland::generated;
@@ -93,8 +92,8 @@ struct WlDataOfferKDataOfferHandler {
   void receive(zwayland::server::Client& client, zwayland::server::Resource& resource, std::string mime_type, int fd) {
     (data_offer_receive)(&client, &resource, mime_type.c_str(), fd);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void finish(zwayland::server::Client& client, zwayland::server::Resource& resource) {
     (data_offer_finish)(&client, &resource);
@@ -103,30 +102,29 @@ struct WlDataOfferKDataOfferHandler {
     (data_offer_set_actions)(&client, &resource, dnd_actions, preferred_action);
   }
 };
-DataOfferState* make_data_offer(DataDeviceState* device, DataSourceState* source, bool drag = false) { auto* client = device->resource->client; auto* resource = client->create_resource(&protocol::wl_data_offer_interface, client->alloc_id(), device->resource->version); auto* offer = resource == nullptr ? nullptr : new (std::nothrow) DataOfferState{device->seat, source, resource}; if (resource == nullptr || offer == nullptr) { if (resource != nullptr) resource->destroy(); client->post_no_memory(); return nullptr; } offer->drag = drag; offer->active = drag; if (drag && resource->version < 3) { offer->actions = protocol::WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY; offer->preferred_action = protocol::WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY; } device->seat->data_offers.push_back(offer); resource->set_data(offer); resource->set_handler(protocol::wl_data_offer_handler(WlDataOfferKDataOfferHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (data_offer_destroyed)(&destroyed); }); protocol::wl_data_device_send_data_offer(*device->resource, resource); for (const auto& mime : source->mime_types) protocol::wl_data_offer_send_offer(*resource, mime.c_str()); if (drag && resource->version >= 3) protocol::wl_data_offer_send_source_actions(*resource, source->actions); if (drag) publish_drag_action(offer); return offer; }
+DataOfferState* make_data_offer(DataDeviceState* device, DataSourceState* source, bool drag = false) { auto* client = device->resource->client; auto* resource = client->create_resource(&protocol::wl_data_offer_interface, client->alloc_id(), device->resource->version); auto* offer = new DataOfferState{device->seat, source, resource}; offer->drag = drag; offer->active = drag; if (drag && resource->version < 3) { offer->actions = protocol::WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY; offer->preferred_action = protocol::WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY; } device->seat->data_offers.push_back(offer); resource->set_data(offer); resource->set_handler(protocol::wl_data_offer_handler(WlDataOfferKDataOfferHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (data_offer_destroyed)(&destroyed); }); protocol::wl_data_device_send_data_offer(*device->resource, resource); for (const auto& mime : source->mime_types) protocol::wl_data_offer_send_offer(*resource, mime.c_str()); if (drag && resource->version >= 3) protocol::wl_data_offer_send_source_actions(*resource, source->actions); if (drag) publish_drag_action(offer); return offer; }
 void control_offer_receive(zwayland::server::Client*, zwayland::server::Resource* resource, const char* mime, std::int32_t fd) { data_offer_receive(nullptr, resource, mime, fd); }
 struct ZwwmDataControlOfferV1KDataControlOfferHandler {
   void receive(zwayland::server::Client& client, zwayland::server::Resource& resource, std::string mime_type, int fd) {
     (control_offer_receive)(&client, &resource, mime_type.c_str(), fd);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 struct ZwlrDataControlOfferV1KWlrDataControlOfferHandler {
   void receive(zwayland::server::Client& client, zwayland::server::Resource& resource, std::string mime_type, int fd) {
     (control_offer_receive)(&client, &resource, mime_type.c_str(), fd);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 zwayland::server::Resource* make_control_offer(DataDeviceState* device, DataSourceState* source) {
   auto* client = device->resource->client;
   const auto* interface = device->protocol == DataProtocol::zwlr ? &protocol::zwlr_data_control_offer_v1_interface : &protocol::zwwm_data_control_offer_v1_interface;
   auto* resource = client->create_resource(interface, client->alloc_id(), device->resource->version);
-  auto* offer = resource == nullptr ? nullptr : new (std::nothrow) DataOfferState{device->seat, source, resource, device->protocol};
-  if (resource == nullptr || offer == nullptr) { if (resource != nullptr) resource->destroy(); client->post_no_memory(); return nullptr; }
+  auto* offer = new DataOfferState{device->seat, source, resource, device->protocol};
   device->seat->data_offers.push_back(offer);
   resource->set_data(offer);
   if (device->protocol == DataProtocol::zwlr)
@@ -277,8 +275,8 @@ struct WlDataSourceKDataSourceHandler {
   void offer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::string mime_type) {
     (data_source_offer)(&client, &resource, mime_type.c_str());
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void set_actions(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t dnd_actions) {
     (data_source_set_actions)(&client, &resource, dnd_actions);
@@ -289,8 +287,8 @@ void data_device_start_drag(zwayland::server::Client* client, zwayland::server::
   auto* device = resource->data<DataDeviceState>();
   auto* seat = device->seat;
   auto* source = source_resource == nullptr ? nullptr : source_resource->data<DataSourceState>();
-  auto* origin = compositor_surface_from_resource(client, origin_resource);
-  auto* icon = icon_resource == nullptr ? nullptr : compositor_surface_from_resource(client, icon_resource);
+  auto* origin = compositor_surface_from_resource(origin_resource);
+  auto* icon = icon_resource == nullptr ? nullptr : compositor_surface_from_resource(icon_resource);
   const bool valid = seat->drag_origin == nullptr && seat->button_client == client && seat->button_serial == serial &&
       seat->button != 0 && std::find(seat->pressed_buttons.begin(), seat->pressed_buttons.end(), seat->button) != seat->pressed_buttons.end() &&
       origin != nullptr && seat->pointer_focus != nullptr && root(seat->pointer_focus) == root(origin);
@@ -350,12 +348,12 @@ struct WlDataDeviceKDataDeviceHandler {
   void set_selection(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* source, std::uint32_t serial) {
     (data_device_set_selection)(&client, &resource, source, serial);
   }
-  void release(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void release(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
-void manager_create_source(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id) { auto* seat = manager->data<SeatState>(); auto* resource = client->create_resource(&protocol::wl_data_source_interface, id, manager->version); auto* source = resource == nullptr ? nullptr : new (std::nothrow) DataSourceState; if (source != nullptr) { source->seat = seat; source->resource = resource; } if (resource == nullptr || source == nullptr) { if (resource != nullptr) resource->destroy(); client->post_no_memory(); return; } seat->data_sources.push_back(source); resource->set_data(source); resource->set_handler(protocol::wl_data_source_handler(WlDataSourceKDataSourceHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (data_source_destroyed)(&destroyed); }); }
-void manager_get_device(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, zwayland::server::Resource* seat_resource) { auto* seat = manager->data<SeatState>(); if (seat_resource == nullptr || seat_resource->data<SeatState>() != seat) { client->post_error(0, "data device requested for an unknown seat"); return; } auto* resource = client->create_resource(&protocol::wl_data_device_interface, id, manager->version); auto* device = resource == nullptr ? nullptr : new (std::nothrow) DataDeviceState{seat, resource}; if (resource == nullptr || device == nullptr) { if (resource != nullptr) resource->destroy(); client->post_no_memory(); return; } seat->data_devices.push_back(device); resource->set_data(device); resource->set_handler(protocol::wl_data_device_handler(WlDataDeviceKDataDeviceHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (data_device_destroyed)(&destroyed); }); if (seat->keyboard_focus != nullptr && seat->keyboard_focus->resource->client == client) send_selection(seat, client); }
+void manager_create_source(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id) { auto* seat = manager->data<SeatState>(); auto* resource = client->create_resource(&protocol::wl_data_source_interface, id, manager->version); auto* source = new DataSourceState; source->seat = seat; source->resource = resource; seat->data_sources.push_back(source); resource->set_data(source); resource->set_handler(protocol::wl_data_source_handler(WlDataSourceKDataSourceHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (data_source_destroyed)(&destroyed); }); }
+void manager_get_device(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, zwayland::server::Resource* seat_resource) { auto* seat = manager->data<SeatState>(); if (seat_resource->data<SeatState>() != seat) { client->post_error(0, "data device requested for an unknown seat"); return; } auto* resource = client->create_resource(&protocol::wl_data_device_interface, id, manager->version); auto* device = new DataDeviceState{seat, resource}; seat->data_devices.push_back(device); resource->set_data(device); resource->set_handler(protocol::wl_data_device_handler(WlDataDeviceKDataDeviceHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (data_device_destroyed)(&destroyed); }); if (seat->keyboard_focus != nullptr && seat->keyboard_focus->resource->client == client) send_selection(seat, client); }
 struct WlDataDeviceManagerKDataDeviceManagerHandler {
   void create_data_source(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id) {
     (manager_create_source)(&client, &resource, id);
@@ -363,26 +361,26 @@ struct WlDataDeviceManagerKDataDeviceManagerHandler {
   void get_data_device(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* seat) {
     (manager_get_device)(&client, &resource, id, seat);
   }
-  void release(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void release(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
-void bind_data_device_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) { auto* resource = client->create_resource(&protocol::wl_data_device_manager_interface, id, std::min(version, kDataDeviceManagerVersion)); if (resource == nullptr) { client->post_no_memory(); return; } resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::wl_data_device_manager_handler(WlDataDeviceManagerKDataDeviceManagerHandler{})); }
+void bind_data_device_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) { auto* resource = client->create_resource(&protocol::wl_data_device_manager_interface, id, std::min(version, kDataDeviceManagerVersion)); resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::wl_data_device_manager_handler(WlDataDeviceManagerKDataDeviceManagerHandler{})); }
 void data_control_source_offer(zwayland::server::Client*, zwayland::server::Resource* resource, const char* mime) { auto* source = resource->data<DataSourceState>(); if (mime != nullptr && mime[0] != '\0' && std::find(source->mime_types.begin(), source->mime_types.end(), mime) == source->mime_types.end()) source->mime_types.emplace_back(mime); }
 struct ZwwmDataControlSourceV1KDataControlSourceHandler {
   void offer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::string mime_type) {
     (data_control_source_offer)(&client, &resource, mime_type.c_str());
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 struct ZwlrDataControlSourceV1KWlrDataControlSourceHandler {
   void offer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::string mime_type) {
     (data_control_source_offer)(&client, &resource, mime_type.c_str());
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 void data_control_set_selection(zwayland::server::Client*, zwayland::server::Resource* resource, zwayland::server::Resource* source_resource) { auto* device = resource->data<DataDeviceState>(); replace_selection(device->seat, source_resource == nullptr ? nullptr : source_resource->data<DataSourceState>(), false, resource); }
@@ -394,23 +392,23 @@ struct ZwwmDataControlDeviceV1KDataControlDeviceHandler {
   void set_primary_selection(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* source) {
     (data_control_set_primary_selection)(&client, &resource, source);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 struct ZwlrDataControlDeviceV1KWlrDataControlDeviceHandler {
   void set_selection(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* source) {
     (data_control_set_selection)(&client, &resource, source);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void set_primary_selection(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* source) {
     (data_control_set_primary_selection)(&client, &resource, source);
   }
 };
-void create_control_source(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, DataProtocol protocol) { auto* seat = manager->data<SeatState>(); const auto* interface = protocol == DataProtocol::zwlr ? &protocol::zwlr_data_control_source_v1_interface : &protocol::zwwm_data_control_source_v1_interface; auto* resource = client->create_resource(interface, id, manager->version); auto* source = resource == nullptr ? nullptr : new (std::nothrow) DataSourceState; if (source != nullptr) { source->seat = seat; source->resource = resource; source->protocol = protocol; } if (resource == nullptr || source == nullptr) { if (resource != nullptr) resource->destroy(); client->post_no_memory(); return; } seat->data_sources.push_back(source); resource->set_data(source); if (protocol == DataProtocol::zwlr) resource->set_handler(protocol::zwlr_data_control_source_v1_handler(ZwlrDataControlSourceV1KWlrDataControlSourceHandler{})); else resource->set_handler(protocol::zwwm_data_control_source_v1_handler(ZwwmDataControlSourceV1KDataControlSourceHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { data_source_destroyed(&destroyed); }); }
-void get_control_device(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, zwayland::server::Resource* seat_resource, DataProtocol protocol) { auto* seat = manager->data<SeatState>(); if (seat_resource == nullptr || seat_resource->data<SeatState>() != seat) { client->post_error(0, "data control device requested for an unknown seat"); return; } const auto* interface = protocol == DataProtocol::zwlr ? &protocol::zwlr_data_control_device_v1_interface : &protocol::zwwm_data_control_device_v1_interface; auto* resource = client->create_resource(interface, id, manager->version); auto* device = resource == nullptr ? nullptr : new (std::nothrow) DataDeviceState{seat, resource, protocol}; if (resource == nullptr || device == nullptr) { if (resource != nullptr) resource->destroy(); client->post_no_memory(); return; } seat->data_control_devices.push_back(device); resource->set_data(device); if (protocol == DataProtocol::zwlr) resource->set_handler(protocol::zwlr_data_control_device_v1_handler(ZwlrDataControlDeviceV1KWlrDataControlDeviceHandler{})); else resource->set_handler(protocol::zwwm_data_control_device_v1_handler(ZwwmDataControlDeviceV1KDataControlDeviceHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { data_device_destroyed(&destroyed); }); send_control_selection(device, false); send_control_selection(device, true); }
+void create_control_source(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, DataProtocol protocol) { auto* seat = manager->data<SeatState>(); const auto* interface = protocol == DataProtocol::zwlr ? &protocol::zwlr_data_control_source_v1_interface : &protocol::zwwm_data_control_source_v1_interface; auto* resource = client->create_resource(interface, id, manager->version); auto* source = new DataSourceState; source->seat = seat; source->resource = resource; source->protocol = protocol; seat->data_sources.push_back(source); resource->set_data(source); if (protocol == DataProtocol::zwlr) resource->set_handler(protocol::zwlr_data_control_source_v1_handler(ZwlrDataControlSourceV1KWlrDataControlSourceHandler{})); else resource->set_handler(protocol::zwwm_data_control_source_v1_handler(ZwwmDataControlSourceV1KDataControlSourceHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { data_source_destroyed(&destroyed); }); }
+void get_control_device(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, zwayland::server::Resource* seat_resource, DataProtocol protocol) { auto* seat = manager->data<SeatState>(); if (seat_resource->data<SeatState>() != seat) { client->post_error(0, "data control device requested for an unknown seat"); return; } const auto* interface = protocol == DataProtocol::zwlr ? &protocol::zwlr_data_control_device_v1_interface : &protocol::zwwm_data_control_device_v1_interface; auto* resource = client->create_resource(interface, id, manager->version); auto* device = new DataDeviceState{seat, resource, protocol}; seat->data_control_devices.push_back(device); resource->set_data(device); if (protocol == DataProtocol::zwlr) resource->set_handler(protocol::zwlr_data_control_device_v1_handler(ZwlrDataControlDeviceV1KWlrDataControlDeviceHandler{})); else resource->set_handler(protocol::zwwm_data_control_device_v1_handler(ZwwmDataControlDeviceV1KDataControlDeviceHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { data_device_destroyed(&destroyed); }); send_control_selection(device, false); send_control_selection(device, true); }
 void data_control_create_source(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id) { create_control_source(client, manager, id, DataProtocol::zwwm); }
 void data_control_get_device(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, zwayland::server::Resource* seat_resource) { get_control_device(client, manager, id, seat_resource, DataProtocol::zwwm); }
 struct ZwwmDataControlManagerV1KDataControlManagerHandler {
@@ -420,11 +418,11 @@ struct ZwwmDataControlManagerV1KDataControlManagerHandler {
   void get_device(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* seat) {
     (data_control_get_device)(&client, &resource, id, seat);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
-void bind_data_control_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) { auto* resource = client->create_resource(&protocol::zwwm_data_control_manager_v1_interface, id, std::min(version, 1U)); if (resource == nullptr) { client->post_no_memory(); return; } resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::zwwm_data_control_manager_v1_handler(ZwwmDataControlManagerV1KDataControlManagerHandler{})); }
+void bind_data_control_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) { auto* resource = client->create_resource(&protocol::zwwm_data_control_manager_v1_interface, id, std::min(version, 1U)); resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::zwwm_data_control_manager_v1_handler(ZwwmDataControlManagerV1KDataControlManagerHandler{})); }
 void wlr_data_control_create_source(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id) { create_control_source(client, manager, id, DataProtocol::zwlr); }
 void wlr_data_control_get_device(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id, zwayland::server::Resource* seat_resource) { get_control_device(client, manager, id, seat_resource, DataProtocol::zwlr); }
 struct ZwlrDataControlManagerV1KWlrDataControlManagerHandler {
@@ -434,10 +432,10 @@ struct ZwlrDataControlManagerV1KWlrDataControlManagerHandler {
   void get_data_device(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* seat) {
     (wlr_data_control_get_device)(&client, &resource, id, seat);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
-void bind_wlr_data_control_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) { auto* resource = client->create_resource(&protocol::zwlr_data_control_manager_v1_interface, id, std::min(version, 2U)); if (resource == nullptr) { client->post_no_memory(); return; } resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::zwlr_data_control_manager_v1_handler(ZwlrDataControlManagerV1KWlrDataControlManagerHandler{})); }
+void bind_wlr_data_control_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) { auto* resource = client->create_resource(&protocol::zwlr_data_control_manager_v1_interface, id, std::min(version, 2U)); resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::zwlr_data_control_manager_v1_handler(ZwlrDataControlManagerV1KWlrDataControlManagerHandler{})); }
 
 }  // namespace zwwm::detail

@@ -398,8 +398,7 @@ std::string decimal_text(std::int64_t thousandths) {
   return fraction.empty() ? text : text + "." + fraction;
 }
 
-// Substitutes variables in place. The last definition of a variable wins everywhere, so a
-// later override also reaches values from files imported before it.
+// Substitutes variables in place; the last definition wins, even in earlier imports.
 class Resolver {
  public:
   Resolver(Config& config, std::vector<Diagnostic>& diagnostics) : config_(config), diagnostics_(diagnostics) {}

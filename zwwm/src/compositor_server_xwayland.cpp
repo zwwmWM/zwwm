@@ -9,7 +9,6 @@
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
-#include <new>
 #include <signal.h>
 #include <span>
 #include <string>
@@ -57,8 +56,7 @@ bool XwaylandRuntime::is_own(xcb_window_t id) const {
 
 XwaylandWindow* XwaylandRuntime::track(xcb_window_t id, std::int16_t x, std::int16_t y, std::uint16_t width,
                                        std::uint16_t height, bool override_redirect) {
-    auto* item = new (std::nothrow) XwaylandWindow;
-    if (item == nullptr) return nullptr;
+    auto* item = new XwaylandWindow;
     item->id = id; item->x = x; item->y = y;
     item->width = width; item->height = height;
     item->requested_bounds = {x, y, width, height};
@@ -888,41 +886,33 @@ void XwaylandRuntime::surface_resource_destroyed(zwayland::server::Resource* res
 void XwaylandRuntime::get_xwayland_surface(zwayland::server::Client* binding_client, zwayland::server::Resource* shell_resource,
                                    std::uint32_t id, zwayland::server::Resource* surface_resource) {
     auto* runtime = shell_resource->data<XwaylandRuntime>();
-    auto* surface = surface_resource == nullptr || surface_resource->client != binding_client ? nullptr :
-        surface_resource->data<SurfaceState>();
-    if (runtime == nullptr || binding_client != runtime->client || surface == nullptr ||
+    auto* surface = surface_resource->data<SurfaceState>();
+    if (runtime == nullptr || surface == nullptr ||
         surface->xdg_surface != nullptr || surface->layer_role_assigned || surface->parent != nullptr || surface->drag_icon_role) {
       shell_resource->post_error(protocol::XWAYLAND_SHELL_V1_ERROR_ROLE,
                              "wl_surface already has a role");
       return;
     }
     auto* resource = binding_client->create_resource(&protocol::xwayland_surface_v1_interface, id, 1);
-    auto* role = resource == nullptr ? nullptr : new (std::nothrow) XwaylandSurfaceState;
-    if (resource == nullptr || role == nullptr) {
-      if (resource != nullptr) resource->destroy();
-      binding_client->post_no_memory();
-      return;
-    }
+    auto* role = new XwaylandSurfaceState;
     role->runtime = runtime; role->surface = surface; role->resource = resource;
     surface->xwayland_surface = role;
     surface->layer_role_assigned = true;
     runtime->surfaces.push_back(role);
     struct XwaylandSurfaceV1ImplementationHandler {
-  void set_serial(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t serial_lo, std::uint32_t serial_hi) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* role_resource, std::uint32_t serial_lo, std::uint32_t serial_hi) {
-          auto* state = role_resource->data<XwaylandSurfaceState>();
+  void set_serial(zwayland::server::Client&, zwayland::server::Resource& resource, std::uint32_t serial_lo, std::uint32_t serial_hi) {
+    auto* state = resource.data<XwaylandSurfaceState>();
           const auto serial = static_cast<std::uint64_t>(serial_lo) |
                               (static_cast<std::uint64_t>(serial_hi) << 32U);
           if (serial == 0) {
-            role_resource->post_error(protocol::XWAYLAND_SURFACE_V1_ERROR_INVALID_SERIAL,
+            resource.post_error(protocol::XWAYLAND_SURFACE_V1_ERROR_INVALID_SERIAL,
                                    "xwayland surface serial must be non-zero");
             return;
           }
           state->pending_serial = serial;
-        })(&client, &resource, serial_lo, serial_hi);
   }
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* role_resource) { role_resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
     resource->set_data(role); resource->set_handler(protocol::xwayland_surface_v1_handler(XwaylandSurfaceV1ImplementationHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (surface_resource_destroyed)(&destroyed); });
@@ -935,10 +925,9 @@ void XwaylandRuntime::bind_shell(zwayland::server::Client* binding_client, void*
       return;
     }
     auto* resource = binding_client->create_resource(&protocol::xwayland_shell_v1_interface, id, std::min(version, 1U));
-    if (resource == nullptr) { binding_client->post_no_memory(); return; }
     struct XwaylandShellV1ImplementationHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* shell_resource) { shell_resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void get_xwayland_surface(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* surface) {
     (XwaylandRuntime::get_xwayland_surface)(&client, &resource, id, surface);

@@ -73,38 +73,48 @@ zwwm_add_standard_protocol(keyboard-shortcuts-inhibit unstable/keyboard-shortcut
 zwwm_add_standard_protocol(drm-lease staging/drm-lease/drm-lease-v1.xml)
 zwwm_add_standard_protocol(session-lock staging/ext-session-lock/ext-session-lock-v1.xml)
 
-# zwwm-specific protocols are retained as source XML under protocols/.
-zwwm_add_project_protocol(zwwm-tags-unstable-v1 protocols/zwwm-tags-unstable-v1.xml)
-zwwm_add_project_protocol(zwwm-data-control-v1 protocols/zwwm-data-control-v1.xml)
-zwwm_add_project_protocol(wlr-data-control-unstable-v1 protocols/wlr-data-control-unstable-v1.xml)
-zwwm_add_project_protocol(zwwm-layer-shell-v1 protocols/zwwm-layer-shell-v1.xml)
-zwwm_add_project_protocol(zwwm-focus-grab-v1 protocols/zwwm-focus-grab-v1.xml)
-zwwm_add_project_protocol(zwwm-decoration-manager-v1 protocols/zwwm-decoration-manager-v1.xml)
-zwwm_add_project_protocol(zwwm-virtual-keyboard-v1 protocols/zwwm-virtual-keyboard-v1.xml)
-zwwm_add_project_protocol(zwwm-window-manager-v1 protocols/zwwm-window-manager-v1.xml)
-zwwm_add_project_protocol(zwwm-layout-manager-v1 protocols/zwwm-layout-manager-v1.xml)
-install(FILES protocols/zwwm-layout-manager-v1.xml
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
-install(FILES protocols/zwwm-window-manager-v1.xml
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
-install(FILES protocols/zwwm-virtual-keyboard-v1.xml
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
-install(FILES protocols/zwwm-decoration-manager-v1.xml
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
-zwwm_add_project_protocol(xwlr-layer-shell-v1 protocols/xwlr-layer-shell-v1.xml)
-zwwm_add_project_protocol(zwwm-screencopy-view-unstable-v1 protocols/zwwm-screencopy-view-unstable-v1.xml)
-zwwm_add_project_protocol(ext-zwwm-toplevels-unstable-v1 protocols/ext-zwwm-toplevels-unstable-v1.xml)
-zwwm_add_project_protocol(ext-zwwm-manager-v1 protocols/ext-zwwm-manager-v1.xml)
-zwwm_add_project_protocol(zwwm-client-connection-v1 protocols/zwwm-client-connection-v1.xml)
-install(FILES protocols/zwwm-client-connection-v1.xml DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
-zwwm_add_project_protocol(xwayland-shell protocols/zwwm_xwayland_shell.xml)
-zwwm_add_project_protocol(wlr-output-power-management-unstable-v1 protocols/wlr-output-power-management-unstable-v1.xml)
-zwwm_add_project_protocol(input-method-unstable-v2 protocols/input-method-unstable-v2.xml)
-zwwm_add_project_protocol(virtual-keyboard-unstable-v1 protocols/virtual-keyboard-unstable-v1.xml)
-zwwm_add_project_protocol(zwwm-edge-swipe-v1 protocols/zwwm-edge-swipe-v1.xml)
-zwwm_add_project_protocol(zwwm-capture-access-v1 protocols/zwwm-capture-access-v1.xml)
-install(FILES protocols/zwwm-capture-access-v1.xml DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
-install(FILES protocols/zwwm-edge-swipe-v1.xml DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
+# zwwm-specific protocols are zxml sources; installed copies are generated Wayland XML.
+function(zwwm_install_protocol_xml name)
+  set(zxml "${CMAKE_CURRENT_SOURCE_DIR}/protocols/${name}.zxml")
+  set(xml "${ZWWW_GENERATED_DIR}/${name}.xml")
+  add_custom_command(
+    OUTPUT "${xml}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${ZWWW_GENERATED_DIR}"
+    COMMAND "$<TARGET_FILE:zwayland-scanner>" xml "${zxml}" "${xml}"
+    DEPENDS "${zxml}" zwayland-scanner
+    VERBATIM
+  )
+  add_custom_target("${name}-xml" ALL DEPENDS "${xml}")
+  install(FILES "${xml}" DESTINATION "${CMAKE_INSTALL_DATADIR}/zwwm/protocols")
+endfunction()
+
+zwwm_add_project_protocol(zwwm-tags-unstable-v1 protocols/zwwm-tags-unstable-v1.zxml)
+zwwm_add_project_protocol(zwwm-data-control-v1 protocols/zwwm-data-control-v1.zxml)
+zwwm_add_project_protocol(wlr-data-control-unstable-v1 protocols/wlr-data-control-unstable-v1.zxml)
+zwwm_add_project_protocol(zwwm-layer-shell-v1 protocols/zwwm-layer-shell-v1.zxml)
+zwwm_add_project_protocol(zwwm-focus-grab-v1 protocols/zwwm-focus-grab-v1.zxml)
+zwwm_add_project_protocol(zwwm-decoration-manager-v1 protocols/zwwm-decoration-manager-v1.zxml)
+zwwm_add_project_protocol(zwwm-virtual-keyboard-v1 protocols/zwwm-virtual-keyboard-v1.zxml)
+zwwm_add_project_protocol(zwwm-window-manager-v1 protocols/zwwm-window-manager-v1.zxml)
+zwwm_add_project_protocol(zwwm-layout-manager-v1 protocols/zwwm-layout-manager-v1.zxml)
+zwwm_install_protocol_xml(zwwm-layout-manager-v1)
+zwwm_install_protocol_xml(zwwm-window-manager-v1)
+zwwm_install_protocol_xml(zwwm-virtual-keyboard-v1)
+zwwm_install_protocol_xml(zwwm-decoration-manager-v1)
+zwwm_add_project_protocol(xwlr-layer-shell-v1 protocols/xwlr-layer-shell-v1.zxml)
+zwwm_add_project_protocol(zwwm-screencopy-view-unstable-v1 protocols/zwwm-screencopy-view-unstable-v1.zxml)
+zwwm_add_project_protocol(ext-zwwm-toplevels-unstable-v1 protocols/ext-zwwm-toplevels-unstable-v1.zxml)
+zwwm_add_project_protocol(ext-zwwm-manager-v1 protocols/ext-zwwm-manager-v1.zxml)
+zwwm_add_project_protocol(zwwm-client-connection-v1 protocols/zwwm-client-connection-v1.zxml)
+zwwm_install_protocol_xml(zwwm-client-connection-v1)
+zwwm_add_project_protocol(xwayland-shell protocols/zwwm-xwayland-shell-v1.zxml)
+zwwm_add_project_protocol(wlr-output-power-management-unstable-v1 protocols/wlr-output-power-management-unstable-v1.zxml)
+zwwm_add_project_protocol(input-method-unstable-v2 protocols/input-method-unstable-v2.zxml)
+zwwm_add_project_protocol(virtual-keyboard-unstable-v1 protocols/virtual-keyboard-unstable-v1.zxml)
+zwwm_add_project_protocol(zwwm-edge-swipe-v1 protocols/zwwm-edge-swipe-v1.zxml)
+zwwm_add_project_protocol(zwwm-capture-access-v1 protocols/zwwm-capture-access-v1.zxml)
+zwwm_install_protocol_xml(zwwm-capture-access-v1)
+zwwm_install_protocol_xml(zwwm-edge-swipe-v1)
 
 add_custom_target(zwwm_protocol_headers DEPENDS ${ZWWW_PROTOCOL_HEADERS})
 add_library(zwwm_protocol_metadata INTERFACE)

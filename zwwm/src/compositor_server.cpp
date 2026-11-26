@@ -56,7 +56,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
-#include <new>
 #include <optional>
 #include <stdexcept>
 #include <sys/socket.h>
@@ -716,8 +715,7 @@ void send_popup_configure(PopupState* popup, bool force,
   if (!force && popup->has_geometry && same_rect(popup->last_geometry, geometry)) return;
   popup->last_geometry = geometry;
   popup->has_geometry = true;
-  // xdg_popup coordinates are relative to the parent's window geometry, while
-  // surface composition coordinates are relative to its wl_surface origin.
+  // xdg_popup positions are relative to the parent's window geometry, not its surface origin.
   const Rect parent_geometry = popup->parent == nullptr ? Rect{} : effective_window_geometry(popup->parent->surface);
   popup->xdg->surface->x = popup->parent == nullptr ? geometry.x : parent_geometry.x + geometry.x;
   popup->xdg->surface->y = popup->parent == nullptr ? geometry.y : parent_geometry.y + geometry.y;
@@ -1814,53 +1812,46 @@ void tags_client_destroyed(zwayland::server::Resource* resource) {
   delete client;
 }
 struct ZwwmTagsV1KTagsHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
-  void get_toplevel_tags(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* toplevel) {
-    ([](zwayland::server::Client* client, zwayland::server::Resource* resource, zwayland::server::Resource* toplevel) {
-      auto* state = resource->data<TagsClient>();
-      auto* x = toplevel == nullptr ? nullptr : toplevel->data<XdgSurfaceState>();
-      if (state == nullptr || x == nullptr || x->toplevel != toplevel || toplevel->client != client) {
-        resource->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "toplevel is not owned by this client");
+  void get_toplevel_tags(zwayland::server::Client&, zwayland::server::Resource& resource, zwayland::server::Resource* toplevel) {
+    auto* state = resource.data<TagsClient>();
+      auto* x = toplevel->data<XdgSurfaceState>();
+      if (state == nullptr || x == nullptr || x->toplevel != toplevel) {
+        resource.post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "toplevel was destroyed");
         return;
       }
       if (std::find(state->observed_toplevels.begin(), state->observed_toplevels.end(), toplevel) == state->observed_toplevels.end())
         state->observed_toplevels.push_back(toplevel);
       send_toplevel_tags(state, toplevel, x->tag);
-    })(&client, &resource, toplevel);
   }
-  void set_active_tags(zwayland::server::Client& client, zwayland::server::Resource& resource, std::span<const std::byte> tags) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource, std::span<const std::byte> tags) {
-      auto* state = resource->data<TagsClient>();
+  void set_active_tags(zwayland::server::Client&, zwayland::server::Resource& resource, std::span<const std::byte> tags) {
+    auto* state = resource.data<TagsClient>();
       std::uint8_t tag = 0;
-      if (state != nullptr && decode_single_tag(resource, tags, true, &tag))
+      if (state != nullptr && decode_single_tag(&resource, tags, true, &tag))
         switch_active_tag(state->observer, state->observer->active_output, tag);
-    })(&client, &resource, tags);
   }
-  void set_toplevel_tags(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* toplevel, std::span<const std::byte> tags) {
-    ([](zwayland::server::Client* client, zwayland::server::Resource* resource, zwayland::server::Resource* toplevel, std::span<const std::byte> tags) {
-      auto* x = toplevel == nullptr ? nullptr : toplevel->data<XdgSurfaceState>();
+  void set_toplevel_tags(zwayland::server::Client&, zwayland::server::Resource& resource, zwayland::server::Resource* toplevel, std::span<const std::byte> tags) {
+    auto* x = toplevel->data<XdgSurfaceState>();
       std::uint8_t tag = 0;
-      if (x == nullptr || x->toplevel != toplevel || toplevel->client != client) {
-        resource->post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "toplevel is not owned by this client");
+      if (x == nullptr || x->toplevel != toplevel) {
+        resource.post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "toplevel was destroyed");
         return;
       }
-      if (!decode_single_tag(resource, tags, false, &tag) || x->tag == tag) return;
+      if (!decode_single_tag(&resource, tags, false, &tag) || x->tag == tag) return;
       x->tag = tag;
       auto* observer = x->surface == nullptr ? nullptr : x->surface->observer;
       if (observer == nullptr) return;
       configure_layout(observer);
       notify_surface_tree(x->surface);
       notify_toplevel_tags(observer, x);
-    })(&client, &resource, toplevel, tags);
   }
 };
 void bind_tags(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
   auto* observer = static_cast<Observer*>(data);
   auto* resource = client->create_resource(&protocol::zwwm_tags_v1_interface, id, std::min(version, 1U));
-  auto* state = resource == nullptr ? nullptr : new (std::nothrow) TagsClient;
-  if (resource == nullptr || state == nullptr) { if (resource != nullptr) resource->destroy(); client->post_no_memory(); return; }
+  auto* state = new TagsClient;
   state->observer = observer; state->client = client; state->resource = resource;
   observer->tags->clients.push_back(state);
   resource->set_data(state); resource->set_handler(protocol::zwwm_tags_v1_handler(ZwwmTagsV1KTagsHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (tags_client_destroyed)(&destroyed); });
@@ -1951,7 +1942,6 @@ void surface_damage(zwayland::server::Client*, zwayland::server::Resource* r, st
 void surface_damage_buffer(zwayland::server::Client*, zwayland::server::Resource* r, std::int32_t x, std::int32_t y, std::int32_t w, std::int32_t h) { if (w > 0 && h > 0) r->data<SurfaceState>()->pending_buffer_damage.push_back({x, y, w, h}); }
 void surface_frame(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id) {
   auto* cb = c->create_resource(&protocol::wl_callback_interface, id, 1);
-  if (cb == nullptr) { c->post_no_memory(); return; }
   auto* surface = r->data<SurfaceState>();
   surface->pending_frame_callbacks.push_back(cb);
   // Client teardown can destroy a callback before its surface (IDs are reused).
@@ -2032,8 +2022,7 @@ void surface_commit(zwayland::server::Client*, zwayland::server::Resource* r) {
   const auto& next_viewport = s->viewport_changed ? s->pending_viewport : s->current_viewport;
   const auto next_scale = s->buffer_scale_changed ? s->pending_buffer_scale : s->current_buffer_scale;
   if (!validate_surface_state(s, next_buffer, next_viewport, next_scale)) return;
-  // Frame requests are double-buffered surface state, not immediately eligible
-  // for completion by an unrelated output presentation.
+  // Frame requests are double-buffered; an unrelated presentation must not complete them.
   s->frame_callbacks.insert(s->frame_callbacks.end(), s->pending_frame_callbacks.begin(),
                             s->pending_frame_callbacks.end());
   s->pending_frame_callbacks.clear();
@@ -2108,8 +2097,7 @@ void surface_commit(zwayland::server::Client*, zwayland::server::Resource* r) {
     } else if (!layer->mapped && s->current_buffer != nullptr && layer->configured) {
       layer->mapped = true;
     } else if (!layer->mapped) {
-      // An initial (or remap) empty commit asks the arrangement pass for the
-      // one configure required before a buffer may be attached.
+      // An empty initial/remap commit requests the configure needed before a buffer attaches.
       layer->configure_requested = true;
     }
     if (standard_changed || extension_changed || layer_was_mapped != layer->mapped || !layer->mapped)
@@ -2376,33 +2364,26 @@ struct WlSurfaceKSurfaceHandler {
   void commit(zwayland::server::Client& client, zwayland::server::Resource& resource) {
     (surface_commit)(&client, &resource);
   }
-  void set_buffer_transform(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t transform) {
-    ([](zwayland::server::Client*, zwayland::server::Resource*, std::int32_t) {})(&client, &resource, transform);
-  }
-  void set_buffer_scale(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t scale) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource, std::int32_t scale) { if (scale <= 0) { resource->post_error(protocol::WL_SURFACE_ERROR_INVALID_SCALE, "buffer scale must be positive"); return; } auto* surface = resource->data<SurfaceState>(); surface->pending_buffer_scale = scale; surface->buffer_scale_changed = true; })(&client, &resource, scale);
+  void set_buffer_transform(zwayland::server::Client&, zwayland::server::Resource&, std::int32_t) {}
+  void set_buffer_scale(zwayland::server::Client&, zwayland::server::Resource& resource, std::int32_t scale) {
+    if (scale <= 0) { resource.post_error(protocol::WL_SURFACE_ERROR_INVALID_SCALE, "buffer scale must be positive"); return; } auto* surface = resource.data<SurfaceState>(); surface->pending_buffer_scale = scale; surface->buffer_scale_changed = true;
   }
   void damage_buffer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
     (surface_damage_buffer)(&client, &resource, x, y, width, height);
   }
-  void offset(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y) {
-    ([](zwayland::server::Client*, zwayland::server::Resource*, std::int32_t, std::int32_t) {})(&client, &resource, x, y);
-  }
+  void offset(zwayland::server::Client&, zwayland::server::Resource&, std::int32_t, std::int32_t) {}
   void get_release(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t callback) {
     (void)client; (void)callback; resource.post_error(1, "request is not implemented");
   }
 };
-SurfaceState* compositor_surface_from_resource(zwayland::server::Client* client, zwayland::server::Resource* resource) {
-  return resource != nullptr && resource->client == client &&
-                 resource->interface == &protocol::wl_surface_interface && resource->data<SurfaceState>() != nullptr
-             ? resource->data<SurfaceState>()
-             : nullptr;
+SurfaceState* compositor_surface_from_resource(zwayland::server::Resource* resource) {
+  return resource == nullptr ? nullptr : resource->data<SurfaceState>();
 }
-void create_surface(zwayland::server::Client* c, zwayland::server::Resource* comp, std::uint32_t id) { auto* r = c->create_resource(&protocol::wl_surface_interface, id, kCompositorVersion); auto* s = r == nullptr ? nullptr : new (std::nothrow) SurfaceState; if (r == nullptr || s == nullptr) { if (r != nullptr) r->destroy(); c->post_no_memory(); return; } static std::uint64_t next = 1; s->resource = r; s->id = next++; s->root_order = next_root_order(); s->stack_order = s->id; s->observer = comp->data<Observer>(); s->observer->surfaces->push_back(s); r->set_data(s); r->set_handler(protocol::wl_surface_handler(WlSurfaceKSurfaceHandler{})); r->set_destroy_handler([](zwayland::server::Resource& destroyed) { (surface_destroyed)(&destroyed); }); }
-void associate_layer_popup(LayerSurfaceState* layer, zwayland::server::Client* client, zwayland::server::Resource* layer_resource,
+void create_surface(zwayland::server::Client* c, zwayland::server::Resource* comp, std::uint32_t id) { auto* r = c->create_resource(&protocol::wl_surface_interface, id, kCompositorVersion); auto* s = new SurfaceState; static std::uint64_t next = 1; s->resource = r; s->id = next++; s->root_order = next_root_order(); s->stack_order = s->id; s->observer = comp->data<Observer>(); s->observer->surfaces->push_back(s); r->set_data(s); r->set_handler(protocol::wl_surface_handler(WlSurfaceKSurfaceHandler{})); r->set_destroy_handler([](zwayland::server::Resource& destroyed) { (surface_destroyed)(&destroyed); }); }
+void associate_layer_popup(LayerSurfaceState* layer, zwayland::server::Client*, zwayland::server::Resource* layer_resource,
                            zwayland::server::Resource* popup_resource) {
-  auto* popup = popup_resource == nullptr ? nullptr : popup_resource->data<PopupState>();
-  if (layer == nullptr || layer->surface == nullptr || popup == nullptr || popup->xdg == nullptr || popup->xdg->surface == nullptr || popup->parent != nullptr || popup->layer_parent != nullptr || popup->dismissed || popup_resource->client != client || popup->xdg->resource->client != client) { layer_resource->post_error(protocol::ZWWM_LAYER_SURFACE_V1_ERROR_INVALID_SURFACE_STATE, "invalid layer popup"); return; }
+  auto* popup = popup_resource->data<PopupState>();
+  if (layer == nullptr || layer->surface == nullptr || popup == nullptr || popup->xdg == nullptr || popup->xdg->surface == nullptr || popup->parent != nullptr || popup->layer_parent != nullptr || popup->dismissed) { layer_resource->post_error(protocol::ZWWM_LAYER_SURFACE_V1_ERROR_INVALID_SURFACE_STATE, "invalid layer popup"); return; }
   auto* child = popup->xdg->surface;
   if (child->parent != nullptr) { layer_resource->post_error(protocol::ZWWM_LAYER_SURFACE_V1_ERROR_INVALID_SURFACE_STATE, "popup already has a parent"); return; }
   popup->layer_parent = layer->surface; child->parent = layer->surface; child->above_parent = true; layer->surface->children.push_back(child); refresh_tree_stacking(layer->surface); send_popup_configure(popup);
@@ -2423,17 +2404,17 @@ void region_subtract(RegionState* region, Rect cut) {
   region->rects = std::move(result);
 }
 struct WlRegionKRegionHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
-  void add(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) { if (width > 0 && height > 0) resource->data<RegionState>()->rects.push_back({x, y, width, height}); })(&client, &resource, x, y, width, height);
+  void add(zwayland::server::Client&, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
+    if (width > 0 && height > 0) resource.data<RegionState>()->rects.push_back({x, y, width, height});
   }
-  void subtract(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) { region_subtract(resource->data<RegionState>(), {x, y, width, height}); })(&client, &resource, x, y, width, height);
+  void subtract(zwayland::server::Client&, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
+    region_subtract(resource.data<RegionState>(), {x, y, width, height});
   }
 };
-void create_region(zwayland::server::Client* c, zwayland::server::Resource*, std::uint32_t id) { auto* r = c->create_resource(&protocol::wl_region_interface, id, 1); auto* region = r == nullptr ? nullptr : new (std::nothrow) RegionState; if (r == nullptr || region == nullptr) { if (r != nullptr) r->destroy(); c->post_no_memory(); return; } r->set_data(region); r->set_handler(protocol::wl_region_handler(WlRegionKRegionHandler{})); r->set_destroy_handler([](zwayland::server::Resource& destroyed) { ([](zwayland::server::Resource* resource) { delete resource->data<RegionState>(); })(&destroyed); }); }
+void create_region(zwayland::server::Client* c, zwayland::server::Resource*, std::uint32_t id) { auto* r = c->create_resource(&protocol::wl_region_interface, id, 1); auto* region = new RegionState; r->set_data(region); r->set_handler(protocol::wl_region_handler(WlRegionKRegionHandler{})); r->set_destroy_handler([](zwayland::server::Resource& destroyed) { delete destroyed.data<RegionState>(); }); }
 struct WlCompositorKCompositorHandler {
   void create_surface(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id) {
     (::zwwm::detail::create_surface)(&client, &resource, id);
@@ -2441,8 +2422,8 @@ struct WlCompositorKCompositorHandler {
   void create_region(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id) {
     (::zwwm::detail::create_region)(&client, &resource, id);
   }
-  void release(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void release(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
 void sub_destroyed(zwayland::server::Resource* r) {
@@ -2484,29 +2465,25 @@ void place_subsurface(SurfaceState* surface, SurfaceState* sibling, bool above) 
   }
   refresh_tree_stacking(surface);
 }
-void get_subsurface(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id, zwayland::server::Resource* child_r, zwayland::server::Resource* parent_r) { auto* child = child_r->data<SurfaceState>(); auto* parent = parent_r->data<SurfaceState>(); if (child == nullptr || parent == nullptr || child == parent || child->subsurface != nullptr || child->parent != nullptr || child->xdg_surface != nullptr || child->layer_role_assigned || child->drag_icon_role) { r->post_error(protocol::WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE, "surface already has a role"); return; } auto* sub = c->create_resource(&protocol::wl_subsurface_interface, id, 1); if (sub == nullptr) { c->post_no_memory(); return; } child->parent = parent; parent->children.push_back(child); refresh_tree_stacking(parent); struct WlSubsurfaceImplHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* q) { q->destroy(); })(&client, &resource);
+void get_subsurface(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id, zwayland::server::Resource* child_r, zwayland::server::Resource* parent_r) { auto* child = child_r->data<SurfaceState>(); auto* parent = parent_r->data<SurfaceState>(); if (child == nullptr || parent == nullptr || child == parent || child->subsurface != nullptr || child->parent != nullptr || child->xdg_surface != nullptr || child->layer_role_assigned || child->drag_icon_role) { r->post_error(protocol::WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE, "surface already has a role"); return; } auto* sub = c->create_resource(&protocol::wl_subsurface_interface, id, 1); child->parent = parent; parent->children.push_back(child); refresh_tree_stacking(parent); struct WlSubsurfaceImplHandler {
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
-  void set_position(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* q, std::int32_t x, std::int32_t y) { auto* s = q->data<SurfaceState>(); if (s == nullptr) return; s->x = x; s->y = y; notify_surface(s); })(&client, &resource, x, y);
+  void set_position(zwayland::server::Client&, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y) {
+    auto* s = resource.data<SurfaceState>(); if (s == nullptr) return; s->x = x; s->y = y; notify_surface(s);
   }
-  void place_above(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* sibling) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* q, zwayland::server::Resource* sibling_r) { place_subsurface(q->data<SurfaceState>(), sibling_r->data<SurfaceState>(), true); })(&client, &resource, sibling);
+  void place_above(zwayland::server::Client&, zwayland::server::Resource& resource, zwayland::server::Resource* sibling) {
+    place_subsurface(resource.data<SurfaceState>(), sibling->data<SurfaceState>(), true);
   }
-  void place_below(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* sibling) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* q, zwayland::server::Resource* sibling_r) { place_subsurface(q->data<SurfaceState>(), sibling_r->data<SurfaceState>(), false); })(&client, &resource, sibling);
+  void place_below(zwayland::server::Client&, zwayland::server::Resource& resource, zwayland::server::Resource* sibling) {
+    place_subsurface(resource.data<SurfaceState>(), sibling->data<SurfaceState>(), false);
   }
-  void set_sync(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource*) {})(&client, &resource);
-  }
-  void set_desync(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource*) {})(&client, &resource);
-  }
+  void set_sync(zwayland::server::Client&, zwayland::server::Resource&) {}
+  void set_desync(zwayland::server::Client&, zwayland::server::Resource&) {}
 }; child->subsurface = sub; sub->set_data(child); sub->set_handler(protocol::wl_subsurface_handler(WlSubsurfaceImplHandler{})); sub->set_destroy_handler([](zwayland::server::Resource& destroyed) { (sub_destroyed)(&destroyed); }); }
 struct WlSubcompositorKSubcompositorHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void get_subsurface(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* surface, zwayland::server::Resource* parent) {
     (::zwwm::detail::get_subsurface)(&client, &resource, id, surface, parent);
@@ -2554,13 +2531,12 @@ void set_floating(XdgSurfaceState* x, bool floating) {
   if (!floating) x->last_floating_bounds = x->floating_bounds;
   configure_layout(x->surface->observer, x);
 }
-void set_toplevel_parent(zwayland::server::Client* client, zwayland::server::Resource* resource, zwayland::server::Resource* parent_resource) {
+void set_toplevel_parent(zwayland::server::Client*, zwayland::server::Resource* resource, zwayland::server::Resource* parent_resource) {
   auto* x = resource->data<XdgSurfaceState>();
   auto* parent = parent_resource == nullptr ? nullptr :
       parent_resource->data<XdgSurfaceState>();
   if (x == nullptr || (parent_resource != nullptr &&
-      (parent == nullptr || parent == x || parent->toplevel != parent_resource ||
-       parent_resource->client != client))) return;
+      (parent == nullptr || parent == x || parent->toplevel != parent_resource))) return;
   x->transient_parent = parent;
   if (parent == nullptr) return;
   x->output = parent->output;
@@ -2687,8 +2663,7 @@ void end_interactive(SeatState* seat) {
 }
 void toplevel_fullscreen(zwayland::server::Client*, zwayland::server::Resource* resource, zwayland::server::Resource* output_resource) {
   auto* x = resource->data<XdgSurfaceState>();
-  auto* output = output_resource == nullptr || std::strcmp(output_resource->interface->name, "wl_output") != 0 ? nullptr :
-      output_resource->data<OutputState>();
+  auto* output = output_resource == nullptr ? nullptr : output_resource->data<OutputState>();
   if (x->surface->observer->external_policy) {
     emit_policy_input(x->surface->observer, PolicyInput{.kind = PolicyInput::Kind::request,
         .code = 0, .state = 1, .window = x->surface->id,
@@ -2696,32 +2671,30 @@ void toplevel_fullscreen(zwayland::server::Client*, zwayland::server::Resource* 
   } else set_fullscreen(x, output == nullptr || output->retired ? OutputId{} : output->info.id, true);
 }
 struct XdgToplevelKTopHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void set_parent(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* parent) {
     (set_toplevel_parent)(&client, &resource, parent);
   }
-  void set_title(zwayland::server::Client& client, zwayland::server::Resource& resource, std::string title) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, const char* value) { auto* x = r->data<XdgSurfaceState>(); x->title = value == nullptr ? "" : value; notify_surface(x->surface); })(&client, &resource, title.c_str());
+  void set_title(zwayland::server::Client&, zwayland::server::Resource& resource, std::string title) {
+    auto* x = resource.data<XdgSurfaceState>(); x->title = title.c_str() == nullptr ? "" : title.c_str(); notify_surface(x->surface);
   }
-  void set_app_id(zwayland::server::Client& client, zwayland::server::Resource& resource, std::string app_id) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, const char* value) { auto* x = r->data<XdgSurfaceState>(); x->app_id = value == nullptr ? "" : value; notify_surface(x->surface); })(&client, &resource, app_id.c_str());
+  void set_app_id(zwayland::server::Client&, zwayland::server::Resource& resource, std::string app_id) {
+    auto* x = resource.data<XdgSurfaceState>(); x->app_id = app_id.c_str() == nullptr ? "" : app_id.c_str(); notify_surface(x->surface);
   }
-  void show_window_menu(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* seat, std::uint32_t serial, std::int32_t x, std::int32_t y) {
-    ([](zwayland::server::Client*, zwayland::server::Resource*, zwayland::server::Resource*, std::uint32_t, std::int32_t, std::int32_t) {})(&client, &resource, seat, serial, x, y);
+  void show_window_menu(zwayland::server::Client&, zwayland::server::Resource&, zwayland::server::Resource*, std::uint32_t, std::int32_t, std::int32_t) {}
+  void move(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource*, std::uint32_t serial) {
+    begin_interactive(resource.data<XdgSurfaceState>(), &client, serial, protocol::XDG_TOPLEVEL_RESIZE_EDGE_NONE);
   }
-  void move(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* seat, std::uint32_t serial) {
-    ([](zwayland::server::Client* c, zwayland::server::Resource* r, zwayland::server::Resource*, std::uint32_t serial) { begin_interactive(r->data<XdgSurfaceState>(), c, serial, protocol::XDG_TOPLEVEL_RESIZE_EDGE_NONE); })(&client, &resource, seat, serial);
+  void resize(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource*, std::uint32_t serial, std::uint32_t edges) {
+    begin_interactive(resource.data<XdgSurfaceState>(), &client, serial, edges);
   }
-  void resize(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* seat, std::uint32_t serial, std::uint32_t edges) {
-    ([](zwayland::server::Client* c, zwayland::server::Resource* r, zwayland::server::Resource*, std::uint32_t serial, std::uint32_t edge) { begin_interactive(r->data<XdgSurfaceState>(), c, serial, edge); })(&client, &resource, seat, serial, edges);
+  void set_max_size(zwayland::server::Client&, zwayland::server::Resource& resource, std::int32_t width, std::int32_t height) {
+    auto* x = resource.data<XdgSurfaceState>(); if (width >= 0 && height >= 0) { x->pending_max_width = width; x->pending_max_height = height; }
   }
-  void set_max_size(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t width, std::int32_t height) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::int32_t w, std::int32_t h) { auto* x = r->data<XdgSurfaceState>(); if (w >= 0 && h >= 0) { x->pending_max_width = w; x->pending_max_height = h; } })(&client, &resource, width, height);
-  }
-  void set_min_size(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t width, std::int32_t height) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::int32_t w, std::int32_t h) { auto* x = r->data<XdgSurfaceState>(); if (w >= 0 && h >= 0) { x->pending_min_width = w; x->pending_min_height = h; } })(&client, &resource, width, height);
+  void set_min_size(zwayland::server::Client&, zwayland::server::Resource& resource, std::int32_t width, std::int32_t height) {
+    auto* x = resource.data<XdgSurfaceState>(); if (width >= 0 && height >= 0) { x->pending_min_width = width; x->pending_min_height = height; }
   }
   void set_maximized(zwayland::server::Client& client, zwayland::server::Resource& resource) {
     (void)client;
@@ -2760,52 +2733,40 @@ void dialog_destroyed(zwayland::server::Resource* resource) {
   delete dialog;
 }
 struct XdgDialogV1KDialogHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
-  void set_modal(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) {
-      auto* dialog = resource->data<DialogState>();
+  void set_modal(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    auto* dialog = resource.data<DialogState>();
       if (dialog == nullptr || dialog->xdg == nullptr) return;
       dialog->modal = true;
       if (dialog->xdg->mapped) set_floating(dialog->xdg, true);
       else dialog->xdg->floating = true;
-    })(&client, &resource);
   }
-  void unset_modal(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) {
-      auto* dialog = resource->data<DialogState>();
+  void unset_modal(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    auto* dialog = resource.data<DialogState>();
       if (dialog != nullptr) dialog->modal = false;
-    })(&client, &resource);
   }
 };
 void bind_dialog_manager(zwayland::server::Client* client, void*, std::uint32_t version, std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::xdg_wm_dialog_v1_interface, id, std::min(version, 1U));
-  if (resource == nullptr) { client->post_no_memory(); return; }
   struct XdgWmDialogV1ImplHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* manager) { manager->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void get_xdg_dialog(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* toplevel) {
-    ([](zwayland::server::Client* dialog_client, zwayland::server::Resource* manager, std::uint32_t dialog_id, zwayland::server::Resource* toplevel) {
-        auto* x = toplevel->data<XdgSurfaceState>();
+    auto* x = toplevel->data<XdgSurfaceState>();
         if (x == nullptr || x->toplevel != toplevel || x->dialog != nullptr) {
-          manager->post_error(protocol::XDG_WM_DIALOG_V1_ERROR_ALREADY_USED,
+          resource.post_error(protocol::XDG_WM_DIALOG_V1_ERROR_ALREADY_USED,
                                  "xdg_toplevel already has a dialog role");
           return;
         }
-        auto* dialog_resource = dialog_client->create_resource(&protocol::xdg_dialog_v1_interface, dialog_id, 1);
-        auto* dialog = dialog_resource == nullptr ? nullptr : new (std::nothrow) DialogState;
-        if (dialog_resource == nullptr || dialog == nullptr) {
-          if (dialog_resource != nullptr) dialog_resource->destroy();
-          dialog_client->post_no_memory();
-          return;
-        }
+        auto* dialog_resource = client.create_resource(&protocol::xdg_dialog_v1_interface, id, 1);
+        auto* dialog = new DialogState;
         dialog->resource = dialog_resource;
         dialog->xdg = x;
         x->dialog = dialog;
         dialog_resource->set_data(dialog); dialog_resource->set_handler(protocol::xdg_dialog_v1_handler(XdgDialogV1KDialogHandler{})); dialog_resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (dialog_destroyed)(&destroyed); });
-      })(&client, &resource, id, toplevel);
   }
 };
   resource->set_handler(protocol::xdg_wm_dialog_v1_handler(XdgWmDialogV1ImplHandler{}));
@@ -2961,26 +2922,26 @@ struct XdgPositionerKPositionerHandler {
   void set_anchor_rect(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
     (positioner_rect)(&client, &resource, x, y, width, height);
   }
-  void set_anchor(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t anchor) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::uint32_t a) { if (a > protocol::XDG_POSITIONER_ANCHOR_BOTTOM_RIGHT) { r->post_error(protocol::XDG_POSITIONER_ERROR_INVALID_INPUT, "invalid anchor"); return; } r->data<PositionerState>()->anchor = a; })(&client, &resource, anchor);
+  void set_anchor(zwayland::server::Client&, zwayland::server::Resource& resource, std::uint32_t anchor) {
+    if (anchor > protocol::XDG_POSITIONER_ANCHOR_BOTTOM_RIGHT) { resource.post_error(protocol::XDG_POSITIONER_ERROR_INVALID_INPUT, "invalid anchor"); return; } resource.data<PositionerState>()->anchor = anchor;
   }
-  void set_gravity(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t gravity) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::uint32_t g) { if (g > protocol::XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT) { r->post_error(protocol::XDG_POSITIONER_ERROR_INVALID_INPUT, "invalid gravity"); return; } r->data<PositionerState>()->gravity = g; })(&client, &resource, gravity);
+  void set_gravity(zwayland::server::Client&, zwayland::server::Resource& resource, std::uint32_t gravity) {
+    if (gravity > protocol::XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT) { resource.post_error(protocol::XDG_POSITIONER_ERROR_INVALID_INPUT, "invalid gravity"); return; } resource.data<PositionerState>()->gravity = gravity;
   }
-  void set_constraint_adjustment(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t constraint_adjustment) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::uint32_t a) { constexpr std::uint32_t valid = protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_X | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_Y | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_X | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_Y; if ((a & ~valid) != 0) { r->post_error(protocol::XDG_POSITIONER_ERROR_INVALID_INPUT, "invalid constraint adjustment"); return; } r->data<PositionerState>()->adjustment = a; })(&client, &resource, constraint_adjustment);
+  void set_constraint_adjustment(zwayland::server::Client&, zwayland::server::Resource& resource, std::uint32_t constraint_adjustment) {
+    constexpr std::uint32_t valid = protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_X | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_Y | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_X | protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_Y; if ((constraint_adjustment & ~valid) != 0) { resource.post_error(protocol::XDG_POSITIONER_ERROR_INVALID_INPUT, "invalid constraint adjustment"); return; } resource.data<PositionerState>()->adjustment = constraint_adjustment;
   }
-  void set_offset(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::int32_t x, std::int32_t y) { auto* p = r->data<PositionerState>(); p->offset_x = x; p->offset_y = y; })(&client, &resource, x, y);
+  void set_offset(zwayland::server::Client&, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y) {
+    auto* p = resource.data<PositionerState>(); p->offset_x = x; p->offset_y = y;
   }
-  void set_reactive(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->data<PositionerState>()->reactive = true; })(&client, &resource);
+  void set_reactive(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.data<PositionerState>()->reactive = true;
   }
-  void set_parent_size(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t parent_width, std::int32_t parent_height) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::int32_t w, std::int32_t h) { if (w <= 0 || h <= 0) { r->post_error(protocol::XDG_POSITIONER_ERROR_INVALID_INPUT, "invalid parent size"); return; } auto* p = r->data<PositionerState>(); p->parent_width = w; p->parent_height = h; })(&client, &resource, parent_width, parent_height);
+  void set_parent_size(zwayland::server::Client&, zwayland::server::Resource& resource, std::int32_t parent_width, std::int32_t parent_height) {
+    if (parent_width <= 0 || parent_height <= 0) { resource.post_error(protocol::XDG_POSITIONER_ERROR_INVALID_INPUT, "invalid parent size"); return; } auto* p = resource.data<PositionerState>(); p->parent_width = parent_width; p->parent_height = parent_height;
   }
-  void set_parent_configure(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t serial) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::uint32_t s) { r->data<PositionerState>()->parent_configure = s; })(&client, &resource, serial);
+  void set_parent_configure(zwayland::server::Client&, zwayland::server::Resource& resource, std::uint32_t serial) {
+    resource.data<PositionerState>()->parent_configure = serial;
   }
 };
 void popup_destroy(zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); }
@@ -3013,17 +2974,17 @@ struct XdgPopupKPopupHandler {
   }
 };
 void xdg_destroyed(zwayland::server::Resource* r) { auto* x = r->data<XdgSurfaceState>(); if (x != nullptr) { if (x->popup != nullptr) { popup_done(x->popup); x->popup->xdg = nullptr; } if (x->surface != nullptr) { for (auto* child : std::vector<SurfaceState*>(x->surface->children)) if (child->xdg_surface != nullptr && child->xdg_surface->popup != nullptr) popup_done(child->xdg_surface->popup); x->surface->xdg_surface = nullptr; } if (x->toplevel != nullptr) x->toplevel->userdata.reset(); if (x->decoration != nullptr) x->decoration->userdata.reset(); delete x; } }
-void get_top(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id) { auto* x = r->data<XdgSurfaceState>(); if (x->toplevel != nullptr) { r->post_error(protocol::XDG_SURFACE_ERROR_ALREADY_CONSTRUCTED, "surface already has a role"); return; } x->output = x->surface->observer->active_output; if (auto* output = output_state(x->surface->observer, x->output)) x->tag = output->active_tag; x->toplevel = c->create_resource(&protocol::xdg_toplevel_interface, id, r->version); if (x->toplevel == nullptr) { c->post_no_memory(); return; } x->toplevel->set_data(x); x->toplevel->set_handler(protocol::xdg_toplevel_handler(XdgToplevelKTopHandler{})); x->toplevel->set_destroy_handler([](zwayland::server::Resource& destroyed) { (top_destroyed)(&destroyed); }); // Deferred to the end of the client's batch so its preferred scale arrives first.
+void get_top(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id) { auto* x = r->data<XdgSurfaceState>(); if (x->toplevel != nullptr) { r->post_error(protocol::XDG_SURFACE_ERROR_ALREADY_CONSTRUCTED, "surface already has a role"); return; } x->output = x->surface->observer->active_output; if (auto* output = output_state(x->surface->observer, x->output)) x->tag = output->active_tag; x->toplevel = c->create_resource(&protocol::xdg_toplevel_interface, id, r->version); x->toplevel->set_data(x); x->toplevel->set_handler(protocol::xdg_toplevel_handler(XdgToplevelKTopHandler{})); x->toplevel->set_destroy_handler([](zwayland::server::Resource& destroyed) { (top_destroyed)(&destroyed); }); // Deferred to the end of the client's batch so its preferred scale arrives first.
   r->display->event_loop().add_idle([surface = x->surface, alive = x->surface->alive] {
     if (!*alive || surface->xdg_surface == nullptr || surface->xdg_surface->toplevel == nullptr) return;
     auto* xdg = surface->xdg_surface;
     send_preferred_scale(surface);
     if (endless_canvas(surface->observer)) send_configure(xdg, 0, 0, 0, true); else configure_layout(surface->observer, xdg);
   }); }
-void get_popup(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id, zwayland::server::Resource* parent_r, zwayland::server::Resource* positioner_r) { auto* x = r->data<XdgSurfaceState>(); auto* parent = parent_r == nullptr ? nullptr : parent_r->data<XdgSurfaceState>(); auto* q = positioner_r->data<PositionerState>(); if (x->toplevel != nullptr || x->popup != nullptr || (parent != nullptr && parent->surface == nullptr) || q == nullptr || !valid_positioner(*q)) { r->post_error(protocol::XDG_WM_BASE_ERROR_INVALID_POSITIONER, "invalid popup construction"); return; } auto* pr = c->create_resource(&protocol::xdg_popup_interface, id, r->version); auto* p = pr == nullptr ? nullptr : new (std::nothrow) PopupState{.resource = pr, .xdg = x, .parent = parent, .positioner = *q}; if (pr == nullptr || p == nullptr) { if (pr != nullptr) pr->destroy(); c->post_no_memory(); return; } x->popup = p; if (parent != nullptr) { x->surface->parent = parent->surface; parent->surface->children.push_back(x->surface); refresh_tree_stacking(parent->surface); } pr->set_data(p); pr->set_handler(protocol::xdg_popup_handler(XdgPopupKPopupHandler{})); pr->set_destroy_handler([](zwayland::server::Resource& destroyed) { (popup_destroyed)(&destroyed); }); if (parent != nullptr) send_popup_configure(p); }
+void get_popup(zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id, zwayland::server::Resource* parent_r, zwayland::server::Resource* positioner_r) { auto* x = r->data<XdgSurfaceState>(); auto* parent = parent_r == nullptr ? nullptr : parent_r->data<XdgSurfaceState>(); auto* q = positioner_r->data<PositionerState>(); if (x->toplevel != nullptr || x->popup != nullptr || (parent != nullptr && parent->surface == nullptr) || q == nullptr || !valid_positioner(*q)) { r->post_error(protocol::XDG_WM_BASE_ERROR_INVALID_POSITIONER, "invalid popup construction"); return; } auto* pr = c->create_resource(&protocol::xdg_popup_interface, id, r->version); auto* p = new PopupState{.resource = pr, .xdg = x, .parent = parent, .positioner = *q}; x->popup = p; if (parent != nullptr) { x->surface->parent = parent->surface; parent->surface->children.push_back(x->surface); refresh_tree_stacking(parent->surface); } pr->set_data(p); pr->set_handler(protocol::xdg_popup_handler(XdgPopupKPopupHandler{})); pr->set_destroy_handler([](zwayland::server::Resource& destroyed) { (popup_destroyed)(&destroyed); }); if (parent != nullptr) send_popup_configure(p); }
 struct XdgSurfaceKXdgSurfaceHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { auto* x = r->data<XdgSurfaceState>(); if (x->toplevel != nullptr || x->popup != nullptr) { r->post_error(protocol::XDG_SURFACE_ERROR_DEFUNCT_ROLE_OBJECT, "xdg role object must be destroyed first"); return; } r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    auto* x = resource.data<XdgSurfaceState>(); if (x->toplevel != nullptr || x->popup != nullptr) { resource.post_error(protocol::XDG_SURFACE_ERROR_DEFUNCT_ROLE_OBJECT, "xdg role object must be destroyed first"); return; } resource.destroy();
   }
   void get_toplevel(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id) {
     (get_top)(&client, &resource, id);
@@ -3031,27 +2992,25 @@ struct XdgSurfaceKXdgSurfaceHandler {
   void get_popup(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* parent, zwayland::server::Resource* positioner) {
     (::zwwm::detail::get_popup)(&client, &resource, id, parent, positioner);
   }
-  void set_window_geometry(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) { auto* surface = r->data<XdgSurfaceState>(); if (width <= 0 || height <= 0) { r->post_error(protocol::XDG_SURFACE_ERROR_INVALID_SIZE, "window geometry must have a positive size"); return; } surface->window_geometry = {x, y, width, height}; surface->window_geometry_set = true; })(&client, &resource, x, y, width, height);
+  void set_window_geometry(zwayland::server::Client&, zwayland::server::Resource& resource, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
+    auto* surface = resource.data<XdgSurfaceState>(); if (width <= 0 || height <= 0) { resource.post_error(protocol::XDG_SURFACE_ERROR_INVALID_SIZE, "window geometry must have a positive size"); return; } surface->window_geometry = {x, y, width, height}; surface->window_geometry_set = true;
   }
-  void ack_configure(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t serial) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r, std::uint32_t serial) { auto* x = r->data<XdgSurfaceState>(); const auto i = std::find(x->serials.begin(), x->serials.end(), serial); if (i == x->serials.end()) return; const auto size = std::find(x->serials.begin(), x->serials.end(), x->size_configure_serial); if (!x->size_configure_acked && size != x->serials.end() && size <= i) { x->size_configure_acked = true; x->size_ack_commit_count = x->commit_count; } x->serials.erase(x->serials.begin(), std::next(i)); x->has_acked_configure = true; x->last_acked_serial = serial; x->ack_commit_count = x->commit_count; })(&client, &resource, serial);
+  void ack_configure(zwayland::server::Client&, zwayland::server::Resource& resource, std::uint32_t serial) {
+    auto* x = resource.data<XdgSurfaceState>(); const auto i = std::find(x->serials.begin(), x->serials.end(), serial); if (i == x->serials.end()) return; const auto size = std::find(x->serials.begin(), x->serials.end(), x->size_configure_serial); if (!x->size_configure_acked && size != x->serials.end() && size <= i) { x->size_configure_acked = true; x->size_ack_commit_count = x->commit_count; } x->serials.erase(x->serials.begin(), std::next(i)); x->has_acked_configure = true; x->last_acked_serial = serial; x->ack_commit_count = x->commit_count;
   }
 };
-void get_xdg(zwayland::server::Client* c, zwayland::server::Resource* wm, std::uint32_t id, zwayland::server::Resource* sr) { auto* s = sr->data<SurfaceState>(); if (s == nullptr || s->xdg_surface != nullptr || s->layer_role_assigned || s->parent != nullptr || s->drag_icon_role) { wm->post_error(protocol::XDG_WM_BASE_ERROR_ROLE, "surface already has a role"); return; } auto* r = c->create_resource(&protocol::xdg_surface_interface, id, wm->version); auto* x = r == nullptr ? nullptr : new (std::nothrow) XdgSurfaceState; if (x != nullptr) { x->resource = r; x->surface = s; } if (r == nullptr || x == nullptr) { if (r != nullptr) r->destroy(); c->post_no_memory(); return; } s->xdg_surface = x; r->set_data(x); r->set_handler(protocol::xdg_surface_handler(XdgSurfaceKXdgSurfaceHandler{})); r->set_destroy_handler([](zwayland::server::Resource& destroyed) { (xdg_destroyed)(&destroyed); }); }
+void get_xdg(zwayland::server::Client* c, zwayland::server::Resource* wm, std::uint32_t id, zwayland::server::Resource* sr) { auto* s = sr->data<SurfaceState>(); if (s == nullptr || s->xdg_surface != nullptr || s->layer_role_assigned || s->parent != nullptr || s->drag_icon_role) { wm->post_error(protocol::XDG_WM_BASE_ERROR_ROLE, "surface already has a role"); return; } auto* r = c->create_resource(&protocol::xdg_surface_interface, id, wm->version); auto* x = new XdgSurfaceState; x->resource = r; x->surface = s; s->xdg_surface = x; r->set_data(x); r->set_handler(protocol::xdg_surface_handler(XdgSurfaceKXdgSurfaceHandler{})); r->set_destroy_handler([](zwayland::server::Resource& destroyed) { (xdg_destroyed)(&destroyed); }); }
 struct XdgWmBaseKWmHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* r) { r->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
-  void create_positioner(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id) {
-    ([](zwayland::server::Client* c, zwayland::server::Resource* r, std::uint32_t id) { auto* q = c->create_resource(&protocol::xdg_positioner_interface, id, r->version); auto* p = q == nullptr ? nullptr : new (std::nothrow) PositionerState; if (q == nullptr || p == nullptr) { if (q != nullptr) q->destroy(); c->post_no_memory(); return; } q->set_data(p); q->set_handler(protocol::xdg_positioner_handler(XdgPositionerKPositionerHandler{})); q->set_destroy_handler([](zwayland::server::Resource& destroyed) { ([](zwayland::server::Resource* resource) { delete resource->data<PositionerState>(); })(&destroyed); }); })(&client, &resource, id);
+  void create_positioner(zwayland::server::Client& client, zwayland::server::Resource& shell, std::uint32_t id) {
+    auto* q = client.create_resource(&protocol::xdg_positioner_interface, id, shell.version); auto* p = new PositionerState; q->set_data(p); q->set_handler(protocol::xdg_positioner_handler(XdgPositionerKPositionerHandler{})); q->set_destroy_handler([](zwayland::server::Resource& destroyed) { delete destroyed.data<PositionerState>(); });
   }
   void get_xdg_surface(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* surface) {
     (get_xdg)(&client, &resource, id, surface);
   }
-  void pong(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t serial) {
-    ([](zwayland::server::Client*, zwayland::server::Resource*, std::uint32_t) {})(&client, &resource, serial);
-  }
+  void pong(zwayland::server::Client&, zwayland::server::Resource&, std::uint32_t) {}
 };
 std::int32_t wayland_transform(OutputTransform transform) {
   switch (transform) {
@@ -3085,22 +3044,19 @@ void bind_output_state(zwayland::server::Client* c, void* data, std::uint32_t v,
   auto* output = static_cast<OutputState*>(data);
   if (output == nullptr || output->retired) return;
   auto* resource = c->create_resource(&protocol::wl_output_interface, id, std::min(v, kOutputVersion));
-  if (resource == nullptr) { c->post_no_memory(); return; }
   struct WlOutputOutputImplHandler {
-  void release(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* item) { item->destroy(); })(&client, &resource);
+  void release(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
 };
   output->resources.push_back(resource);
-  resource->set_data(output); resource->set_handler(protocol::wl_output_handler(WlOutputOutputImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { ([](zwayland::server::Resource* item) {
-    auto* state = item->data<OutputState>();
-    if (state != nullptr) std::erase(state->resources, item);
-  })(&destroyed); });
+  resource->set_data(output); resource->set_handler(protocol::wl_output_handler(WlOutputOutputImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { auto* state = destroyed.data<OutputState>();
+    if (state != nullptr) std::erase(state->resources, &destroyed); });
   send_output(output, resource, true);
 }
-void bind_comp(zwayland::server::Client* c, void* d, std::uint32_t v, std::uint32_t id) { auto* r = c->create_resource(&protocol::wl_compositor_interface, id, std::min(v, kCompositorVersion)); if (r == nullptr) { c->post_no_memory(); return; } r->set_data(static_cast<Observer*>(d)); r->set_handler(protocol::wl_compositor_handler(WlCompositorKCompositorHandler{})); }
-void bind_wm(zwayland::server::Client* c, void*, std::uint32_t v, std::uint32_t id) { auto* r = c->create_resource(&protocol::xdg_wm_base_interface, id, std::min(v, kXdgVersion)); if (r == nullptr) { c->post_no_memory(); return; } r->set_handler(protocol::xdg_wm_base_handler(XdgWmBaseKWmHandler{})); }
-void bind_sub(zwayland::server::Client* c, void*, std::uint32_t v, std::uint32_t id) { auto* r = c->create_resource(&protocol::wl_subcompositor_interface, id, std::min(v, kSubcompositorVersion)); if (r == nullptr) { c->post_no_memory(); return; } r->set_handler(protocol::wl_subcompositor_handler(WlSubcompositorKSubcompositorHandler{})); }
+void bind_comp(zwayland::server::Client* c, void* d, std::uint32_t v, std::uint32_t id) { auto* r = c->create_resource(&protocol::wl_compositor_interface, id, std::min(v, kCompositorVersion)); r->set_data(static_cast<Observer*>(d)); r->set_handler(protocol::wl_compositor_handler(WlCompositorKCompositorHandler{})); }
+void bind_wm(zwayland::server::Client* c, void*, std::uint32_t v, std::uint32_t id) { auto* r = c->create_resource(&protocol::xdg_wm_base_interface, id, std::min(v, kXdgVersion)); r->set_handler(protocol::xdg_wm_base_handler(XdgWmBaseKWmHandler{})); }
+void bind_sub(zwayland::server::Client* c, void*, std::uint32_t v, std::uint32_t id) { auto* r = c->create_resource(&protocol::wl_subcompositor_interface, id, std::min(v, kSubcompositorVersion)); r->set_handler(protocol::wl_subcompositor_handler(WlSubcompositorKSubcompositorHandler{})); }
 void decoration_destroyed(zwayland::server::Resource* resource) {
   auto* x = resource->data<XdgSurfaceState>();
   if (x != nullptr && x->decoration == resource) x->decoration = nullptr;
@@ -3113,22 +3069,20 @@ void decoration_preference(zwayland::server::Resource* resource, std::uint32_t p
   if (x->surface != nullptr) configure_layout(x->surface->observer, x);
 }
 struct ZxdgToplevelDecorationV1KToplevelDecorationHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
-  void set_mode(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t mode) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource, std::uint32_t mode) {
-      if (mode != protocol::ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE &&
+  void set_mode(zwayland::server::Client&, zwayland::server::Resource& resource, std::uint32_t mode) {
+    if (mode != protocol::ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE &&
           mode != protocol::ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE) {
-        resource->post_error(protocol::ZXDG_TOPLEVEL_DECORATION_V1_ERROR_INVALID_MODE,
+        resource.post_error(protocol::ZXDG_TOPLEVEL_DECORATION_V1_ERROR_INVALID_MODE,
                              "invalid xdg decoration mode " + std::to_string(mode));
         return;
       }
-      decoration_preference(resource, mode);
-    })(&client, &resource, mode);
+      decoration_preference(&resource, mode);
   }
-  void unset_mode(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { decoration_preference(resource, 0); })(&client, &resource);
+  void unset_mode(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    decoration_preference(&resource, 0);
   }
 };
 void get_toplevel_decoration(zwayland::server::Client* client, zwayland::server::Resource* manager, std::uint32_t id,
@@ -3149,7 +3103,6 @@ void get_toplevel_decoration(zwayland::server::Client* client, zwayland::server:
     return;
   }
   auto* decoration = client->create_resource(&protocol::zxdg_toplevel_decoration_v1_interface, id, manager->version);
-  if (decoration == nullptr) { client->post_no_memory(); return; }
   x->decoration = decoration;
   x->decoration_preference = 0;
   decoration->set_data(x); decoration->set_handler(protocol::zxdg_toplevel_decoration_v1_handler(ZxdgToplevelDecorationV1KToplevelDecorationHandler{})); decoration->set_destroy_handler([](zwayland::server::Resource& destroyed) { (decoration_destroyed)(&destroyed); });
@@ -3157,8 +3110,8 @@ void get_toplevel_decoration(zwayland::server::Client* client, zwayland::server:
   if (x->surface != nullptr) configure_layout(x->surface->observer, x);
 }
 struct ZxdgDecorationManagerV1KDecorationManagerHandler {
-  void destroy(zwayland::server::Client& client, zwayland::server::Resource& resource) {
-    ([](zwayland::server::Client*, zwayland::server::Resource* resource) { resource->destroy(); })(&client, &resource);
+  void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
+    resource.destroy();
   }
   void get_toplevel_decoration(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* toplevel) {
     (::zwwm::detail::get_toplevel_decoration)(&client, &resource, id, toplevel);
@@ -3166,7 +3119,6 @@ struct ZxdgDecorationManagerV1KDecorationManagerHandler {
 };
 void bind_decoration_manager(zwayland::server::Client* client, void*, std::uint32_t version, std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::zxdg_decoration_manager_v1_interface, id, std::min(version, kDecorationVersion));
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_handler(protocol::zxdg_decoration_manager_v1_handler(ZxdgDecorationManagerV1KDecorationManagerHandler{}));
 }
 }  // namespace detail

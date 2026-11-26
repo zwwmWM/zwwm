@@ -201,8 +201,7 @@ void ScreenCastPortal::start(const QDBusMessage& call,const QDBusObjectPath& han
       if (selected == windows.end()) { closeSession(path,false); return; }
       session->second->sourceGeometry = selected->geometry;
     }
-    // The picker is a surface in the captured scene. Wait for Qt to unmap it
-    // and for the compositor's close animation to finish before the first frame.
+    // The picker is in the captured scene; wait for it to unmap and finish closing.
     QTimer::singleShot(350, this, [this, path] {
       const auto current = sessions_.find(path);
       if (current == sessions_.end() || current->second->stage != SessionStage::starting) return;

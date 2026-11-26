@@ -1,5 +1,4 @@
-#include <libxml/parser.h>
-#include <libxml/tree.h>
+#include "protocol.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -7,7 +6,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -15,107 +16,7 @@
 
 namespace {
 
-struct Arg {
-  std::string name;
-  std::string type;
-  std::string interface;
-  bool nullable = false;
-};
-struct Message {
-  std::string name;
-  std::string type;
-  std::uint32_t since = 1;
-  std::vector<Arg> args;
-};
-struct Entry { std::string name; std::string value; std::uint32_t since = 1; };
-struct Enum { std::string name; bool bitfield = false; std::vector<Entry> entries; };
-struct Interface {
-  std::string name;
-  std::uint32_t version = 1;
-  std::vector<Message> requests;
-  std::vector<Message> events;
-  std::vector<Enum> enums;
-};
-struct Protocol { std::string name; std::vector<Interface> interfaces; };
-
-std::string signature_type(const Arg& arg);
-
-std::string property(xmlNode* node, const char* name, std::string fallback = {}) {
-  xmlChar* value = xmlGetProp(node, reinterpret_cast<const xmlChar*>(name));
-  if (value == nullptr) return fallback;
-  std::string result(reinterpret_cast<const char*>(value));
-  xmlFree(value);
-  return result;
-}
-
-std::uint32_t number(xmlNode* node, const char* name, std::uint32_t fallback = 1) {
-  const std::string text = property(node, name);
-  if (text.empty()) return fallback;
-  char* end = nullptr;
-  const auto value = std::strtoul(text.c_str(), &end, 10);
-  if (end == nullptr || *end != '\0' || value > UINT32_MAX) throw std::runtime_error("invalid numeric XML attribute");
-  return static_cast<std::uint32_t>(value);
-}
-
-bool element(xmlNode* node, std::string_view name) {
-  return node->type == XML_ELEMENT_NODE && name == reinterpret_cast<const char*>(node->name);
-}
-
-Message parse_message(xmlNode* node) {
-  Message result{property(node, "name"), property(node, "type"), number(node, "since"), {}};
-  for (xmlNode* child = node->children; child != nullptr; child = child->next) if (element(child, "arg")) {
-    Arg arg{property(child, "name"), property(child, "type"), property(child, "interface"),
-            property(child, "allow-null") == "true"};
-    if (arg.name.empty()) throw std::runtime_error("argument without a name");
-    (void)signature_type(arg);
-    if (arg.nullable && arg.type != "string" && arg.type != "object")
-      throw std::runtime_error("allow-null is only valid for string and object arguments");
-    result.args.push_back(std::move(arg));
-  }
-  if (std::count_if(result.args.begin(), result.args.end(), [](const Arg& arg) {
-        return arg.type == "new_id";
-      }) > 1)
-    throw std::runtime_error("message has more than one new_id argument");
-  if (result.name.empty()) throw std::runtime_error("message without a name");
-  return result;
-}
-
-Protocol parse(const char* path) {
-  xmlDoc* document = xmlReadFile(path, nullptr, XML_PARSE_NONET | XML_PARSE_NOBLANKS);
-  if (document == nullptr) throw std::runtime_error("could not parse protocol XML");
-  Protocol result;
-  xmlNode* root = xmlDocGetRootElement(document);
-  if (root == nullptr || !element(root, "protocol")) { xmlFreeDoc(document); throw std::runtime_error("root must be protocol"); }
-  result.name = property(root, "name");
-  for (xmlNode* node = root->children; node != nullptr; node = node->next) if (element(node, "interface")) {
-    Interface interface{property(node, "name"), number(node, "version"), {}, {}, {}};
-    for (xmlNode* child = node->children; child != nullptr; child = child->next) {
-      if (element(child, "request")) {
-        Message message = parse_message(child);
-        if (message.since > interface.version)
-          throw std::runtime_error("request since version exceeds interface version");
-        interface.requests.push_back(std::move(message));
-      } else if (element(child, "event")) {
-        Message message = parse_message(child);
-        if (message.since > interface.version)
-          throw std::runtime_error("event since version exceeds interface version");
-        interface.events.push_back(std::move(message));
-      }
-      else if (element(child, "enum")) {
-        Enum enumeration{property(child, "name"), property(child, "bitfield") == "true", {}};
-        for (xmlNode* entry = child->children; entry != nullptr; entry = entry->next) if (element(entry, "entry"))
-          enumeration.entries.push_back({property(entry, "name"), property(entry, "value"), number(entry, "since")});
-        enumeration.name.empty() ? throw std::runtime_error("enum without a name") : void();
-        interface.enums.push_back(std::move(enumeration));
-      }
-    }
-    if (interface.name.empty()) { xmlFreeDoc(document); throw std::runtime_error("interface without a name"); }
-    result.interfaces.push_back(std::move(interface));
-  }
-  xmlFreeDoc(document);
-  if (result.name.empty() || result.interfaces.empty()) throw std::runtime_error("empty protocol");
-  return result;
-}
+using namespace zwayland::scanner;
 
 std::string upper(std::string value) {
   for (char& character : value) character = character == '-' ? '_' : static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
@@ -558,22 +459,34 @@ void zwayland_client_header(std::ostream& out, const Protocol& protocol) {
   out << "} }  // namespace zwayland::generated\n#endif /* " << guard << " */\n";
 }
 
+Protocol load(const std::string& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw std::runtime_error("could not open " + path);
+  const std::string source{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  Protocol protocol = path.ends_with(".zxml") ? parse_zxml(source, path) : parse_xml(source, path);
+  validate(protocol);
+  return protocol;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc != 4) {
-    std::cerr << "usage: zwayland-scanner "
-                 "{zwayland-server-header|zwayland-client-header} INPUT.xml OUTPUT\n";
+    std::cerr << "usage: zwayland-scanner {zwayland-server-header|zwayland-client-header|xml|zxml} "
+                 "INPUT.{xml,zxml} OUTPUT\n";
     return EXIT_FAILURE;
   }
   try {
-    const Protocol protocol = parse(argv[2]);
-    std::ofstream output(argv[3]);
-    if (!output) throw std::runtime_error("could not open output");
+    const Protocol protocol = load(argv[2]);
     const std::string_view mode(argv[1]);
-    if (mode == "zwayland-server-header") zwayland_server_header(output, protocol);
-    else if (mode == "zwayland-client-header") zwayland_client_header(output, protocol);
+    std::ostringstream generated;
+    if (mode == "zwayland-server-header") zwayland_server_header(generated, protocol);
+    else if (mode == "zwayland-client-header") zwayland_client_header(generated, protocol);
+    else if (mode == "xml") write_xml(generated, protocol);
+    else if (mode == "zxml") write_zxml(generated, protocol);
     else throw std::runtime_error("unknown generation mode");
+    std::ofstream output(argv[3], std::ios::binary);
+    if (!output || !(output << generated.str())) throw std::runtime_error("could not write output");
   } catch (const std::exception& exception) {
     std::cerr << "zwayland-scanner: " << exception.what() << '\n';
     return EXIT_FAILURE;

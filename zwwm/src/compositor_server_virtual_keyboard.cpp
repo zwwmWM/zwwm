@@ -8,7 +8,6 @@
 #include <array>
 #include <cstring>
 #include <iterator>
-#include <new>
 
 namespace protocol = zwayland::generated;
 namespace zwwm::detail {
@@ -44,18 +43,12 @@ struct ManagerHandler {
   void create_keyboard(zwayland::server::Client& client, zwayland::server::Resource& manager,
                         std::uint32_t id, zwayland::server::Resource* seat_resource) {
     auto* seat = manager.data<SeatState>();
-    if (seat_resource == nullptr || seat_resource->client != &client ||
-        seat_resource->interface != &protocol::wl_seat_interface || seat_resource->data<SeatState>() != seat) {
+    if (seat_resource->data<SeatState>() != seat) {
       manager.post_error(protocol::ZWWM_VIRTUAL_KEYBOARD_MANAGER_V1_ERROR_INVALID_SEAT, "unknown seat");
       return;
     }
     auto* resource = client.create_resource(&protocol::zwwm_virtual_keyboard_v1_interface, id, 1);
-    auto* keyboard = resource == nullptr ? nullptr : new (std::nothrow) VirtualKeyboard{seat, seat->next_keyboard_source++};
-    if (keyboard == nullptr) {
-      if (resource != nullptr) resource->destroy();
-      client.post_no_memory();
-      return;
-    }
+    auto* keyboard = new VirtualKeyboard{seat, seat->next_keyboard_source++};
     resource->set_data(keyboard);
     resource->set_handler(protocol::zwwm_virtual_keyboard_v1_handler(KeyboardHandler{}));
     resource->set_destroy_handler([](zwayland::server::Resource& resource) {
@@ -137,17 +130,12 @@ struct ManagerV1Handler {
   void create_virtual_keyboard(zwayland::server::Client& client, zwayland::server::Resource& manager,
                                zwayland::server::Resource* seat_resource, std::uint32_t id) {
     auto* seat = manager.data<SeatState>();
-    if (seat_resource == nullptr || seat_resource->data<SeatState>() != seat) {
+    if (seat_resource->data<SeatState>() != seat) {
       manager.post_error(protocol::WL_DISPLAY_ERROR_INVALID_OBJECT, "unknown seat");
       return;
     }
     auto* resource = client.create_resource(&protocol::zwp_virtual_keyboard_v1_interface, id, 1);
-    auto* keyboard = resource == nullptr ? nullptr : new (std::nothrow) VirtualKeyboardV1{seat, seat->next_keyboard_source++, {}};
-    if (keyboard == nullptr) {
-      if (resource != nullptr) resource->destroy();
-      client.post_no_memory();
-      return;
-    }
+    auto* keyboard = new VirtualKeyboardV1{seat, seat->next_keyboard_source++, {}};
     seat->keyboard_source_clients[keyboard->source] = &client;
     resource->set_data(keyboard);
     resource->set_handler(protocol::zwp_virtual_keyboard_v1_handler(KeyboardV1Handler{}));
@@ -189,13 +177,11 @@ void reset_virtual_keyboards(SeatState* seat) {
 void bind_virtual_keyboard_manager(zwayland::server::Client* client, void* data, std::uint32_t,
                                    std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::zwwm_virtual_keyboard_manager_v1_interface, id, 1);
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_data(static_cast<SeatState*>(data));
   resource->set_handler(protocol::zwwm_virtual_keyboard_manager_v1_handler(ManagerHandler{}));
 }
 void bind_virtual_keyboard_v1_manager(zwayland::server::Client* client, void* data, std::uint32_t, std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::zwp_virtual_keyboard_manager_v1_interface, id, 1);
-  if (resource == nullptr) { client->post_no_memory(); return; }
   resource->set_data(static_cast<SeatState*>(data));
   resource->set_handler(protocol::zwp_virtual_keyboard_manager_v1_handler(ManagerV1Handler{}));
 }

@@ -339,7 +339,7 @@ void surface_local_from_global(const SurfaceState* surface, std::int32_t global_
                                std::int32_t* local_x, std::int32_t* local_y);
 void surface_global_from_local(const SurfaceState* surface, std::int32_t local_x, std::int32_t local_y,
                                std::int32_t* global_x, std::int32_t* global_y);
-SurfaceState* compositor_surface_from_resource(zwayland::server::Client* client, zwayland::server::Resource* resource);
+SurfaceState* compositor_surface_from_resource(zwayland::server::Resource* resource);
 void bind_viewporter(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
 void bind_fractional_scale_manager(zwayland::server::Client*, void*, std::uint32_t, std::uint32_t);
 void send_buffer_release(Buffer* buffer);

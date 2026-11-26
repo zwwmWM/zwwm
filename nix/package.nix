@@ -18,7 +18,6 @@
 , libgbm
 , libinput
 , libpng
-, libxml2
 , libxkbcommon
 , libXcursor
 , libxcb
@@ -74,7 +73,6 @@ stdenv.mkDerivation {
     libgbm
     libinput
     libpng
-    libxml2
     libxkbcommon
     libXcursor
     pipewire

@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <new>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -65,7 +64,6 @@ struct ManagerProtocol::Impl {
     // Manager version 7 brought the windows snapshot and its window event.
     auto* resource = client->create_resource(&protocol::ext_zwwm_snapshot_v1_interface, id,
                                              manager_version >= 7 ? 2U : 1U);
-    if (resource == nullptr) { client->post_no_memory(); return nullptr; }
     resource->set_data(this);
     resource->set_handler(protocol::ext_zwwm_snapshot_v1_handler(DestroyHandler{}));
     resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { snapshot_destroyed(&destroyed); });
@@ -74,7 +72,6 @@ struct ManagerProtocol::Impl {
 
   zwayland::server::Resource* result(zwayland::server::Client* client, std::uint32_t id) {
     auto* resource = client->create_resource(&protocol::ext_zwwm_result_v1_interface, id, 1);
-    if (resource == nullptr) { client->post_no_memory(); return nullptr; }
     resource->set_data(this);
     resource->set_handler(protocol::ext_zwwm_result_v1_handler(DestroyHandler{}));
     resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { result_destroyed(&destroyed); });
@@ -217,12 +214,7 @@ struct ManagerProtocol::Impl {
                                 std::uint32_t events) {
     auto* self = manager->data<Impl>();
     auto* resource = client->create_resource(&protocol::ext_zwwm_subscription_v1_interface, id, 1);
-    auto* subscription = resource == nullptr ? nullptr : new (std::nothrow) Subscription{self, resource, events};
-    if (resource == nullptr || subscription == nullptr) {
-      if (resource != nullptr) resource->destroy();
-      client->post_no_memory();
-      return;
-    }
+    auto* subscription = new Subscription{self, resource, events};
     self->subscriptions.push_back(subscription);
     resource->set_data(subscription);
     resource->set_handler(protocol::ext_zwwm_subscription_v1_handler(DestroyHandler{}));
@@ -261,7 +253,6 @@ struct ManagerProtocol::Impl {
   static void bind(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
     auto* self = static_cast<Impl*>(data);
     auto* resource = client->create_resource(&protocol::ext_zwwm_manager_v1_interface, id, std::min(version, protocol::ext_zwwm_manager_v1_interface.version));
-    if (resource == nullptr) { client->post_no_memory(); return; }
     resource->set_data(self);
     resource->set_handler(protocol::ext_zwwm_manager_v1_handler(ManagerHandler{}));
   }

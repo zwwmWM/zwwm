@@ -5,7 +5,6 @@
 #include <cerrno>
 #include <cstdlib>
 #include <fcntl.h>
-#include <new>
 #include <sys/epoll.h>
 #include <unistd.h>
 
@@ -147,8 +146,7 @@ void xwayland_receive_selection(DataSourceState* source, const char* mime, int f
   auto* selection = source == nullptr ? nullptr : source->xwayland_selection;
   auto* runtime = selection == nullptr ? nullptr : selection->runtime;
   if (runtime == nullptr || runtime->connection == nullptr || fd < 0) { if (fd >= 0) ::close(fd); return; }
-  auto* transfer = new (std::nothrow) XwaylandReceiveTransfer;
-  if (transfer == nullptr) { ::close(fd); return; }
+  auto* transfer = new XwaylandReceiveTransfer;
   transfer->selection = selection;
   transfer->fd = fd;
   transfer->window = xcb_generate_id(runtime->connection);
@@ -167,8 +165,7 @@ void install_xwayland_source(XwaylandSelection* selection, const std::vector<std
   auto* runtime = selection->runtime;
   auto* seat = runtime == nullptr || runtime->observer == nullptr ? nullptr : runtime->observer->seat;
   if (seat == nullptr || mimes.empty()) return;
-  auto* source = new (std::nothrow) DataSourceState;
-  if (source == nullptr) return;
+  auto* source = new DataSourceState;
   source->seat = seat;
   source->protocol = DataProtocol::zwlr;
   source->role = DataSourceRole::selection;
@@ -305,8 +302,7 @@ bool handle_xwayland_selection_event(XwaylandRuntime* runtime, xcb_generic_event
   if (::pipe2(pipe_fds, O_CLOEXEC) != 0) { xwayland_send_notify(runtime, *event, false); return true; }
   const int read_flags = ::fcntl(pipe_fds[0], F_GETFL);
   if (read_flags >= 0) (void)::fcntl(pipe_fds[0], F_SETFL, read_flags | O_NONBLOCK);
-  auto* transfer = new (std::nothrow) XwaylandSendTransfer;
-  if (transfer == nullptr) { ::close(pipe_fds[0]); ::close(pipe_fds[1]); xwayland_send_notify(runtime, *event, false); return true; }
+  auto* transfer = new XwaylandSendTransfer;
   transfer->selection = selection;
   transfer->request = *event;
   transfer->request.property = property;

@@ -31,8 +31,8 @@ set(specs
   "viewporter|upstream/wayland-protocols/stable/viewporter/viewporter.xml"
   "fractional-scale|upstream/wayland-protocols/staging/fractional-scale/fractional-scale-v1.xml"
   "cursor-shape|upstream/wayland-protocols/staging/cursor-shape/cursor-shape-v1.xml"
-  "ext-zwwm-manager-v1|ext-zwwm-manager-v1.xml"
-  "zwwm-client-connection-v1|zwwm-client-connection-v1.xml")
+  "ext-zwwm-manager-v1|ext-zwwm-manager-v1.zxml"
+  "zwwm-client-connection-v1|zwwm-client-connection-v1.zxml")
 foreach(spec IN LISTS specs)
   string(REPLACE "|" ";" parts "${spec}")
   list(GET parts 0 name)

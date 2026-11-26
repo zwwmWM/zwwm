@@ -1,0 +1,32 @@
+protocol zwwm_capture_access_v1;
+
+copyright R"(
+SPDX-FileCopyrightText: 2026 binarylinuxx
+SPDX-License-Identifier: BSD-3-Clause
+)";
+
+/// unlock screen and window capture for trusted clients
+///
+/// zwwm_screencopy_view_manager_v1 and ext_zwwm_toplevels_v1 are hidden
+/// from ordinary clients. A client proves it runs as the session's user by
+/// sending the capture token: the bytes of the file named by the
+/// ZWWM_CAPTURE_TOKEN environment variable, which zwwm creates readable
+/// only by that user and rewrites at every start.
+///
+/// Registries list globals as they were when created, so after granted the
+/// client creates a new wl_registry: it announces both globals, which may
+/// then be bound. Access lasts until the client disconnects.
+interface zwwm_capture_access_v1 version 1 {
+  /// destroy the access object
+  ///
+  /// Access already granted is kept.
+  request ~destroy();
+
+  /// present the capture token
+  ///
+  /// Exactly one granted or denied event follows.
+  request authenticate(array token);
+
+  event granted();
+  event denied();
+}

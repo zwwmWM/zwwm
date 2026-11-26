@@ -25,7 +25,6 @@ struct TouchHandler {
 void bind_touch(zwayland::server::Client* client, SeatState* seat, std::uint32_t version,
                 std::uint32_t id) {
   auto* resource = client->create_resource(&protocol::wl_touch_interface, id, version);
-  if (resource == nullptr) { client->post_no_memory(); return; }
   seat->touches.push_back(resource);
   resource->set_data(seat);
   resource->set_handler(protocol::wl_touch_handler(TouchHandler{}));

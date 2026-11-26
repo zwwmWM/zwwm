@@ -56,9 +56,7 @@ bool publishActivationEnvironment() {
 }
 
 void refreshPublicPortal() {
-  // Another backend can advertise the same source mask. Restart the frontend
-  // after publishing this session's desktop and portal lookup paths so it
-  // actually selects zwwm instead of retaining an earlier backend.
+  // Restart the frontend so it picks zwwm over an earlier backend with the same source mask.
   QDBusInterface systemd(QStringLiteral("org.freedesktop.systemd1"),
                           QStringLiteral("/org/freedesktop/systemd1"),
                           QStringLiteral("org.freedesktop.systemd1.Manager"),
