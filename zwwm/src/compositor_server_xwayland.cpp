@@ -271,7 +271,7 @@ bool XwaylandRuntime::automatic_floating(const XwaylandWindow* item) const {
         net_wm_window_type_dock, net_wm_window_type_dropdown_menu, net_wm_window_type_menu,
         kde_net_wm_window_type_override};
     const bool floating_type = std::any_of(item->window_types.begin(), item->window_types.end(),
-        [&](xcb_atom_t type) { return std::find(floating_types.begin(), floating_types.end(), type) != floating_types.end(); });
+        [&](xcb_atom_t type) { return std::ranges::contains(floating_types, type); });
     const bool floating_role = item->window_role.find("task_dialog") != std::string::npos ||
                                item->window_role.find("pop-up") != std::string::npos;
     const bool fixed_size = item->min_width > 0 && item->min_height > 0 &&
@@ -379,15 +379,9 @@ void XwaylandRuntime::try_associate(XwaylandSurfaceState* role) {
           Rect{0, 0, 0, 0};
     if (role->floating && !item->override_redirect && item->remembered_bounds.width > 0)
       role->floating_bounds = item->remembered_bounds;
-    if (role->surface != nullptr && role->surface->observer != nullptr)
+    if (role->surface != nullptr) {
       role->output = role->surface->observer->active_output;
-    if (role->surface != nullptr && role->surface->observer != nullptr &&
-        role->surface->observer->outputs != nullptr) {
-      const auto output = std::find_if(role->surface->observer->outputs->begin(),
-          role->surface->observer->outputs->end(), [role](const auto& candidate) {
-            return candidate->info.id == role->output;
-          });
-      if (output != role->surface->observer->outputs->end()) role->tag = (*output)->active_tag;
+      if (auto* output = output_state(role->surface->observer, role->output)) role->tag = output->active_tag;
     }
     apply_geometry(item);
     if (item->mapped && role->surface != nullptr)
@@ -915,7 +909,9 @@ void XwaylandRuntime::get_xwayland_surface(zwayland::server::Client* binding_cli
     resource.destroy();
   }
 };
-    resource->set_data(role); resource->set_handler(protocol::xwayland_surface_v1_handler(XwaylandSurfaceV1ImplementationHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (surface_resource_destroyed)(&destroyed); });
+resource->set_data(role);
+resource->set_handler(protocol::xwayland_surface_v1_handler(XwaylandSurfaceV1ImplementationHandler{}));
+resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { surface_resource_destroyed(&destroyed); });
   }
 
 void XwaylandRuntime::bind_shell(zwayland::server::Client* binding_client, void* data, std::uint32_t version, std::uint32_t id) {
@@ -924,13 +920,13 @@ void XwaylandRuntime::bind_shell(zwayland::server::Client* binding_client, void*
       binding_client->post_error(0, "xwayland_shell_v1 is restricted to the compositor-owned Xwayland client");
       return;
     }
-    auto* resource = binding_client->create_resource(&protocol::xwayland_shell_v1_interface, id, std::min(version, 1U));
+    auto* resource = binding_client->create_resource(&protocol::xwayland_shell_v1_interface, id, version);
     struct XwaylandShellV1ImplementationHandler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
   void get_xwayland_surface(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* surface) {
-    (XwaylandRuntime::get_xwayland_surface)(&client, &resource, id, surface);
+    XwaylandRuntime::get_xwayland_surface(&client, &resource, id, surface);
   }
 };
     resource->set_data(runtime); resource->set_handler(protocol::xwayland_shell_v1_handler(XwaylandShellV1ImplementationHandler{}));
@@ -945,7 +941,9 @@ XwaylandRuntime::XwaylandRuntime(zwayland::server::Display* display_value, zwayl
       delete runtime;
     };
     display->destroy_signal.add(display_destroy);
-    shell = display->add_global(&protocol::xwayland_shell_v1_interface, 1, [data = this](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (bind_shell)(&client, data, bound_version, id); });
+    shell = display->add_global(&protocol::xwayland_shell_v1_interface, 1,
+                                [data = this](zwayland::server::Client& client, std::uint32_t bound_version,
+                                              std::uint32_t id) { bind_shell(&client, data, bound_version, id); });
     if (shell != 0)
       display->restrict_global(shell, [this](const zwayland::server::Client& candidate) { return &candidate == client; });
     if (shell == 0 || !start()) {

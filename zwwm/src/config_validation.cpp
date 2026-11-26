@@ -52,7 +52,7 @@ void warn_unknown_fields(const Value::Object& object, std::span<const std::strin
                          ValidationContext& context, SourceLocation location,
                          std::string_view object_name) {
   for (const auto& name : object.names) {
-    if (std::find(known.begin(), known.end(), name) == known.end()) {
+    if (!std::ranges::contains(known, name)) {
       context.warning(location, "unknown " + std::string(object_name) + " setting: " + name);
     }
   }

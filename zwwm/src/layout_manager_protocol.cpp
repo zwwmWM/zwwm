@@ -101,7 +101,7 @@ struct LayoutManagerProtocol::Impl {
     void request_layout(zwayland::server::Client&, zwayland::server::Resource& resource) {
       auto* self = resource.data<Impl>();
       if (self->provider != &resource) return;
-      for (auto& [key, slot] : self->slots) { (void)key; slot.force = true; }
+      for (auto& entry : self->slots) entry.second.force = true;
       self->compositor->reconfigure_layout();
     }
     void place(zwayland::server::Client&, zwayland::server::Resource& resource,

@@ -267,7 +267,10 @@ ManagerProtocol::ManagerProtocol(zwayland::server::Display* display, CompositorS
   impl_->reload = std::move(reload);
   impl_->rebuild_shaders = std::move(rebuild_shaders);
   impl_->set_cursor = std::move(set_cursor);
-  impl_->global = display->add_global(&protocol::ext_zwwm_manager_v1_interface, protocol::ext_zwwm_manager_v1_interface.version, [data = impl_](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind)(&client, data, bound_version, id); });
+  impl_->global =
+      display->add_global(&protocol::ext_zwwm_manager_v1_interface, protocol::ext_zwwm_manager_v1_interface.version,
+                          [data = impl_](zwayland::server::Client& client, std::uint32_t bound_version,
+                                         std::uint32_t id) { Impl::bind(&client, data, bound_version, id); });
   if (impl_->global == 0) { delete impl_; throw std::runtime_error("could not create manager protocol global"); }
   compositor->set_event_observer([](void* data, const char* event) {
     if (event != nullptr) static_cast<ManagerProtocol*>(data)->emit(event);

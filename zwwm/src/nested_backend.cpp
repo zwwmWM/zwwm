@@ -999,7 +999,15 @@ void NestedBackend::repaint_gpu() {
     const auto root = std::find_if(windows_.begin(), windows_.end(), [&window](const Window& item) { return item.id == window.root_id; });
     if (root == windows_.end() || !root->content_ready || root->width <= 0 || root->height <= 0 || window.texture == nullptr) continue;
     if (!root->toplevel) {
-      frame.draws.push_back({window.id, {{window.x, window.y}, {static_cast<std::uint32_t>(window.width), static_cast<std::uint32_t>(window.height)}}, window.compositor_opacity, {1.0F, 1.0F, 1.0F, 1.0F}, window.texture, 0.0F, 0.0F, {window.source_left, window.source_top, window.source_right, window.source_bottom}});
+      frame.draws.push_back({window.id,
+                             {{window.x, window.y},
+                              {static_cast<std::uint32_t>(window.width), static_cast<std::uint32_t>(window.height)}},
+                             window.compositor_opacity,
+                             {1.0F, 1.0F, 1.0F, 1.0F},
+                             window.texture,
+                             0.0F,
+                             0.0F,
+                             {window.source_left, window.source_top, window.source_right, window.source_bottom}});
       frame.draws.back().opaque = window.opaque && window.compositor_opacity == 1.0F;
       frame.draws.back().background_blur_radius = static_cast<float>(window.background_blur_radius);
       frame.draws.back().background_mask_texture = window.layer_surface;
@@ -1361,7 +1369,12 @@ void NestedBackend::repaint() {
           (inside_rounded_rect(x, y, bounds->origin.x, bounds->origin.y,
                                static_cast<int>(bounds->size.width), static_cast<int>(bounds->size.height), outer_radius) &&
            inside_rounded_rect(x, y, content_x, content_y, content_w, content_h, content_radius));
-        if (sx >= 0 && sy >= 0 && sx < window.buffer_width && sy < window.buffer_height && inside_shape) destination[static_cast<std::size_t>(y) * logical_width_ + x] = source_over(destination[static_cast<std::size_t>(y) * logical_width_ + x], apply_opacity(window.pixels[static_cast<std::size_t>(sy) * window.buffer_width + sx] | (window.format == protocol::WL_SHM_FORMAT_XRGB8888 ? 0xff000000U : 0U), opacity));
+      if (sx >= 0 && sy >= 0 && sx < window.buffer_width && sy < window.buffer_height && inside_shape)
+        destination[static_cast<std::size_t>(y) * logical_width_ + x] =
+            source_over(destination[static_cast<std::size_t>(y) * logical_width_ + x],
+                        apply_opacity(window.pixels[static_cast<std::size_t>(sy) * window.buffer_width + sx] |
+                                          (window.format == protocol::WL_SHM_FORMAT_XRGB8888 ? 0xff000000U : 0U),
+                                      opacity));
     }
     if (window.toplevel && !root_it->fullscreen && border_width > 0) {
       const auto border = apply_opacity(premultiplied(window.focused ? config_->decoration.focused_border_color

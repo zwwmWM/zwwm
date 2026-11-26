@@ -6,8 +6,7 @@ namespace protocol = zwayland::generated;
 namespace zwwm::detail {
 namespace {
 void pending_frame(SeatState* seat, zwayland::server::Client* client) {
-  if (std::find(seat->touch_frame_clients.begin(), seat->touch_frame_clients.end(), client) ==
-      seat->touch_frame_clients.end()) seat->touch_frame_clients.push_back(client);
+  if (!std::ranges::contains(seat->touch_frame_clients, client)) seat->touch_frame_clients.push_back(client);
 }
 
 void cancel_client(SeatState* seat, zwayland::server::Client* client) {
@@ -31,8 +30,8 @@ void bind_touch(zwayland::server::Client* client, SeatState* seat, std::uint32_t
   resource->set_destroy_handler([](zwayland::server::Resource& resource) {
     auto* seat = resource.data<SeatState>();
     std::erase(seat->touches, &resource);
-    for (auto& [id, point] : seat->touch_points) {
-      (void)id;
+    for (auto& entry : seat->touch_points) {
+      auto& point = entry.second;
       std::erase(point.recipients, &resource);
     }
     if (std::none_of(seat->touches.begin(), seat->touches.end(), [&](const auto* other) {
@@ -106,8 +105,7 @@ void deliver_touch_up(SeatState* seat, std::uint32_t time, std::int32_t id) {
 
 void deliver_touch_frame(SeatState* seat) {
   for (auto* resource : seat->touches)
-    if (std::find(seat->touch_frame_clients.begin(), seat->touch_frame_clients.end(), resource->client) !=
-        seat->touch_frame_clients.end()) protocol::wl_touch_send_frame(*resource);
+    if (std::ranges::contains(seat->touch_frame_clients, resource->client)) protocol::wl_touch_send_frame(*resource);
   seat->touch_frame_clients.clear();
 }
 

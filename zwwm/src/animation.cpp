@@ -91,8 +91,8 @@ AnimationSystem::AnimationSystem(AnimationConfig config) : config_(config) {}
 
 void AnimationSystem::set_config(AnimationConfig config, std::uint64_t now_us) {
   if (config == config_) return;
-  for (auto& [id, state] : states_) {
-    (void)id;
+  for (auto& entry : states_) {
+    auto& state = entry.second;
     state.from = interpolate_values(state.from, state.target, progress(state, now_us));
     const float presence_amount = presence_progress(state, now_us);
     state.from_opacity += (state.target_opacity - state.from_opacity) * presence_progress(state, now_us, true);
@@ -312,7 +312,7 @@ bool AnimationSystem::retains(std::uint64_t id) const { return states_.contains(
 std::vector<std::uint64_t> AnimationSystem::retained_ids() const {
   std::vector<std::uint64_t> ids;
   ids.reserve(states_.size());
-  for (const auto& [id, state] : states_) { (void)state; ids.push_back(id); }
+  for (const auto& entry : states_) ids.push_back(entry.first);
   return ids;
 }
 

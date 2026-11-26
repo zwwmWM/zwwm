@@ -124,7 +124,12 @@ struct Observer {
 
 struct Pool { void* mapping = nullptr; std::size_t size = 0; UniqueFd fd; std::size_t buffers = 0; bool destroyed = false; };
 struct Buffer {
-  Pool* pool = nullptr; zwayland::server::Resource* resource = nullptr; std::size_t references = 1; std::int32_t offset = 0, width = 0, height = 0, stride = 0; std::uint32_t format = 0; std::optional<renderer::DmabufAttributes> dmabuf;
+  Pool* pool = nullptr;
+  zwayland::server::Resource* resource = nullptr;
+  std::size_t references = 1;
+  std::int32_t offset = 0, width = 0, height = 0, stride = 0;
+  std::uint32_t format = 0;
+  std::optional<renderer::DmabufAttributes> dmabuf;
   std::uint64_t id = 0;
   // Scanout holds delay wl_buffer.release until the display stops reading the buffer.
   std::uint32_t holds = 0;
@@ -140,7 +145,13 @@ struct ViewportConfig {
   std::int32_t destination_width = 0, destination_height = 0;
   bool has_source = false, has_destination = false;
 };
-struct PositionerState { std::int32_t width = 0, height = 0, offset_x = 0, offset_y = 0, parent_width = 0, parent_height = 0; Rect anchor_rect{0, 0, 0, 0}; std::uint32_t anchor = protocol::XDG_POSITIONER_ANCHOR_NONE, gravity = protocol::XDG_POSITIONER_GRAVITY_NONE, adjustment = protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_NONE, parent_configure = 0; bool reactive = false; };
+struct PositionerState {
+  std::int32_t width = 0, height = 0, offset_x = 0, offset_y = 0, parent_width = 0, parent_height = 0;
+  Rect anchor_rect{0, 0, 0, 0};
+  std::uint32_t anchor = protocol::XDG_POSITIONER_ANCHOR_NONE, gravity = protocol::XDG_POSITIONER_GRAVITY_NONE,
+                adjustment = protocol::XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_NONE, parent_configure = 0;
+  bool reactive = false;
+};
 struct SurfaceState {
   ~SurfaceState();
   zwayland::server::Resource* resource = nullptr; Buffer* pending_buffer = nullptr; Buffer* current_buffer = nullptr;
@@ -170,11 +181,49 @@ struct SurfaceState {
 #endif
   std::shared_ptr<bool> alive = std::make_shared<bool>(true);
 };
-struct LayerState { std::uint32_t layer = protocol::ZWWM_LAYER_SHELL_V1_LAYER_TOP, anchor = 0, keyboard = protocol::ZWWM_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE; std::int32_t width = 0, height = 0, zone = 0, top = 0, right = 0, bottom = 0, left = 0; };
-struct XwlrLayerState { zwayland::server::Resource* resource = nullptr; LayerSurfaceState* layer = nullptr; std::uint32_t pending_edge = 0, current_edge = 0, reported_anchor = 0; std::int32_t pending_priority = 0, current_priority = 0, reported_zone = 0; double pending_opacity = 256, current_opacity = 256; bool ignored_reported = false; };
-struct LayerSurfaceState { zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; OutputId output; std::string name_space; LayerState pending, current; XwlrLayerState* xwlr = nullptr; std::uint64_t creation = 0; std::vector<std::uint32_t> serials; std::uint32_t last_sent = 0, last_acked = 0; std::int32_t configured_width = -1, configured_height = -1; bool configured = false, mapped = false, configure_requested = false, closed = false; };
-struct LockSurfaceState { SessionLockState* lock = nullptr; zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; OutputId output; std::vector<std::uint32_t> serials; std::uint32_t acked = 0; std::uint32_t width = 0, height = 0; bool mapped = false, presented = false; };
-struct SessionLockState { Observer* observer = nullptr; zwayland::server::Client* client = nullptr; zwayland::server::Resource* resource = nullptr; std::vector<LockSurfaceState*> surfaces; bool accepted = false, locked_sent = false, unlocked = false; };
+struct LayerState {
+  std::uint32_t layer = protocol::ZWWM_LAYER_SHELL_V1_LAYER_TOP, anchor = 0,
+                keyboard = protocol::ZWWM_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE;
+  std::int32_t width = 0, height = 0, zone = 0, top = 0, right = 0, bottom = 0, left = 0;
+};
+struct XwlrLayerState {
+  zwayland::server::Resource* resource = nullptr;
+  LayerSurfaceState* layer = nullptr;
+  std::uint32_t pending_edge = 0, current_edge = 0, reported_anchor = 0;
+  std::int32_t pending_priority = 0, current_priority = 0, reported_zone = 0;
+  double pending_opacity = 256, current_opacity = 256;
+  bool ignored_reported = false;
+};
+struct LayerSurfaceState {
+  zwayland::server::Resource* resource = nullptr;
+  SurfaceState* surface = nullptr;
+  OutputId output;
+  std::string name_space;
+  LayerState pending, current;
+  XwlrLayerState* xwlr = nullptr;
+  std::uint64_t creation = 0;
+  std::vector<std::uint32_t> serials;
+  std::uint32_t last_sent = 0, last_acked = 0;
+  std::int32_t configured_width = -1, configured_height = -1;
+  bool configured = false, mapped = false, configure_requested = false, closed = false;
+};
+struct LockSurfaceState {
+  SessionLockState* lock = nullptr;
+  zwayland::server::Resource* resource = nullptr;
+  SurfaceState* surface = nullptr;
+  OutputId output;
+  std::vector<std::uint32_t> serials;
+  std::uint32_t acked = 0;
+  std::uint32_t width = 0, height = 0;
+  bool mapped = false, presented = false;
+};
+struct SessionLockState {
+  Observer* observer = nullptr;
+  zwayland::server::Client* client = nullptr;
+  zwayland::server::Resource* resource = nullptr;
+  std::vector<LockSurfaceState*> surfaces;
+  bool accepted = false, locked_sent = false, unlocked = false;
+};
 struct ViewportState { zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; std::shared_ptr<bool> surface_alive; };
 struct FractionalScaleState { zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; std::shared_ptr<bool> surface_alive; std::uint32_t sent_scale_120 = 0; };
 
@@ -200,7 +249,14 @@ struct ProtocolGlobals {
   ~ProtocolGlobals();
 };
 
-struct EdgeSwipeTouch { EdgeSwipeState* target = nullptr; std::int32_t id = 0; std::uint32_t edge = 0; double x = 0, y = 0, distance = 0, lateral = 0; std::uint32_t time = 0, last_time = 0; double velocity = 0; };
+struct EdgeSwipeTouch {
+  EdgeSwipeState* target = nullptr;
+  std::int32_t id = 0;
+  std::uint32_t edge = 0;
+  double x = 0, y = 0, distance = 0, lateral = 0;
+  std::uint32_t time = 0, last_time = 0;
+  double velocity = 0;
+};
 struct HeldKey { std::optional<Keybinding> tap, hold, release, repeat; int timer = -1; bool held = false; };
 struct FocusGrabState;
 struct SeatState {
@@ -297,7 +353,21 @@ struct SeatState {
   std::int32_t repeat_rate = 25, repeat_delay = 600;
   SessionLockState* session_lock = nullptr;
 };
-struct PointerConstraint { SeatState* seat = nullptr; SurfaceState* surface = nullptr; zwayland::server::Resource* pointer = nullptr; zwayland::server::Resource* resource = nullptr; std::vector<Rect> region; std::vector<Rect> pending_region; std::uint32_t lifetime = protocol::ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT; std::int32_t x = 0, y = 0; double pending_hint_x = 0, pending_hint_y = 0; double hint_x = 0, hint_y = 0; bool locked = false, active = false, defunct = false; bool has_region = false, pending_has_region = false, region_pending = false; bool hint_pending = false, has_hint = false; };
+struct PointerConstraint {
+  SeatState* seat = nullptr;
+  SurfaceState* surface = nullptr;
+  zwayland::server::Resource* pointer = nullptr;
+  zwayland::server::Resource* resource = nullptr;
+  std::vector<Rect> region;
+  std::vector<Rect> pending_region;
+  std::uint32_t lifetime = protocol::ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT;
+  std::int32_t x = 0, y = 0;
+  double pending_hint_x = 0, pending_hint_y = 0;
+  double hint_x = 0, hint_y = 0;
+  bool locked = false, active = false, defunct = false;
+  bool has_region = false, pending_has_region = false, region_pending = false;
+  bool hint_pending = false, has_hint = false;
+};
 struct RelativePointer { SeatState* seat = nullptr; zwayland::server::Resource* pointer = nullptr; zwayland::server::Resource* resource = nullptr; };
 struct IdleNotification { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; std::uint32_t timeout = 0; int timer = -1; bool idle = false; bool obey_inhibitors = true; };
 struct IdleInhibitor { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; SurfaceState* surface = nullptr; std::shared_ptr<bool> surface_alive; };
@@ -307,7 +377,14 @@ struct TextInputContent {
   std::uint32_t cursor = 0, anchor = 0, cause = 0, hint = 0, purpose = 0;
   Rect cursor_rectangle{0, 0, 0, 0};
 };
-struct TextInputState { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; SurfaceState* focus = nullptr; std::shared_ptr<bool> focus_alive; TextInputContent pending, current; std::uint32_t commits = 0; };
+struct TextInputState {
+  SeatState* seat = nullptr;
+  zwayland::server::Resource* resource = nullptr;
+  SurfaceState* focus = nullptr;
+  std::shared_ptr<bool> focus_alive;
+  TextInputContent pending, current;
+  std::uint32_t commits = 0;
+};
 struct InputMethodState {
   SeatState* seat = nullptr;
   zwayland::server::Resource* resource = nullptr;
@@ -324,13 +401,32 @@ struct EdgeSwipeState { SeatState* seat = nullptr; zwayland::server::Resource* r
 
 enum class DataSourceRole { unused, selection, drag };
 enum class DataProtocol { standard, zwwm, zwlr };
-struct DataSourceState { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; std::vector<std::string> mime_types; std::uint32_t actions = 0; DataSourceRole role = DataSourceRole::unused; bool cancelled = false; DataProtocol protocol = DataProtocol::standard;
+struct DataSourceState {
+  SeatState* seat = nullptr;
+  zwayland::server::Resource* resource = nullptr;
+  std::vector<std::string> mime_types;
+  std::uint32_t actions = 0;
+  DataSourceRole role = DataSourceRole::unused;
+  bool cancelled = false;
+  DataProtocol protocol = DataProtocol::standard;
 #ifdef ZWWM_XWAYLAND
   XwaylandSelection* xwayland_selection = nullptr;
 #endif
 };
 struct DataDeviceState { SeatState* seat = nullptr; zwayland::server::Resource* resource = nullptr; DataProtocol protocol = DataProtocol::standard; };
-struct DataOfferState { SeatState* seat = nullptr; DataSourceState* source = nullptr; zwayland::server::Resource* resource = nullptr; DataProtocol protocol = DataProtocol::standard; std::uint32_t actions = 0; std::uint32_t preferred_action = 0; std::uint32_t action = 0; bool drag = false; bool active = false; bool dropped = false; bool accepted = false; };
+struct DataOfferState {
+  SeatState* seat = nullptr;
+  DataSourceState* source = nullptr;
+  zwayland::server::Resource* resource = nullptr;
+  DataProtocol protocol = DataProtocol::standard;
+  std::uint32_t actions = 0;
+  std::uint32_t preferred_action = 0;
+  std::uint32_t action = 0;
+  bool drag = false;
+  bool active = false;
+  bool dropped = false;
+  bool accepted = false;
+};
 
 SurfaceState* root(SurfaceState* surface);
 const OutputConfig& output_config(const Observer* observer, OutputId output = {});

@@ -50,8 +50,21 @@ bool send_message(int socket, const Message& message) {
 }  // namespace
 
 struct PortalCapture::Impl {
-  struct Frame { Impl* owner = nullptr; zwayland::server::Resource* resource = nullptr; OutputCapture capture; std::uint64_t target_id = 0; std::uint32_t x = 0, y = 0, width = 0, height = 0; bool copied = false, terminal = false; };
-  struct CanonicalFrame { Impl* owner = nullptr; zwayland::server::Resource* resource = nullptr; OutputCapture capture; std::uint32_t x = 0, y = 0, width = 0, height = 0; bool copied = false, terminal = false; };
+  struct Frame {
+    Impl* owner = nullptr;
+    zwayland::server::Resource* resource = nullptr;
+    OutputCapture capture;
+    std::uint64_t target_id = 0;
+    std::uint32_t x = 0, y = 0, width = 0, height = 0;
+    bool copied = false, terminal = false;
+  };
+  struct CanonicalFrame {
+    Impl* owner = nullptr;
+    zwayland::server::Resource* resource = nullptr;
+    OutputCapture capture;
+    std::uint32_t x = 0, y = 0, width = 0, height = 0;
+    bool copied = false, terminal = false;
+  };
   struct Handle { Impl* owner = nullptr; zwayland::server::Resource* resource = nullptr; zwayland::server::Resource* manager = nullptr; ToplevelInfo info; bool closed = false; };
   struct ClientListener {
     zwayland::server::Listener listener{};
@@ -123,8 +136,16 @@ struct PortalCapture::Impl {
     auto* self = static_cast<Impl*>(data);
     return (global != self->screencopy && global != self->toplevel_manager) || self->trusted(candidate);
   }
-  static void frame_destroy(zwayland::server::Resource* resource) { auto* frame = resource->data<Frame>(); if (frame != nullptr && frame->owner != nullptr) std::erase(frame->owner->frames, frame); delete frame; }
-  static void canonical_frame_destroy(zwayland::server::Resource* resource) { auto* frame = resource->data<CanonicalFrame>(); if (frame != nullptr && frame->owner != nullptr) std::erase(frame->owner->canonical_frames, frame); delete frame; }
+  static void frame_destroy(zwayland::server::Resource* resource) {
+    auto* frame = resource->data<Frame>();
+    if (frame != nullptr && frame->owner != nullptr) std::erase(frame->owner->frames, frame);
+    delete frame;
+  }
+  static void canonical_frame_destroy(zwayland::server::Resource* resource) {
+    auto* frame = resource->data<CanonicalFrame>();
+    if (frame != nullptr && frame->owner != nullptr) std::erase(frame->owner->canonical_frames, frame);
+    delete frame;
+  }
   static void frame_copy(zwayland::server::Client*, zwayland::server::Resource* resource, zwayland::server::Resource* buffer) {
     auto* frame = resource->data<Frame>();
     if (frame == nullptr || frame->copied || frame->terminal) { resource->post_error(protocol::ZWWM_SCREENCOPY_FRAME_V1_ERROR_ALREADY_USED, "frame copy already requested or terminal"); return; }
@@ -160,15 +181,22 @@ struct PortalCapture::Impl {
     resource.destroy();
   }
   void copy(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* buffer) {
-    (frame_copy)(&client, &resource, buffer);
+    frame_copy(&client, &resource, buffer);
   }
 };
-    resource->set_data(frame); resource->set_handler(protocol::zwwm_screencopy_frame_v1_handler(ZwwmScreencopyFrameV1FrameImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (frame_destroy)(&destroyed); });
-    self->frames.push_back(frame);
-    frame->target_id = target_id;
-    frame->capture.output = selected->id;
-    const bool overlay_cursor = cursor != 0;
-    if ((overlay_cursor && !self->embedded_cursor) || !self->capture(frame->capture, overlay_cursor, target_id) || frame->capture.width == 0 || frame->capture.height == 0) { frame->terminal = true; protocol::zwwm_screencopy_frame_v1_send_failed(*resource, protocol::ZWWM_SCREENCOPY_FRAME_V1_FAILURE_UNAVAILABLE); return; }
+resource->set_data(frame);
+resource->set_handler(protocol::zwwm_screencopy_frame_v1_handler(ZwwmScreencopyFrameV1FrameImplHandler{}));
+resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { frame_destroy(&destroyed); });
+self->frames.push_back(frame);
+frame->target_id = target_id;
+frame->capture.output = selected->id;
+const bool overlay_cursor = cursor != 0;
+if ((overlay_cursor && !self->embedded_cursor) || !self->capture(frame->capture, overlay_cursor, target_id) ||
+    frame->capture.width == 0 || frame->capture.height == 0) {
+  frame->terminal = true;
+  protocol::zwwm_screencopy_frame_v1_send_failed(*resource, protocol::ZWWM_SCREENCOPY_FRAME_V1_FAILURE_UNAVAILABLE);
+  return;
+}
     if (target_id != 0 || width < 0 || height < 0) {
       frame->x = 0; frame->y = 0; frame->width = frame->capture.width; frame->height = frame->capture.height;
     } else if (physical) {
@@ -226,7 +254,7 @@ struct PortalCapture::Impl {
     frame->resource = resource;
     struct ZwlrScreencopyFrameV1FrameImplHandler {
   void copy(zwayland::server::Client& client, zwayland::server::Resource& resource, zwayland::server::Resource* buffer) {
-    (canonical_frame_copy)(&client, &resource, buffer);
+    canonical_frame_copy(&client, &resource, buffer);
   }
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
@@ -235,14 +263,16 @@ struct PortalCapture::Impl {
     canonical_frame_copy(&client, &resource, buffer, true);
   }
 };
-    resource->set_data(frame); resource->set_handler(protocol::zwlr_screencopy_frame_v1_handler(ZwlrScreencopyFrameV1FrameImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (canonical_frame_destroy)(&destroyed); });
-    self->canonical_frames.push_back(frame);
-    frame->capture.output = selected->id;
-    if (!self->capture(frame->capture, cursor != 0, 0) || frame->capture.width == 0 || frame->capture.height == 0) {
-      frame->terminal = true;
-      protocol::zwlr_screencopy_frame_v1_send_failed(*resource);
-      return;
-    }
+resource->set_data(frame);
+resource->set_handler(protocol::zwlr_screencopy_frame_v1_handler(ZwlrScreencopyFrameV1FrameImplHandler{}));
+resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { canonical_frame_destroy(&destroyed); });
+self->canonical_frames.push_back(frame);
+frame->capture.output = selected->id;
+if (!self->capture(frame->capture, cursor != 0, 0) || frame->capture.width == 0 || frame->capture.height == 0) {
+  frame->terminal = true;
+  protocol::zwlr_screencopy_frame_v1_send_failed(*resource);
+  return;
+}
     if (width < 0 || height < 0) {
       frame->x = 0; frame->y = 0; frame->width = frame->capture.width; frame->height = frame->capture.height;
     } else if (!self->map_region(frame->capture, x, y, width, height, &frame->x, &frame->y, &frame->width, &frame->height)) {
@@ -260,12 +290,14 @@ struct PortalCapture::Impl {
   }
   static void bind_canonical_screencopy(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
     auto* self = static_cast<Impl*>(data);
-    auto* resource = client->create_resource(&protocol::zwlr_screencopy_manager_v1_interface, id, std::min(version, 3U));
+    auto* resource = client->create_resource(&protocol::zwlr_screencopy_manager_v1_interface, id, version);
     struct ZwlrScreencopyManagerV1ImplHandler {
   void capture_output(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, std::int32_t overlay_cursor, zwayland::server::Resource* output) {
     canonical_capture_request(&client, &resource, frame, overlay_cursor, output, 0, 0, -1, -1);
   }
-  void capture_output_region(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, std::int32_t overlay_cursor, zwayland::server::Resource* output, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
+  void capture_output_region(zwayland::server::Client& client, zwayland::server::Resource& resource,
+                             std::uint32_t frame, std::int32_t overlay_cursor, zwayland::server::Resource* output,
+                             std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
     canonical_capture_request(&client, &resource, frame, overlay_cursor, output, x, y, width, height);
   }
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
@@ -288,19 +320,24 @@ struct PortalCapture::Impl {
     resource.destroy();
   }
 };
-    resource->set_data(self); resource->set_handler(protocol::zxdg_output_v1_handler(ZxdgOutputV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { auto* owner = destroyed.data<Impl>();
-       if (owner != nullptr) std::erase_if(owner->xdg_outputs, [&destroyed](const auto& item) { return item.first == &destroyed; }); });
-    self->xdg_outputs.emplace_back(resource, *info);
-    send_xdg_output(resource, *info, output);
+resource->set_data(self);
+resource->set_handler(protocol::zxdg_output_v1_handler(ZxdgOutputV1ImplHandler{}));
+resource->set_destroy_handler([](zwayland::server::Resource& destroyed) {
+  auto* owner = destroyed.data<Impl>();
+  if (owner != nullptr)
+    std::erase_if(owner->xdg_outputs, [&destroyed](const auto& item) { return item.first == &destroyed; });
+});
+self->xdg_outputs.emplace_back(resource, *info);
+send_xdg_output(resource, *info, output);
   }
   static void bind_xdg_output_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
-    auto* resource = client->create_resource(&protocol::zxdg_output_manager_v1_interface, id, std::min(version, 3U));
+    auto* resource = client->create_resource(&protocol::zxdg_output_manager_v1_interface, id, version);
     struct ZxdgOutputManagerV1ImplHandler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
   void get_xdg_output(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* output) {
-    (Impl::get_xdg_output)(&client, &resource, id, output);
+    Impl::get_xdg_output(&client, &resource, id, output);
   }
 };
     resource->set_data(static_cast<Impl*>(data)); resource->set_handler(protocol::zxdg_output_manager_v1_handler(ZxdgOutputManagerV1ImplHandler{}));
@@ -308,7 +345,7 @@ struct PortalCapture::Impl {
   static void bind_screencopy(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
     auto* self = static_cast<Impl*>(data);
     if (!self->trusted(client)) { client->post_error(0, "unauthorized screencopy bind"); return; }
-    auto* resource = client->create_resource(&protocol::zwwm_screencopy_view_manager_v1_interface, id, std::min(version, 1U));
+    auto* resource = client->create_resource(&protocol::zwwm_screencopy_view_manager_v1_interface, id, version);
     struct ZwwmScreencopyViewManagerV1ImplHandler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
@@ -316,13 +353,19 @@ struct PortalCapture::Impl {
   void capture_output(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, zwayland::server::Resource* output, std::int32_t overlay_cursor) {
     capture_request(&client, &resource, frame, output, overlay_cursor, 0, 0, -1, -1);
   }
-  void capture_output_region(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, zwayland::server::Resource* output, std::int32_t overlay_cursor, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
+  void capture_output_region(zwayland::server::Client& client, zwayland::server::Resource& resource,
+                             std::uint32_t frame, zwayland::server::Resource* output, std::int32_t overlay_cursor,
+                             std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) {
     capture_request(&client, &resource, frame, output, overlay_cursor, x, y, width, height);
   }
 };
     self->screencopy_managers.push_back(resource);
-    resource->set_data(self); resource->set_handler(protocol::zwwm_screencopy_view_manager_v1_handler(ZwwmScreencopyViewManagerV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { auto* owner = destroyed.data<Impl>();
-      if (owner != nullptr) std::erase(owner->screencopy_managers, &destroyed); });
+    resource->set_data(self);
+    resource->set_handler(protocol::zwwm_screencopy_view_manager_v1_handler(ZwwmScreencopyViewManagerV1ImplHandler{}));
+    resource->set_destroy_handler([](zwayland::server::Resource& destroyed) {
+      auto* owner = destroyed.data<Impl>();
+      if (owner != nullptr) std::erase(owner->screencopy_managers, &destroyed);
+    });
     protocol::zwwm_screencopy_view_manager_v1_send_cursor_modes(*resource,
         protocol::ZWWM_SCREENCOPY_VIEW_MANAGER_V1_CURSOR_MODE_HIDDEN |
         (self->embedded_cursor ? protocol::ZWWM_SCREENCOPY_VIEW_MANAGER_V1_CURSOR_MODE_EMBEDDED : 0));
@@ -348,31 +391,44 @@ struct PortalCapture::Impl {
     resource.destroy();
   }
   void capture(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t frame, std::int32_t overlay_cursor) {
-    (handle_capture)(&client, &resource, frame, overlay_cursor);
+    handle_capture(&client, &resource, frame, overlay_cursor);
   }
 };
-    resource->set_data(handle); resource->set_handler(protocol::ext_zwwm_toplevel_handle_v1_handler(ExtZwwmToplevelHandleV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (handle_destroy)(&destroyed); });
-    handle->owner->handles.push_back(handle);
-    protocol::ext_zwwm_toplevels_v1_send_toplevel(*manager, resource);
-    protocol::ext_zwwm_toplevel_handle_v1_send_title(*resource, info.title.c_str());
-    protocol::ext_zwwm_toplevel_handle_v1_send_app_id(*resource, info.app_id.c_str());
-    protocol::ext_zwwm_toplevel_handle_v1_send_geometry(*resource, info.x, info.y, info.width, info.height);
-    protocol::ext_zwwm_toplevel_handle_v1_send_state(*resource, info.state);
-    protocol::ext_zwwm_toplevel_handle_v1_send_output(*resource, handle->owner->output(client, info.output));
+resource->set_data(handle);
+resource->set_handler(protocol::ext_zwwm_toplevel_handle_v1_handler(ExtZwwmToplevelHandleV1ImplHandler{}));
+resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { handle_destroy(&destroyed); });
+handle->owner->handles.push_back(handle);
+protocol::ext_zwwm_toplevels_v1_send_toplevel(*manager, resource);
+protocol::ext_zwwm_toplevel_handle_v1_send_title(*resource, info.title.c_str());
+protocol::ext_zwwm_toplevel_handle_v1_send_app_id(*resource, info.app_id.c_str());
+protocol::ext_zwwm_toplevel_handle_v1_send_geometry(*resource, info.x, info.y, info.width, info.height);
+protocol::ext_zwwm_toplevel_handle_v1_send_state(*resource, info.state);
+protocol::ext_zwwm_toplevel_handle_v1_send_output(*resource, handle->owner->output(client, info.output));
   }
   static void bind_toplevels(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
     auto* self = static_cast<Impl*>(data);
     if (!self->trusted(client)) { client->post_error(0, "unauthorized toplevel bind"); return; }
-    auto* resource = client->create_resource(&protocol::ext_zwwm_toplevels_v1_interface, id, std::min(version, 1U));
+    auto* resource = client->create_resource(&protocol::ext_zwwm_toplevels_v1_interface, id, version);
     struct ExtZwwmToplevelsV1ImplHandler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
 };
-    resource->set_data(self); resource->set_handler(protocol::ext_zwwm_toplevels_v1_handler(ExtZwwmToplevelsV1ImplHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { auto* self = destroyed.data<Impl>(); if (self == nullptr) return; for (auto* handle : self->handles) if (handle->manager == &destroyed && !handle->closed) { handle->closed = true; protocol::ext_zwwm_toplevel_handle_v1_send_closed(*handle->resource); } std::erase(self->managers, &destroyed); });
-    self->managers.push_back(resource);
-    for (const auto& info : self->toplevels()) send_handle(client, resource, info);
-    protocol::ext_zwwm_toplevels_v1_send_done(*resource);
+resource->set_data(self);
+resource->set_handler(protocol::ext_zwwm_toplevels_v1_handler(ExtZwwmToplevelsV1ImplHandler{}));
+resource->set_destroy_handler([](zwayland::server::Resource& destroyed) {
+  auto* self = destroyed.data<Impl>();
+  if (self == nullptr) return;
+  for (auto* handle : self->handles)
+    if (handle->manager == &destroyed && !handle->closed) {
+      handle->closed = true;
+      protocol::ext_zwwm_toplevel_handle_v1_send_closed(*handle->resource);
+    }
+  std::erase(self->managers, &destroyed);
+});
+self->managers.push_back(resource);
+for (const auto& info : self->toplevels()) send_handle(client, resource, info);
+protocol::ext_zwwm_toplevels_v1_send_done(*resource);
   }
 
   void update_toplevels() {
@@ -381,12 +437,27 @@ struct PortalCapture::Impl {
     for (auto* handle : std::vector<Handle*>(handles)) {
       if (handle->closed) continue;
       const auto found = std::find_if(current.begin(), current.end(), [handle](const ToplevelInfo& info) { return info.id == handle->info.id; });
-      if (found == current.end()) { handle->closed = true; protocol::ext_zwwm_toplevel_handle_v1_send_closed(*handle->resource); for (auto* frame : frames) if (!frame->terminal && frame->target_id == handle->info.id) { frame->terminal = true; protocol::zwwm_screencopy_frame_v1_send_failed(*frame->resource, protocol::ZWWM_SCREENCOPY_FRAME_V1_FAILURE_SOURCE_LOST); } changed = true; continue; }
+      if (found == current.end()) {
+        handle->closed = true;
+        protocol::ext_zwwm_toplevel_handle_v1_send_closed(*handle->resource);
+        for (auto* frame : frames)
+          if (!frame->terminal && frame->target_id == handle->info.id) {
+            frame->terminal = true;
+            protocol::zwwm_screencopy_frame_v1_send_failed(*frame->resource,
+                                                           protocol::ZWWM_SCREENCOPY_FRAME_V1_FAILURE_SOURCE_LOST);
+          }
+        changed = true;
+        continue;
+      }
       const auto old = handle->info; handle->info = *found;
-      if (old.title == found->title && old.app_id == found->app_id && old.x == found->x && old.y == found->y && old.width == found->width && old.height == found->height && old.state == found->state) continue;
+      if (old.title == found->title && old.app_id == found->app_id && old.x == found->x && old.y == found->y &&
+          old.width == found->width && old.height == found->height && old.state == found->state)
+        continue;
       if (old.title != found->title) protocol::ext_zwwm_toplevel_handle_v1_send_title(*handle->resource, found->title.c_str());
       if (old.app_id != found->app_id) protocol::ext_zwwm_toplevel_handle_v1_send_app_id(*handle->resource, found->app_id.c_str());
-      if (old.x != found->x || old.y != found->y || old.width != found->width || old.height != found->height) protocol::ext_zwwm_toplevel_handle_v1_send_geometry(*handle->resource, found->x, found->y, found->width, found->height);
+      if (old.x != found->x || old.y != found->y || old.width != found->width || old.height != found->height)
+        protocol::ext_zwwm_toplevel_handle_v1_send_geometry(*handle->resource, found->x, found->y, found->width,
+                                                            found->height);
       if (old.state != found->state) protocol::ext_zwwm_toplevel_handle_v1_send_state(*handle->resource, found->state);
       changed = true;
     }
@@ -428,7 +499,7 @@ struct PortalCapture::Impl {
   }
 
   static void bind_access(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
-    auto* resource = client->create_resource(&protocol::zwwm_capture_access_v1_interface, id, std::min(version, 1U));
+    auto* resource = client->create_resource(&protocol::zwwm_capture_access_v1_interface, id, version);
     struct Handler {
       void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) { resource.destroy(); }
       void authenticate(zwayland::server::Client& client, zwayland::server::Resource& resource,
@@ -465,7 +536,18 @@ struct PortalCapture::Impl {
     }
     socket.reset();
     // Only the portal's own objects go with it; authenticated clients keep theirs.
-    if (destroy_client && client != nullptr) { for (auto* frame : frames) if (!frame->terminal && frame->resource->client == client) { frame->terminal = true; protocol::zwwm_screencopy_frame_v1_send_failed(*frame->resource, protocol::ZWWM_SCREENCOPY_FRAME_V1_FAILURE_REVOKED); } for (auto* manager : managers) if (manager->client == client) protocol::ext_zwwm_toplevels_v1_send_finished(*manager); client->flush(); client->destroy(); }
+    if (destroy_client && client != nullptr) {
+      for (auto* frame : frames)
+        if (!frame->terminal && frame->resource->client == client) {
+          frame->terminal = true;
+          protocol::zwwm_screencopy_frame_v1_send_failed(*frame->resource,
+                                                         protocol::ZWWM_SCREENCOPY_FRAME_V1_FAILURE_REVOKED);
+        }
+      for (auto* manager : managers)
+        if (manager->client == client) protocol::ext_zwwm_toplevels_v1_send_finished(*manager);
+      client->flush();
+      client->destroy();
+    }
     if (portal_client) portal_client(nullptr);
     client = nullptr;
   }
@@ -613,12 +695,32 @@ PortalCapture::PortalCapture(zwayland::server::Display* display, zwayland::serve
   impl_->resolve_output = std::move(resolve_output);
   impl_->portal_client = std::move(portal_client);
   impl_->embedded_cursor = embedded_cursor;
-  impl_->screencopy = display->add_global(&protocol::zwwm_screencopy_view_manager_v1_interface, 1, [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind_screencopy)(&client, data, bound_version, id); });
-  impl_->canonical_screencopy = display->add_global(&protocol::zwlr_screencopy_manager_v1_interface, 3, [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind_canonical_screencopy)(&client, data, bound_version, id); });
-  impl_->xdg_output_manager = display->add_global(&protocol::zxdg_output_manager_v1_interface, 3, [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind_xdg_output_manager)(&client, data, bound_version, id); });
-  impl_->toplevel_manager = display->add_global(&protocol::ext_zwwm_toplevels_v1_interface, 1, [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind_toplevels)(&client, data, bound_version, id); });
+  impl_->screencopy = display->add_global(
+      &protocol::zwwm_screencopy_view_manager_v1_interface, 1,
+      [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) {
+        Impl::bind_screencopy(&client, data, bound_version, id);
+      });
+  impl_->canonical_screencopy = display->add_global(
+      &protocol::zwlr_screencopy_manager_v1_interface, 3,
+      [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) {
+        Impl::bind_canonical_screencopy(&client, data, bound_version, id);
+      });
+  impl_->xdg_output_manager = display->add_global(
+      &protocol::zxdg_output_manager_v1_interface, 3,
+      [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) {
+        Impl::bind_xdg_output_manager(&client, data, bound_version, id);
+      });
+  impl_->toplevel_manager = display->add_global(
+      &protocol::ext_zwwm_toplevels_v1_interface, 1,
+      [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) {
+        Impl::bind_toplevels(&client, data, bound_version, id);
+      });
   if (impl_->create_token())
-    impl_->access_global = display->add_global(&protocol::zwwm_capture_access_v1_interface, 1, [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) { (Impl::bind_access)(&client, data, bound_version, id); });
+    impl_->access_global = display->add_global(
+        &protocol::zwwm_capture_access_v1_interface, 1,
+        [data = impl_.get()](zwayland::server::Client& client, std::uint32_t bound_version, std::uint32_t id) {
+          Impl::bind_access(&client, data, bound_version, id);
+        });
   display->set_global_filter([self = impl_.get()](const zwayland::server::Client& candidate,
                                                   const zwayland::server::Global& global) {
     return (global.name != self->screencopy && global.name != self->toplevel_manager) ||

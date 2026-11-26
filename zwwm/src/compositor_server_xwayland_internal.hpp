@@ -76,9 +76,34 @@ struct XwaylandSurfaceState {
   bool hidden = false;
   bool associated = false;
 };
-struct XwaylandSelection { XwaylandRuntime* runtime = nullptr; xcb_atom_t atom = XCB_ATOM_NONE; xcb_window_t window = XCB_WINDOW_NONE; xcb_window_t owner = XCB_WINDOW_NONE; xcb_timestamp_t timestamp = XCB_CURRENT_TIME; DataSourceState* source = nullptr; bool primary = false; bool notify_on_focus = false; };
-struct XwaylandReceiveTransfer { XwaylandSelection* selection = nullptr; xcb_window_t window = XCB_WINDOW_NONE; int fd = -1; int event_source = -1; std::vector<std::uint8_t> data; std::size_t offset = 0; bool incremental = false; };
-struct XwaylandSendTransfer { XwaylandSelection* selection = nullptr; xcb_selection_request_event_t request{}; int fd = -1; int event_source = -1; std::vector<std::uint8_t> data; std::size_t offset = 0; bool incremental = false; };
+struct XwaylandSelection {
+  XwaylandRuntime* runtime = nullptr;
+  xcb_atom_t atom = XCB_ATOM_NONE;
+  xcb_window_t window = XCB_WINDOW_NONE;
+  xcb_window_t owner = XCB_WINDOW_NONE;
+  xcb_timestamp_t timestamp = XCB_CURRENT_TIME;
+  DataSourceState* source = nullptr;
+  bool primary = false;
+  bool notify_on_focus = false;
+};
+struct XwaylandReceiveTransfer {
+  XwaylandSelection* selection = nullptr;
+  xcb_window_t window = XCB_WINDOW_NONE;
+  int fd = -1;
+  int event_source = -1;
+  std::vector<std::uint8_t> data;
+  std::size_t offset = 0;
+  bool incremental = false;
+};
+struct XwaylandSendTransfer {
+  XwaylandSelection* selection = nullptr;
+  xcb_selection_request_event_t request{};
+  int fd = -1;
+  int event_source = -1;
+  std::vector<std::uint8_t> data;
+  std::size_t offset = 0;
+  bool incremental = false;
+};
 
 struct XwaylandRuntime {
   zwayland::server::Display* display = nullptr; zwayland::server::EventLoop* loop = nullptr; std::uint32_t shell = 0; zwayland::server::Client* client = nullptr;

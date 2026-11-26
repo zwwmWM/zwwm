@@ -335,17 +335,31 @@ int main(int argc, char** argv) {
         },
         &nested_backend);
     std::unique_ptr<zwwm::PortalCapture> portal_capture;
-    if (!portal_executable.empty()) portal_capture = std::make_unique<zwwm::PortalCapture>(display, event_loop,
+    if (!portal_executable.empty())
+      portal_capture = std::make_unique<zwwm::PortalCapture>(
+          display, event_loop,
           [&nested_backend](zwwm::OutputCapture& output, bool cursor, std::uint64_t target) {
             return target == 0 ? nested_backend.capture_output(output, cursor) :
                                  nested_backend.capture_toplevel(target, output, cursor);
           },
-          [&compositor_server](zwayland::server::Resource* buffer, const zwwm::OutputCapture& output, std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h) { return compositor_server.copy_capture_buffer(buffer, output, x, y, w, h); },
-          [&compositor_server](const zwwm::OutputCapture& output, std::int32_t x, std::int32_t y, std::int32_t w, std::int32_t h, std::uint32_t* px, std::uint32_t* py, std::uint32_t* pw, std::uint32_t* ph) { return compositor_server.map_capture_region(output, x, y, w, h, px, py, pw, ph); },
+          [&compositor_server](zwayland::server::Resource* buffer, const zwwm::OutputCapture& output, std::uint32_t x,
+                               std::uint32_t y, std::uint32_t w, std::uint32_t h) {
+            return compositor_server.copy_capture_buffer(buffer, output, x, y, w, h);
+          },
+          [&compositor_server](const zwwm::OutputCapture& output, std::int32_t x, std::int32_t y, std::int32_t w,
+                               std::int32_t h, std::uint32_t* px, std::uint32_t* py, std::uint32_t* pw,
+                               std::uint32_t* ph) {
+            return compositor_server.map_capture_region(output, x, y, w, h, px, py, pw, ph);
+          },
           [&compositor_server] { return compositor_server.toplevels(); },
-           [&compositor_server](zwayland::server::Client* client, zwwm::OutputId output) { return compositor_server.output_resource(client, output); },
-            [&compositor_server](zwayland::server::Resource* resource) { return compositor_server.output_info(compositor_server.output_id(resource)); }, false,
-            [&compositor_server](zwayland::server::Client* client) { compositor_server.set_portal_client(client); });
+          [&compositor_server](zwayland::server::Client* client, zwwm::OutputId output) {
+            return compositor_server.output_resource(client, output);
+          },
+          [&compositor_server](zwayland::server::Resource* resource) {
+            return compositor_server.output_info(compositor_server.output_id(resource));
+          },
+          false,
+          [&compositor_server](zwayland::server::Client* client) { compositor_server.set_portal_client(client); });
     if (portal_capture != nullptr) {
       compositor_server.set_toplevel_observer([](void* data) { static_cast<zwwm::PortalCapture*>(data)->toplevels_changed(); }, portal_capture.get());
       if (!portal_capture->spawn(portal_executable)) {
@@ -408,18 +422,31 @@ int main(int argc, char** argv) {
         },
         &drm_backend);
     std::unique_ptr<zwwm::PortalCapture> portal_capture;
-    if (!portal_executable.empty()) portal_capture = std::make_unique<zwwm::PortalCapture>(display, event_loop,
+    if (!portal_executable.empty())
+      portal_capture = std::make_unique<zwwm::PortalCapture>(
+          display, event_loop,
           [&drm_backend](zwwm::OutputCapture& output, bool cursor, std::uint64_t target) {
             return target == 0 ? drm_backend.capture_output(output, cursor) :
                                  drm_backend.capture_toplevel(target, output, cursor);
           },
-          [&compositor_server](zwayland::server::Resource* buffer, const zwwm::OutputCapture& output, std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h) { return compositor_server.copy_capture_buffer(buffer, output, x, y, w, h); },
-          [&compositor_server](const zwwm::OutputCapture& output, std::int32_t x, std::int32_t y, std::int32_t w, std::int32_t h, std::uint32_t* px, std::uint32_t* py, std::uint32_t* pw, std::uint32_t* ph) { return compositor_server.map_capture_region(output, x, y, w, h, px, py, pw, ph); },
+          [&compositor_server](zwayland::server::Resource* buffer, const zwwm::OutputCapture& output, std::uint32_t x,
+                               std::uint32_t y, std::uint32_t w, std::uint32_t h) {
+            return compositor_server.copy_capture_buffer(buffer, output, x, y, w, h);
+          },
+          [&compositor_server](const zwwm::OutputCapture& output, std::int32_t x, std::int32_t y, std::int32_t w,
+                               std::int32_t h, std::uint32_t* px, std::uint32_t* py, std::uint32_t* pw,
+                               std::uint32_t* ph) {
+            return compositor_server.map_capture_region(output, x, y, w, h, px, py, pw, ph);
+          },
           [&compositor_server] { return compositor_server.toplevels(); },
-           [&compositor_server](zwayland::server::Client* client, zwwm::OutputId output) { return compositor_server.output_resource(client, output); },
-           [&compositor_server](zwayland::server::Resource* resource) { return compositor_server.output_info(compositor_server.output_id(resource)); },
-            drm_backend.supports_embedded_cursor(),
-            [&compositor_server](zwayland::server::Client* client) { compositor_server.set_portal_client(client); });
+          [&compositor_server](zwayland::server::Client* client, zwwm::OutputId output) {
+            return compositor_server.output_resource(client, output);
+          },
+          [&compositor_server](zwayland::server::Resource* resource) {
+            return compositor_server.output_info(compositor_server.output_id(resource));
+          },
+          drm_backend.supports_embedded_cursor(),
+          [&compositor_server](zwayland::server::Client* client) { compositor_server.set_portal_client(client); });
     if (portal_capture != nullptr) {
       compositor_server.set_toplevel_observer([](void* data) { static_cast<zwwm::PortalCapture*>(data)->toplevels_changed(); }, portal_capture.get());
       if (!portal_capture->spawn(portal_executable)) {

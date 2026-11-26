@@ -25,7 +25,12 @@ namespace zwwm::detail {
 
 struct CursorShapeDevice { SeatState* seat = nullptr; zwayland::server::Resource* pointer = nullptr; Observer* observer = nullptr; };
 
-SeatState::~SeatState() { destroy_focus_grabs(this); while (!touches.empty()) touches.back()->destroy(); while (!idle_notifications.empty()) idle_notifications.back()->resource->destroy(); while (!relative_pointers.empty()) relative_pointers.back()->resource->destroy(); }
+SeatState::~SeatState() {
+  destroy_focus_grabs(this);
+  while (!touches.empty()) touches.back()->destroy();
+  while (!idle_notifications.empty()) idle_notifications.back()->resource->destroy();
+  while (!relative_pointers.empty()) relative_pointers.back()->resource->destroy();
+}
 
 bool update_xkb(SeatState* seat, const KeyboardConfig& config) {
   if (seat->xkb_context_handle == nullptr) return false;
@@ -70,12 +75,29 @@ void release_xkb(SeatState* seat) {
   seat->xkb_context_handle = nullptr;
 }
 
-UniqueFd keymap_fd(std::string_view keymap) { constexpr unsigned kMfdCloexec = 0x0001U, kMfdAllowSealing = 0x0002U; constexpr int kAddSeals = 1033, kSealShrink = 0x0002, kSealGrow = 0x0004, kSealWrite = 0x0008; int descriptor = -1;
+UniqueFd keymap_fd(std::string_view keymap) {
+  constexpr unsigned kMfdCloexec = 0x0001U, kMfdAllowSealing = 0x0002U;
+  constexpr int kAddSeals = 1033, kSealShrink = 0x0002, kSealGrow = 0x0004, kSealWrite = 0x0008;
+  int descriptor = -1;
 #ifdef SYS_memfd_create
   descriptor = static_cast<int>(syscall(SYS_memfd_create, "zwwm-keymap", kMfdCloexec | kMfdAllowSealing));
 #endif
   if (descriptor < 0) { FILE* file = std::tmpfile(); if (file == nullptr) return {}; descriptor = fcntl(fileno(file), F_DUPFD_CLOEXEC, 0); std::fclose(file); if (descriptor < 0) return {}; }
-  UniqueFd fd(descriptor); const std::string text(keymap); const char* data = text.c_str(); std::size_t remaining = text.size() + 1; while (remaining != 0) { const ssize_t written = write(fd.get(), data, remaining); if (written < 0 && errno == EINTR) continue; if (written <= 0) return {}; data += written; remaining -= static_cast<std::size_t>(written); } if (lseek(fd.get(), 0, SEEK_SET) < 0) return {}; (void)fcntl(fd.get(), kAddSeals, kSealShrink | kSealGrow | kSealWrite); return fd; }
+  UniqueFd fd(descriptor);
+  const std::string text(keymap);
+  const char* data = text.c_str();
+  std::size_t remaining = text.size() + 1;
+  while (remaining != 0) {
+    const ssize_t written = write(fd.get(), data, remaining);
+    if (written < 0 && errno == EINTR) continue;
+    if (written <= 0) return {};
+    data += written;
+    remaining -= static_cast<std::size_t>(written);
+  }
+  if (lseek(fd.get(), 0, SEEK_SET) < 0) return {};
+  (void)fcntl(fd.get(), kAddSeals, kSealShrink | kSealGrow | kSealWrite);
+  return fd;
+}
 UniqueFd keymap_fd(const SeatState& seat) { return keymap_fd(seat.keymap); }
 
 void use_keyboard_keymap(SeatState& seat, zwayland::server::Client* client, const void* owner, std::string_view keymap) {
@@ -92,9 +114,31 @@ void use_keyboard_keymap(SeatState& seat, zwayland::server::Client* client, cons
   }
 }
 
-void remember_serial(SeatState& seat, zwayland::server::Client* client, std::uint32_t serial) { seat.input_serials.emplace_back(client, serial); if (seat.input_serials.size() > 64) seat.input_serials.erase(seat.input_serials.begin()); }
-bool valid_selection_serial(const SeatState& seat, zwayland::server::Client* client, std::uint32_t serial) { if (seat.keyboard_focus == nullptr || seat.keyboard_focus->resource->client != client) return false; return std::find(seat.input_serials.begin(), seat.input_serials.end(), std::pair{client, serial}) != seat.input_serials.end(); }
-void send_modifiers(SeatState& seat) { if (seat.keyboard_focus == nullptr || seat.xkb_state_handle == nullptr) return; const auto depressed = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_DEPRESSED), latched = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_LATCHED), locked = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_LOCKED), group = xkb_state_serialize_layout(seat.xkb_state_handle, XKB_STATE_LAYOUT_EFFECTIVE); const auto serial = seat.display->next_serial(); auto* client = seat.keyboard_focus->resource->client; bool sent = false; for (auto* resource : seat.keyboards) if (resource->client == client) { protocol::wl_keyboard_send_modifiers(*resource, serial, depressed, latched, locked, group); sent = true; } if (sent) remember_serial(seat, client, serial); input_method_grab_modifiers(seat); }
+void remember_serial(SeatState& seat, zwayland::server::Client* client, std::uint32_t serial) {
+  seat.input_serials.emplace_back(client, serial);
+  if (seat.input_serials.size() > 64) seat.input_serials.erase(seat.input_serials.begin());
+}
+bool valid_selection_serial(const SeatState& seat, zwayland::server::Client* client, std::uint32_t serial) {
+  if (seat.keyboard_focus == nullptr || seat.keyboard_focus->resource->client != client) return false;
+  return std::ranges::contains(seat.input_serials, std::pair{client, serial});
+}
+void send_modifiers(SeatState& seat) {
+  if (seat.keyboard_focus == nullptr || seat.xkb_state_handle == nullptr) return;
+  const auto depressed = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_DEPRESSED),
+             latched = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_LATCHED),
+             locked = xkb_state_serialize_mods(seat.xkb_state_handle, XKB_STATE_MODS_LOCKED),
+             group = xkb_state_serialize_layout(seat.xkb_state_handle, XKB_STATE_LAYOUT_EFFECTIVE);
+  const auto serial = seat.display->next_serial();
+  auto* client = seat.keyboard_focus->resource->client;
+  bool sent = false;
+  for (auto* resource : seat.keyboards)
+    if (resource->client == client) {
+      protocol::wl_keyboard_send_modifiers(*resource, serial, depressed, latched, locked, group);
+      sent = true;
+    }
+  if (sent) remember_serial(seat, client, serial);
+  input_method_grab_modifiers(seat);
+}
 
 void publish_keymap(SeatState* seat) {
   publish_virtual_keymap(seat);
@@ -138,7 +182,7 @@ bool binding_modifiers_match(const Keybinding& binding, const SeatState& seat) {
 std::vector<std::uint32_t> keyboard_enter_keys(const SeatState& seat) {
   std::vector<std::uint32_t> keys;
   for (const auto key : seat.pressed_keys)
-    if (std::find(seat.consumed_keys.begin(), seat.consumed_keys.end(), key) == seat.consumed_keys.end())
+    if (!std::ranges::contains(seat.consumed_keys, key))
       keys.push_back(key);
   return keys;
 }
@@ -251,7 +295,7 @@ void cursor_shape_set_shape(zwayland::server::Client*, zwayland::server::Resourc
   if (device == nullptr) return;
   const auto entered = device->seat->pointer_enter_serials.find(device->pointer);
   if (device->seat->pointer_focus == nullptr ||
-      std::find(device->seat->pointers.begin(), device->seat->pointers.end(), device->pointer) == device->seat->pointers.end() ||
+      !std::ranges::contains(device->seat->pointers, device->pointer) ||
       entered == device->seat->pointer_enter_serials.end() ||
       entered->second != serial) return;
   device->seat->cursor_shape = xcursor_name(shape);
@@ -259,12 +303,12 @@ void cursor_shape_set_shape(zwayland::server::Client*, zwayland::server::Resourc
   apply_cursor_shape(device->seat);
 }
 
-struct WpCursorShapeDeviceV1KCursorShapeDeviceHandler {
+struct WpCursorShapeDeviceV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
   void set_shape(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t serial, std::uint32_t shape) {
-    (cursor_shape_set_shape)(&client, &resource, serial, shape);
+    cursor_shape_set_shape(&client, &resource, serial, shape);
   }
 };
 
@@ -272,22 +316,25 @@ void get_cursor_shape_pointer(zwayland::server::Client* client, zwayland::server
   auto* observer = manager->data<Observer>();
   auto* seat = observer == nullptr ? nullptr : observer->seat;
   const bool known_pointer = seat != nullptr &&
-      std::find(seat->pointers.begin(), seat->pointers.end(), pointer) != seat->pointers.end();
+      std::ranges::contains(seat->pointers, pointer);
   if (!known_pointer) {
     client->post_error(0, "cursor shape requested for an unknown pointer");
     return;
   }
   auto* resource = client->create_resource(&protocol::wp_cursor_shape_device_v1_interface, id, manager->version);
   auto* device = new CursorShapeDevice{seat, pointer, observer};
-  resource->set_data(device); resource->set_handler(protocol::wp_cursor_shape_device_v1_handler(WpCursorShapeDeviceV1KCursorShapeDeviceHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { delete destroyed.data<CursorShapeDevice>(); });
+  resource->set_data(device);
+  resource->set_handler(protocol::wp_cursor_shape_device_v1_handler(WpCursorShapeDeviceV1Handler{}));
+  resource->set_destroy_handler(
+      [](zwayland::server::Resource& destroyed) { delete destroyed.data<CursorShapeDevice>(); });
 }
 
-struct WpCursorShapeManagerV1KCursorShapeManagerHandler {
+struct WpCursorShapeManagerV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
   void get_pointer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t cursor_shape_device, zwayland::server::Resource* pointer) {
-    (get_cursor_shape_pointer)(&client, &resource, cursor_shape_device, pointer);
+    get_cursor_shape_pointer(&client, &resource, cursor_shape_device, pointer);
   }
   void get_tablet_tool_v2(zwayland::server::Client& client, zwayland::server::Resource&, std::uint32_t, zwayland::server::Resource*) {
     client.post_error(0, "tablet cursor shapes are unsupported");
@@ -295,8 +342,8 @@ struct WpCursorShapeManagerV1KCursorShapeManagerHandler {
 };
 
 void bind_cursor_shape_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
-  auto* resource = client->create_resource(&protocol::wp_cursor_shape_manager_v1_interface, id, std::min(version, 1U));
-  resource->set_data(static_cast<Observer*>(data)); resource->set_handler(protocol::wp_cursor_shape_manager_v1_handler(WpCursorShapeManagerV1KCursorShapeManagerHandler{}));
+  auto* resource = client->create_resource(&protocol::wp_cursor_shape_manager_v1_interface, id, version);
+  resource->set_data(static_cast<Observer*>(data)); resource->set_handler(protocol::wp_cursor_shape_manager_v1_handler(WpCursorShapeManagerV1Handler{}));
 }
 
 void relative_pointer_destroyed(zwayland::server::Resource* resource) {
@@ -306,19 +353,19 @@ void relative_pointer_destroyed(zwayland::server::Resource* resource) {
   delete relative;
 }
 
-struct ZwpRelativePointerV1KRelativePointerHandler {
+struct ZwpRelativePointerV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
 };
-struct ZwpRelativePointerManagerV1KRelativePointerManagerHandler {
+struct ZwpRelativePointerManagerV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
   void get_relative_pointer(zwayland::server::Client& client, zwayland::server::Resource& manager, std::uint32_t id, zwayland::server::Resource* pointer) {
     auto* seat = manager.data<SeatState>();
       const bool valid = seat != nullptr &&
-                         std::find(seat->pointers.begin(), seat->pointers.end(), pointer) != seat->pointers.end();
+                         std::ranges::contains(seat->pointers, pointer);
       if (!valid) {
         client.post_error(0, "relative motion requested for an unknown pointer");
         return;
@@ -326,13 +373,16 @@ struct ZwpRelativePointerManagerV1KRelativePointerManagerHandler {
       auto* resource = client.create_resource(&protocol::zwp_relative_pointer_v1_interface, id, 1);
       auto* relative = new RelativePointer{seat, pointer, resource};
       seat->relative_pointers.push_back(relative);
-      resource->set_data(relative); resource->set_handler(protocol::zwp_relative_pointer_v1_handler(ZwpRelativePointerV1KRelativePointerHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (relative_pointer_destroyed)(&destroyed); });
+      resource->set_data(relative);
+      resource->set_handler(protocol::zwp_relative_pointer_v1_handler(ZwpRelativePointerV1Handler{}));
+      resource->set_destroy_handler(
+          [](zwayland::server::Resource& destroyed) { relative_pointer_destroyed(&destroyed); });
   }
 };
 
 void bind_relative_pointer_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
-  auto* resource = client->create_resource(&protocol::zwp_relative_pointer_manager_v1_interface, id, std::min(version, 1U));
-  resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::zwp_relative_pointer_manager_v1_handler(ZwpRelativePointerManagerV1KRelativePointerManagerHandler{}));
+  auto* resource = client->create_resource(&protocol::zwp_relative_pointer_manager_v1_interface, id, version);
+  resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::zwp_relative_pointer_manager_v1_handler(ZwpRelativePointerManagerV1Handler{}));
 }
 
 std::vector<Rect> constraint_rects(const PointerConstraint* constraint) {
@@ -486,18 +536,23 @@ void constraint_set_region(PointerConstraint* constraint, zwayland::server::Reso
   constraint->region_pending = true;
 }
 
-struct ZwpLockedPointerV1KLockedPointerHandler {
+struct ZwpLockedPointerV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
   void set_cursor_position_hint(zwayland::server::Client&, zwayland::server::Resource& resource, double surface_x, double surface_y) {
-    auto* constraint = resource.data<PointerConstraint>(); if (!constraint->defunct) { constraint->pending_hint_x = surface_x; constraint->pending_hint_y = surface_y; constraint->hint_pending = true; }
+    auto* constraint = resource.data<PointerConstraint>();
+    if (!constraint->defunct) {
+      constraint->pending_hint_x = surface_x;
+      constraint->pending_hint_y = surface_y;
+      constraint->hint_pending = true;
+    }
   }
   void set_region(zwayland::server::Client&, zwayland::server::Resource& resource, zwayland::server::Resource* region) {
     auto* constraint = resource.data<PointerConstraint>(); if (!constraint->defunct) constraint_set_region(constraint, region);
   }
 };
-struct ZwpConfinedPointerV1KConfinedPointerHandler {
+struct ZwpConfinedPointerV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
@@ -511,7 +566,7 @@ void create_constraint(zwayland::server::Client* client, zwayland::server::Resou
   auto* seat = manager->data<SeatState>();
   auto* surface = compositor_surface_from_resource(surface_resource);
   const bool valid_surface = surface != nullptr && surface->observer != nullptr && surface->observer->seat == seat;
-  const bool valid_pointer = std::find(seat->pointers.begin(), seat->pointers.end(), pointer) != seat->pointers.end();
+  const bool valid_pointer = std::ranges::contains(seat->pointers, pointer);
   const bool valid_region = region == nullptr || region->data<RegionState>() != nullptr;
   if (!valid_surface || !valid_pointer || !valid_region ||
       (lifetime != protocol::ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT &&
@@ -536,9 +591,9 @@ void create_constraint(zwayland::server::Client* client, zwayland::server::Resou
   seat->constraints.push_back(constraint);
   resource->set_data(constraint);
   if (locked)
-    resource->set_handler(protocol::zwp_locked_pointer_v1_handler(ZwpLockedPointerV1KLockedPointerHandler{}));
+    resource->set_handler(protocol::zwp_locked_pointer_v1_handler(ZwpLockedPointerV1Handler{}));
   else
-    resource->set_handler(protocol::zwp_confined_pointer_v1_handler(ZwpConfinedPointerV1KConfinedPointerHandler{}));
+    resource->set_handler(protocol::zwp_confined_pointer_v1_handler(ZwpConfinedPointerV1Handler{}));
   resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { constraint_destroyed(&destroyed); });
   if (seat->pointer_focus == surface) {
     std::int32_t x = 0, y = 0;
@@ -547,21 +602,25 @@ void create_constraint(zwayland::server::Client* client, zwayland::server::Resou
   }
 }
 
-struct ZwpPointerConstraintsV1KPointerConstraintsHandler {
+struct ZwpPointerConstraintsV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
-  void lock_pointer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* surface, zwayland::server::Resource* pointer, zwayland::server::Resource* region, std::uint32_t lifetime) {
+  void lock_pointer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id,
+                    zwayland::server::Resource* surface, zwayland::server::Resource* pointer,
+                    zwayland::server::Resource* region, std::uint32_t lifetime) {
     create_constraint(&client, &resource, id, surface, pointer, region, lifetime, true);
   }
-  void confine_pointer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* surface, zwayland::server::Resource* pointer, zwayland::server::Resource* region, std::uint32_t lifetime) {
+  void confine_pointer(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id,
+                       zwayland::server::Resource* surface, zwayland::server::Resource* pointer,
+                       zwayland::server::Resource* region, std::uint32_t lifetime) {
     create_constraint(&client, &resource, id, surface, pointer, region, lifetime, false);
   }
 };
 
 void bind_pointer_constraints(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
-  auto* resource = client->create_resource(&protocol::zwp_pointer_constraints_v1_interface, id, std::min(version, 1U));
-  resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::zwp_pointer_constraints_v1_handler(ZwpPointerConstraintsV1KPointerConstraintsHandler{}));
+  auto* resource = client->create_resource(&protocol::zwp_pointer_constraints_v1_interface, id, version);
+  resource->set_data(static_cast<SeatState*>(data)); resource->set_handler(protocol::zwp_pointer_constraints_v1_handler(ZwpPointerConstraintsV1Handler{}));
 }
 
 void pointer_resource_destroyed(zwayland::server::Resource* resource) {
@@ -573,7 +632,7 @@ void pointer_resource_destroyed(zwayland::server::Resource* resource) {
   for (auto* relative : seat->relative_pointers) if (relative->pointer == resource) relative->pointer = nullptr;
 }
 
-struct WlPointerKPointerHandler {
+struct WlPointerHandler {
   void set_cursor(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t serial, zwayland::server::Resource* surface, std::int32_t, std::int32_t) {
     auto* seat = resource.data<SeatState>();
       if (seat == nullptr || seat->pointer_focus == nullptr ||
@@ -612,7 +671,10 @@ void bind_seat(zwayland::server::Client* c, void* data, std::uint32_t v, std::ui
     auto* state = seat_resource.data<SeatState>();
         auto* resource = client.create_resource(&protocol::wl_pointer_interface, id, seat_resource.version);
         state->pointers.push_back(resource);
-        resource->set_data(state); resource->set_handler(protocol::wl_pointer_handler(WlPointerKPointerHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (pointer_resource_destroyed)(&destroyed); });
+        resource->set_data(state);
+        resource->set_handler(protocol::wl_pointer_handler(WlPointerHandler{}));
+        resource->set_destroy_handler(
+            [](zwayland::server::Resource& destroyed) { pointer_resource_destroyed(&destroyed); });
         if (state->pointer_focus == nullptr || state->pointer_focus->resource->client != &client) return;
         std::int32_t x = 0, y = 0;
         surface_local_from_global(state->pointer_focus, state->pointer_x, state->pointer_y, &x, &y);
@@ -629,7 +691,9 @@ void bind_seat(zwayland::server::Client* c, void* data, std::uint32_t v, std::ui
         if (!fd) { resource->destroy(); client.post_no_memory(); return; }
         state->keyboards.push_back(resource);
         state->keyboard_keymaps.erase(resource);
-        resource->set_data(&state->keyboards); resource->set_handler(protocol::wl_keyboard_handler(WlKeyboardKeyboardHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (resource_destroyed)(&destroyed); });
+        resource->set_data(&state->keyboards);
+        resource->set_handler(protocol::wl_keyboard_handler(WlKeyboardKeyboardHandler{}));
+        resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { resource_destroyed(&destroyed); });
         protocol::wl_keyboard_send_keymap(*resource, protocol::WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd.get(), static_cast<std::uint32_t>(state->keymap.size() + 1));
         if (resource->version >= 4) protocol::wl_keyboard_send_repeat_info(*resource, state->repeat_rate, state->repeat_delay);
         if (state->keyboard_focus == nullptr || state->keyboard_focus->resource->client != &client) return;

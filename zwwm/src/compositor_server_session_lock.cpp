@@ -70,7 +70,7 @@ void restore_unlocked_scene(SessionLockState* lock) {
   for (auto* surface : *observer->surfaces)
     if (surface->parent == nullptr && surface->lock_surface == nullptr) notify_surface_tree(surface);
   auto* focus = seat->regular_focus;
-  if (focus != nullptr && (std::find(observer->surfaces->begin(), observer->surfaces->end(), focus) == observer->surfaces->end() ||
+  if (focus != nullptr && (!std::ranges::contains(*observer->surfaces, focus) ||
                           !focusable_toplevel(observer, focus, nullptr))) {
     seat->regular_focus = nullptr;
     focus = nullptr;
@@ -103,12 +103,12 @@ void lock_surface_ack(zwayland::server::Client*, zwayland::server::Resource* res
   surface->serials.erase(surface->serials.begin(), std::next(found)); surface->acked = serial;
 }
 
-struct ExtSessionLockSurfaceV1KSessionLockSurfaceHandler {
+struct ExtSessionLockSurfaceV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
   void ack_configure(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t serial) {
-    (lock_surface_ack)(&client, &resource, serial);
+    lock_surface_ack(&client, &resource, serial);
   }
 };
 
@@ -122,7 +122,10 @@ void lock_get_surface(zwayland::server::Client* client, zwayland::server::Resour
   if (surface == nullptr || surface->xdg_surface != nullptr || surface->layer_role_assigned || surface->parent != nullptr || surface->drag_icon_role) {
     resource->post_error(protocol::EXT_SESSION_LOCK_V1_ERROR_ROLE, "surface already has a role"); return;
   }
-  if (surface->ever_committed || surface->current_buffer != nullptr || surface->pending_buffer != nullptr) { resource->post_error(protocol::EXT_SESSION_LOCK_V1_ERROR_ALREADY_CONSTRUCTED, "lock surface already constructed"); return; }
+  if (surface->ever_committed || surface->current_buffer != nullptr || surface->pending_buffer != nullptr) {
+    resource->post_error(protocol::EXT_SESSION_LOCK_V1_ERROR_ALREADY_CONSTRUCTED, "lock surface already constructed");
+    return;
+  }
   if (!live_output) { resource->post_error(protocol::EXT_SESSION_LOCK_V1_ERROR_DUPLICATE_OUTPUT, "unknown output"); return; }
   if (std::any_of(lock->surfaces.begin(), lock->surfaces.end(), [&](const auto* item) { return item->output == output->info.id; })) {
     resource->post_error(protocol::EXT_SESSION_LOCK_V1_ERROR_DUPLICATE_OUTPUT, "duplicate lock output"); return;
@@ -134,7 +137,9 @@ void lock_get_surface(zwayland::server::Client* client, zwayland::server::Resour
   surface->lock_surface = state; surface->layer_role_assigned = true;
   surface->x = output->info.logical_x; surface->y = output->info.logical_y;
   lock->surfaces.push_back(state);
-  lock_resource->set_data(state); lock_resource->set_handler(protocol::ext_session_lock_surface_v1_handler(ExtSessionLockSurfaceV1KSessionLockSurfaceHandler{})); lock_resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (lock_surface_destroyed)(&destroyed); });
+  lock_resource->set_data(state);
+  lock_resource->set_handler(protocol::ext_session_lock_surface_v1_handler(ExtSessionLockSurfaceV1Handler{}));
+  lock_resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { lock_surface_destroyed(&destroyed); });
   const auto serial = lock->observer->seat->display->next_serial();
   state->serials.push_back(serial);
   protocol::ext_session_lock_surface_v1_send_configure(*lock_resource, serial, state->width, state->height);
@@ -148,19 +153,31 @@ void session_lock_resource_destroyed(zwayland::server::Resource* resource) {
   if (!lock->accepted || lock->unlocked || !lock->locked_sent) delete lock;
 }
 
-struct ExtSessionLockV1KSessionLockHandler {
+struct ExtSessionLockV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
-    auto* lock = resource.data<SessionLockState>(); if (lock->locked_sent) { resource.post_error(protocol::EXT_SESSION_LOCK_V1_ERROR_INVALID_DESTROY, "locked session must be unlocked"); return; } resource.destroy();
+    auto* lock = resource.data<SessionLockState>();
+    if (lock->locked_sent) {
+      resource.post_error(protocol::EXT_SESSION_LOCK_V1_ERROR_INVALID_DESTROY, "locked session must be unlocked");
+      return;
+    }
+    resource.destroy();
   }
   void get_lock_surface(zwayland::server::Client& client, zwayland::server::Resource& resource, std::uint32_t id, zwayland::server::Resource* surface, zwayland::server::Resource* output) {
-    (lock_get_surface)(&client, &resource, id, surface, output);
+    lock_get_surface(&client, &resource, id, surface, output);
   }
   void unlock_and_destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
-    auto* lock = resource.data<SessionLockState>(); if (!lock->locked_sent) { resource.post_error(protocol::EXT_SESSION_LOCK_V1_ERROR_INVALID_UNLOCK, "lock was not presented"); return; } lock->unlocked = true; restore_unlocked_scene(lock); resource.destroy();
+    auto* lock = resource.data<SessionLockState>();
+    if (!lock->locked_sent) {
+      resource.post_error(protocol::EXT_SESSION_LOCK_V1_ERROR_INVALID_UNLOCK, "lock was not presented");
+      return;
+    }
+    lock->unlocked = true;
+    restore_unlocked_scene(lock);
+    resource.destroy();
   }
 };
 
-struct ExtSessionLockManagerV1KSessionLockManagerHandler {
+struct ExtSessionLockManagerV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
@@ -169,7 +186,10 @@ struct ExtSessionLockManagerV1KSessionLockManagerHandler {
       auto* resource = client.create_resource(&protocol::ext_session_lock_v1_interface, id, 1);
       auto* lock = new SessionLockState;
       lock->observer = observer; lock->client = &client; lock->resource = resource;
-      resource->set_data(lock); resource->set_handler(protocol::ext_session_lock_v1_handler(ExtSessionLockV1KSessionLockHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (session_lock_resource_destroyed)(&destroyed); });
+      resource->set_data(lock);
+      resource->set_handler(protocol::ext_session_lock_v1_handler(ExtSessionLockV1Handler{}));
+      resource->set_destroy_handler(
+          [](zwayland::server::Resource& destroyed) { session_lock_resource_destroyed(&destroyed); });
       if (observer->seat->session_lock != nullptr) { protocol::ext_session_lock_v1_send_finished(*resource); return; }
       lock->accepted = true; observer->seat->session_lock = lock; blank_unlocked_scene(lock);
   }
@@ -178,8 +198,8 @@ struct ExtSessionLockManagerV1KSessionLockManagerHandler {
 }  // namespace
 
 void bind_session_lock_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
-  auto* resource = client->create_resource(&protocol::ext_session_lock_manager_v1_interface, id, std::min(version, 1U));
-  resource->set_data(static_cast<Observer*>(data)); resource->set_handler(protocol::ext_session_lock_manager_v1_handler(ExtSessionLockManagerV1KSessionLockManagerHandler{}));
+  auto* resource = client->create_resource(&protocol::ext_session_lock_manager_v1_interface, id, version);
+  resource->set_data(static_cast<Observer*>(data)); resource->set_handler(protocol::ext_session_lock_manager_v1_handler(ExtSessionLockManagerV1Handler{}));
 }
 
 void configure_session_lock_outputs(SessionLockState* lock) {

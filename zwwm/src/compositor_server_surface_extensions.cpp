@@ -60,15 +60,15 @@ void viewport_destination(zwayland::server::Client*, zwayland::server::Resource*
   viewport->surface->viewport_changed = true;
 }
 
-struct WpViewportKViewportHandler {
+struct WpViewportHandler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
   void set_source(zwayland::server::Client& client, zwayland::server::Resource& resource, double x, double y, double width, double height) {
-    (viewport_source)(&client, &resource, x, y, width, height);
+    viewport_source(&client, &resource, x, y, width, height);
   }
   void set_destination(zwayland::server::Client& client, zwayland::server::Resource& resource, std::int32_t width, std::int32_t height) {
-    (viewport_destination)(&client, &resource, width, height);
+    viewport_destination(&client, &resource, width, height);
   }
 };
 
@@ -85,10 +85,12 @@ void get_viewport(zwayland::server::Client* client, zwayland::server::Resource* 
   auto* resource = client->create_resource(&protocol::wp_viewport_interface, id, 1);
   auto* viewport = new ViewportState{resource, surface, surface->alive};
   surface->viewport = viewport;
-  resource->set_data(viewport); resource->set_handler(protocol::wp_viewport_handler(WpViewportKViewportHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (viewport_destroyed)(&destroyed); });
+  resource->set_data(viewport);
+  resource->set_handler(protocol::wp_viewport_handler(WpViewportHandler{}));
+  resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { viewport_destroyed(&destroyed); });
 }
 
-struct WpViewporterKViewporterHandler {
+struct WpViewporterHandler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
@@ -104,7 +106,7 @@ void fractional_scale_destroyed(zwayland::server::Resource* resource) {
   delete fractional;
 }
 
-struct WpFractionalScaleV1KFractionalScaleHandler {
+struct WpFractionalScaleV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
@@ -125,11 +127,13 @@ void get_fractional_scale(zwayland::server::Client* client, zwayland::server::Re
   auto* resource = client->create_resource(&protocol::wp_fractional_scale_v1_interface, id, 1);
   auto* fractional = new FractionalScaleState{resource, surface, surface->alive};
   surface->fractional_scale = fractional;
-  resource->set_data(fractional); resource->set_handler(protocol::wp_fractional_scale_v1_handler(WpFractionalScaleV1KFractionalScaleHandler{})); resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { (fractional_scale_destroyed)(&destroyed); });
+  resource->set_data(fractional);
+  resource->set_handler(protocol::wp_fractional_scale_v1_handler(WpFractionalScaleV1Handler{}));
+  resource->set_destroy_handler([](zwayland::server::Resource& destroyed) { fractional_scale_destroyed(&destroyed); });
   send_preferred_scale(surface);
 }
 
-struct WpFractionalScaleManagerV1KFractionalScaleManagerHandler {
+struct WpFractionalScaleManagerV1Handler {
   void destroy(zwayland::server::Client&, zwayland::server::Resource& resource) {
     resource.destroy();
   }
@@ -141,13 +145,13 @@ struct WpFractionalScaleManagerV1KFractionalScaleManagerHandler {
 }  // namespace
 
 void bind_viewporter(zwayland::server::Client* client, void*, std::uint32_t version, std::uint32_t id) {
-  auto* resource = client->create_resource(&protocol::wp_viewporter_interface, id, std::min(version, 1U));
-  resource->set_handler(protocol::wp_viewporter_handler(WpViewporterKViewporterHandler{}));
+  auto* resource = client->create_resource(&protocol::wp_viewporter_interface, id, version);
+  resource->set_handler(protocol::wp_viewporter_handler(WpViewporterHandler{}));
 }
 
 void bind_fractional_scale_manager(zwayland::server::Client* client, void* data, std::uint32_t version, std::uint32_t id) {
-  auto* resource = client->create_resource(&protocol::wp_fractional_scale_manager_v1_interface, id, std::min(version, 1U));
-  resource->set_data(static_cast<Observer*>(data)); resource->set_handler(protocol::wp_fractional_scale_manager_v1_handler(WpFractionalScaleManagerV1KFractionalScaleManagerHandler{}));
+  auto* resource = client->create_resource(&protocol::wp_fractional_scale_manager_v1_interface, id, version);
+  resource->set_data(static_cast<Observer*>(data)); resource->set_handler(protocol::wp_fractional_scale_manager_v1_handler(WpFractionalScaleManagerV1Handler{}));
 }
 
 }  // namespace zwwm::detail

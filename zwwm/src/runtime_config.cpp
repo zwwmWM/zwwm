@@ -592,17 +592,75 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
     const auto* set = set_value == nullptr ? nullptr : lang::as_object(*set_value);
     if (match == nullptr || set == nullptr) { error(result.diagnostics, item.location, "rule requires match and set objects"); continue; }
     WindowRule rule;
-    if (const auto* value = lang::find_field(*match, "app-id")) { const auto* text = lang::as_string(*value); if (text == nullptr) error(result.diagnostics, item.location, "rule app-id must be a string"); else rule.app_id = *text; }
-    if (const auto* value = lang::find_field(*match, "title")) { const auto* text = lang::as_string(*value); if (text == nullptr) error(result.diagnostics, item.location, "rule title must be a string"); else rule.title = *text; }
+    if (const auto* value = lang::find_field(*match, "app-id")) {
+      const auto* text = lang::as_string(*value);
+      if (text == nullptr)
+        error(result.diagnostics, item.location, "rule app-id must be a string");
+      else
+        rule.app_id = *text;
+    }
+    if (const auto* value = lang::find_field(*match, "title")) {
+      const auto* text = lang::as_string(*value);
+      if (text == nullptr)
+        error(result.diagnostics, item.location, "rule title must be a string");
+      else
+        rule.title = *text;
+    }
     if (rule.app_id.empty() && rule.title.empty()) { error(result.diagnostics, item.location, "rule must match app-id and/or title"); continue; }
-    if (const auto* value = lang::find_field(*set, "floating")) { const auto* enabled = lang::as_boolean(*value); if (enabled == nullptr) error(result.diagnostics, item.location, "rule floating must be boolean"); else rule.floating = *enabled; }
-    if (const auto* value = lang::find_field(*set, "size")) { const auto* text = lang::as_string(*value); if (text == nullptr || !parse_rule_size(*text, rule)) error(result.diagnostics, item.location, "rule size must be WIDTHxHEIGHT or WIDTH%xHEIGHT%"); }
-    if (const auto* value = lang::find_field(*set, "blur")) { const auto* enabled = lang::as_boolean(*value); if (enabled == nullptr) error(result.diagnostics, item.location, "rule blur must be boolean"); else rule.blur = *enabled; }
-    if (const auto* value = lang::find_field(*set, "blur-radius")) { const auto* radius = lang::as_integer(*value); if (radius == nullptr || *radius < 0 || *radius > 64) error(result.diagnostics, item.location, "rule blur-radius must be 0..64"); else rule.blur_radius = static_cast<std::uint32_t>(*radius); }
-    if (const auto* value = lang::find_field(*set, "glass")) { const auto* enabled = lang::as_boolean(*value); if (enabled == nullptr) error(result.diagnostics, item.location, "rule glass must be boolean"); else rule.glass = *enabled; }
-    if (const auto* value = lang::find_field(*set, "opacity")) { const auto* opacity = lang::as_integer(*value); if (opacity == nullptr || *opacity < 0 || *opacity > 100) error(result.diagnostics, item.location, "rule opacity must be 0..100"); else rule.opacity = static_cast<float>(*opacity) / 100.0F; }
-    if (const auto* value = lang::find_field(*set, "window-shader")) { const auto* text = resolved_string(*value, variables); if (text == nullptr || text->empty()) error(result.diagnostics, item.location, "rule window-shader must resolve to a nonempty string"); else rule.window_shader = *text; }
-    if (const auto* value = lang::find_field(*set, "border-shader")) { const auto* text = resolved_string(*value, variables); if (text == nullptr || text->empty()) error(result.diagnostics, item.location, "rule border-shader must resolve to a nonempty string"); else rule.border_shader = *text; }
+    if (const auto* value = lang::find_field(*set, "floating")) {
+      const auto* enabled = lang::as_boolean(*value);
+      if (enabled == nullptr)
+        error(result.diagnostics, item.location, "rule floating must be boolean");
+      else
+        rule.floating = *enabled;
+    }
+    if (const auto* value = lang::find_field(*set, "size")) {
+      const auto* text = lang::as_string(*value);
+      if (text == nullptr || !parse_rule_size(*text, rule))
+        error(result.diagnostics, item.location, "rule size must be WIDTHxHEIGHT or WIDTH%xHEIGHT%");
+    }
+    if (const auto* value = lang::find_field(*set, "blur")) {
+      const auto* enabled = lang::as_boolean(*value);
+      if (enabled == nullptr)
+        error(result.diagnostics, item.location, "rule blur must be boolean");
+      else
+        rule.blur = *enabled;
+    }
+    if (const auto* value = lang::find_field(*set, "blur-radius")) {
+      const auto* radius = lang::as_integer(*value);
+      if (radius == nullptr || *radius < 0 || *radius > 64)
+        error(result.diagnostics, item.location, "rule blur-radius must be 0..64");
+      else
+        rule.blur_radius = static_cast<std::uint32_t>(*radius);
+    }
+    if (const auto* value = lang::find_field(*set, "glass")) {
+      const auto* enabled = lang::as_boolean(*value);
+      if (enabled == nullptr)
+        error(result.diagnostics, item.location, "rule glass must be boolean");
+      else
+        rule.glass = *enabled;
+    }
+    if (const auto* value = lang::find_field(*set, "opacity")) {
+      const auto* opacity = lang::as_integer(*value);
+      if (opacity == nullptr || *opacity < 0 || *opacity > 100)
+        error(result.diagnostics, item.location, "rule opacity must be 0..100");
+      else
+        rule.opacity = static_cast<float>(*opacity) / 100.0F;
+    }
+    if (const auto* value = lang::find_field(*set, "window-shader")) {
+      const auto* text = resolved_string(*value, variables);
+      if (text == nullptr || text->empty())
+        error(result.diagnostics, item.location, "rule window-shader must resolve to a nonempty string");
+      else
+        rule.window_shader = *text;
+    }
+    if (const auto* value = lang::find_field(*set, "border-shader")) {
+      const auto* text = resolved_string(*value, variables);
+      if (text == nullptr || text->empty())
+        error(result.diagnostics, item.location, "rule border-shader must resolve to a nonempty string");
+      else
+        rule.border_shader = *text;
+    }
     mutable_config->window_rules.push_back(std::move(rule));
   }
 
@@ -676,7 +734,7 @@ RuntimeConfigResult compile_runtime_config(const lang::Config& parsed) {
                 const auto* output_value = pass == nullptr ? nullptr : lang::find_field(*pass, "output");
                 const auto* output = output_value == nullptr ? nullptr : resolved_string(*output_value, variables);
                 if (output != nullptr && !output->empty() &&
-                    std::find(targets.begin(), targets.end(), *output) == targets.end())
+                    !std::ranges::contains(targets, *output))
                   targets.push_back(*output);
               }
               if (targets.size() > 8) error(result.diagnostics, item->location, "shader passes may use at most 8 outputs");

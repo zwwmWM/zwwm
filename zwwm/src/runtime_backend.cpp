@@ -1467,11 +1467,19 @@ void RuntimeBackend::dispatch_libinput() {
         }
       } else if (type == LIBINPUT_EVENT_POINTER_BUTTON) {
         auto* pointer = libinput_event_get_pointer_event(event);
-        input_target_->pointer_button(libinput_event_pointer_get_time(pointer), libinput_event_pointer_get_button(pointer), libinput_event_pointer_get_button_state(pointer) == LIBINPUT_BUTTON_STATE_PRESSED ? protocol::WL_POINTER_BUTTON_STATE_PRESSED : protocol::WL_POINTER_BUTTON_STATE_RELEASED);
+        input_target_->pointer_button(libinput_event_pointer_get_time(pointer),
+                                      libinput_event_pointer_get_button(pointer),
+                                      libinput_event_pointer_get_button_state(pointer) == LIBINPUT_BUTTON_STATE_PRESSED
+                                          ? protocol::WL_POINTER_BUTTON_STATE_PRESSED
+                                          : protocol::WL_POINTER_BUTTON_STATE_RELEASED);
       } else if (type == LIBINPUT_EVENT_POINTER_AXIS) {
         auto* pointer = libinput_event_get_pointer_event(event);
         const auto source = libinput_event_pointer_get_axis_source(pointer);
-        const auto wayland_source = source == LIBINPUT_POINTER_AXIS_SOURCE_FINGER ? protocol::WL_POINTER_AXIS_SOURCE_FINGER : source == LIBINPUT_POINTER_AXIS_SOURCE_CONTINUOUS ? protocol::WL_POINTER_AXIS_SOURCE_CONTINUOUS : source == LIBINPUT_POINTER_AXIS_SOURCE_WHEEL_TILT ? protocol::WL_POINTER_AXIS_SOURCE_WHEEL_TILT : protocol::WL_POINTER_AXIS_SOURCE_WHEEL;
+        const auto wayland_source =
+            source == LIBINPUT_POINTER_AXIS_SOURCE_FINGER       ? protocol::WL_POINTER_AXIS_SOURCE_FINGER
+            : source == LIBINPUT_POINTER_AXIS_SOURCE_CONTINUOUS ? protocol::WL_POINTER_AXIS_SOURCE_CONTINUOUS
+            : source == LIBINPUT_POINTER_AXIS_SOURCE_WHEEL_TILT ? protocol::WL_POINTER_AXIS_SOURCE_WHEEL_TILT
+                                                                : protocol::WL_POINTER_AXIS_SOURCE_WHEEL;
         for (const auto axis : {LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL}) {
           if (!libinput_event_pointer_has_axis(pointer, axis)) continue;
           const auto wl_axis = axis == LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL ? protocol::WL_POINTER_AXIS_VERTICAL_SCROLL : protocol::WL_POINTER_AXIS_HORIZONTAL_SCROLL;
@@ -1686,7 +1694,15 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     const auto root = std::find_if(card.shm_textures.begin(), card.shm_textures.end(), [&surface](const auto& item) { return item.id == surface.root_id; });
     if (root == card.shm_textures.end() || !root->content_ready || surface.texture == nullptr || root->width <= 0 || root->height <= 0) continue;
     if (!root->toplevel) {
-      frame.draws.push_back({surface.id, {{surface.x, surface.y}, {static_cast<std::uint32_t>(surface.width), static_cast<std::uint32_t>(surface.height)}}, surface.compositor_opacity, {1.0F, 1.0F, 1.0F, 1.0F}, surface.texture, 0.0F, 0.0F, {surface.source_left, surface.source_top, surface.source_right, surface.source_bottom}});
+      frame.draws.push_back({surface.id,
+                             {{surface.x, surface.y},
+                              {static_cast<std::uint32_t>(surface.width), static_cast<std::uint32_t>(surface.height)}},
+                             surface.compositor_opacity,
+                             {1.0F, 1.0F, 1.0F, 1.0F},
+                             surface.texture,
+                             0.0F,
+                             0.0F,
+                             {surface.source_left, surface.source_top, surface.source_right, surface.source_bottom}});
       frame.draws.back().opaque = surface.opaque && surface.compositor_opacity == 1.0F;
       frame.draws.back().background_blur_radius = static_cast<float>(surface.background_blur_radius);
       frame.draws.back().background_mask_texture = surface.layer_surface;
@@ -1776,7 +1792,9 @@ void RuntimeBackend::repaint(DrmOutput& card) {
     frame.draws.back().background_blur_radius = static_cast<float>(surface.background_blur_radius);
     apply_blur_parameters(frame.draws.back(), surface.window_shader);
     backend_scene::camera_geometry(frame.draws.back(), *root, surface, tag_bounds);
-    backend_scene::subpixel_geometry(frame.draws.back(), tag_bounds, tag_root.precise, backend_scene::PixelGrid{output_config.scale_per_mille / 1000.0, {card.output.logical_x, card.output.logical_y}});
+    backend_scene::subpixel_geometry(frame.draws.back(), tag_bounds, tag_root.precise,
+                                     backend_scene::PixelGrid{output_config.scale_per_mille / 1000.0,
+                                                              {card.output.logical_x, card.output.logical_y}});
     if (root_surface && !root->fullscreen && std::lround(border_width) > 0) backend_scene::extend_under_border(frame.draws.back());
     if (card.overview && !backend_scene::overview_draw_visible(frame.draws.back(),
         {{card.output.logical_x, card.output.logical_y}, {card.output.logical_width, card.output.logical_height}})) frame.draws.pop_back();
@@ -2127,7 +2145,7 @@ bool RuntimeBackend::initialize_atomic_output(DrmOutput& output,
   if (planes != nullptr) {
     for (std::uint32_t index = 0; index < planes->count_planes; ++index) {
       const auto id = planes->planes[index];
-      if (std::find(reserved_planes.begin(), reserved_planes.end(), id) != reserved_planes.end()) continue;
+      if (std::ranges::contains(reserved_planes, id)) continue;
       const auto busy = [id, &output](const auto& item) {
         return item != nullptr && item->plane_id == id &&
                (item->flip_pending || item->crtc_id != output.crtc_id);
@@ -2183,7 +2201,7 @@ void RuntimeBackend::create_cursor_plane(DrmOutput& output, const std::vector<st
   if (planes == nullptr) return;
   for (std::uint32_t index = 0; index < planes->count_planes && found == 0; ++index) {
     const auto id = planes->planes[index];
-    if (std::find(reserved_planes.begin(), reserved_planes.end(), id) != reserved_planes.end()) continue;
+    if (std::ranges::contains(reserved_planes, id)) continue;
     const auto taken = [id](const auto& item) { return item != nullptr && item->cursor.id == id; };
     if (std::any_of(device.outputs.begin(), device.outputs.end(), taken) ||
         std::any_of(device.retired_outputs.begin(), device.retired_outputs.end(), taken)) continue;
@@ -2287,12 +2305,12 @@ bool RuntimeBackend::create_scanout(DrmOutput& output) {
         if (iterator.fmt == device.scanout_format) scanout_modifiers.push_back(iterator.mod);
       drmModeFreePropertyBlob(blob);
       std::erase_if(modifiers, [&](std::uint64_t modifier) {
-        return std::find(scanout_modifiers.begin(), scanout_modifiers.end(), modifier) == scanout_modifiers.end();
+        return !std::ranges::contains(scanout_modifiers, modifier);
       });
     }
   }
   const auto renderable = device.vulkan->render_modifiers(device.scanout_format);
-  const bool linear = std::find(renderable.begin(), renderable.end(), DRM_FORMAT_MOD_LINEAR) != renderable.end();
+  const bool linear = std::ranges::contains(renderable, DRM_FORMAT_MOD_LINEAR);
   constexpr std::size_t kScanoutBuffers = 3;
   for (std::size_t index = 0; index < kScanoutBuffers; ++index) {
     DrmOutput::ScanoutBuffer buffer;

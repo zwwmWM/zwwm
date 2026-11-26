@@ -134,7 +134,7 @@ void write_receive_property(XwaylandReceiveTransfer* transfer) {
   const int flags = ::fcntl(transfer->fd, F_GETFL);
   if (flags >= 0) (void)::fcntl(transfer->fd, F_SETFL, flags | O_NONBLOCK);
   flush_receive(transfer->fd, EPOLLOUT, transfer);
-  if (std::find(runtime->receives.begin(), runtime->receives.end(), transfer) != runtime->receives.end() &&
+  if (std::ranges::contains(runtime->receives, transfer) &&
       !transfer->data.empty() && transfer->event_source < 0)
     transfer->event_source = runtime->loop->add_fd(transfer->fd, EPOLLOUT,
         [transfer](int fd, int mask) {
@@ -228,7 +228,7 @@ bool handle_xwayland_selection_event(XwaylandRuntime* runtime, xcb_generic_event
         for (std::uint32_t index = 0; index < reply->value_len; ++index) {
           if (atoms[index] == runtime->targets_atom || atoms[index] == runtime->timestamp_atom) continue;
           auto mime = xwayland_atom_mime(runtime, atoms[index]);
-          if (!mime.empty() && std::find(mimes.begin(), mimes.end(), mime) == mimes.end()) mimes.push_back(std::move(mime));
+          if (!mime.empty() && !std::ranges::contains(mimes, mime)) mimes.push_back(std::move(mime));
         }
       }
       std::free(reply);
@@ -290,7 +290,7 @@ bool handle_xwayland_selection_event(XwaylandRuntime* runtime, xcb_generic_event
     return true;
   }
   auto mime = xwayland_atom_mime(runtime, event->target);
-  if (std::find(source->mime_types.begin(), source->mime_types.end(), mime) == source->mime_types.end()) {
+  if (!std::ranges::contains(source->mime_types, mime)) {
     const auto prefix = mime.find('/');
     const auto needle = prefix == std::string::npos ? mime : mime.substr(0, prefix);
     const auto found = std::find_if(source->mime_types.begin(), source->mime_types.end(),
@@ -354,8 +354,7 @@ void xwayland_wayland_selection_changed(SeatState* seat, bool is_primary) {
 }
 
 void xwayland_keyboard_focus_changed(XwaylandRuntime* runtime) {
-  if (runtime == nullptr || runtime->connection == nullptr || runtime->observer == nullptr ||
-      runtime->observer->seat == nullptr) return;
+  if (runtime == nullptr || runtime->connection == nullptr || runtime->observer == nullptr) return;
   auto* seat = runtime->observer->seat;
   for (auto* selection : {&runtime->clipboard, &runtime->primary}) {
     auto* source = selection->primary ? seat->primary_selection : seat->selection;

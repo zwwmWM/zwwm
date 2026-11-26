@@ -11,7 +11,7 @@ namespace {
 OutputState* find_output(Observer* observer, const zwayland::server::Resource* resource) {
   if (observer->outputs == nullptr || resource == nullptr) return nullptr;
   for (auto& output : *observer->outputs)
-    if (!output->retired && std::find(output->resources.begin(), output->resources.end(), resource) != output->resources.end())
+    if (!output->retired && std::ranges::contains(output->resources, resource))
       return output.get();
   return nullptr;
 }
