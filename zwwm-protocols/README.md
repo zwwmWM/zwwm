@@ -1,297 +1,82 @@
 # zwwm-protocols
 
-This target generates native zwayland client and server headers with the
-repository's `zwayland-scanner`. Project protocols live directly in
-`protocols/` as [zxml](ZXML.md); complete snapshots of Wayland 1.26.0 protocol
-data and wayland-protocols 1.49 stay XML in `protocols/upstream/`. The scanner
-reads both and needs no XML library or installed protocol packages.
+All protocols are [zxml](ZXML.md): project ones under `protocols/`, Wayland
+1.26.0 and wayland-protocols 1.49 under `protocols/upstream/`. `zwayland-scanner`
+generates C++ bindings from them at build time. Generated XML for the
+project protocols is installed to `share/zwwm/protocols/`.
 
 ## Project protocols
 
-- `zwwm-tags-unstable-v1`: trusted tag observation and control
-- `zwwm-screencopy-view-unstable-v1`: authenticated output and region capture
-- `ext-zwwm-toplevels-unstable-v1`: authenticated toplevel inventory and capture
-- `ext-zwwm-manager-v1`: typed compositor state, control, and event subscriptions
-- `zwwm-client-connection-v1`: preconnected client sockets and named daemon channels
-- `zwwm-data-control-v1`: compositor data-control integration
-- `zwwm-layer-shell-v1`: desktop layer surfaces (replaces `zwlr_layer_shell_v1`)
-- `zwwm-focus-grab-v1`: dismissible keyboard-focus grabs for layer panels
-- `zwwm-decoration-manager-v1`: native surface decoration policy and server-side defaults
-- `zwwm-virtual-keyboard-v1`: on-screen key injection using the compositor's XKB keymap
-- `zwwm-window-manager-v1`: runtime configuration, window control, and external policy ownership
-- `zwwm-layout-manager-v1`: external placement algorithms with versioned atomic batches
-- `xwlr-layer-shell-v1`: optional layer-surface priority, opacity, and exclusive-edge hints
-- `zwwm-xwayland-shell-v1`: Xwayland window-to-surface association (`xwayland_shell_v1` wire names)
+- `zwwm-tags-unstable-v1`: tag observation and control
+- `zwwm-screencopy-view-unstable-v1`: output and region capture (portal only)
+- `ext-zwwm-toplevels-unstable-v1`: toplevel list and capture (portal only)
+- `ext-zwwm-manager-v1`: compositor state, control and events (`zwwmctl`)
+- `zwwm-client-connection-v1`: preconnected sockets and named daemon channels
+- `zwwm-data-control-v1`: clipboard control
+- `zwwm-layer-shell-v1`: layer surfaces, also served as `zwlr_layer_shell_v1` v4
+- `xwlr-layer-shell-v1`: extra layer hints: priority, opacity, exclusive edge
+- `zwwm-focus-grab-v1`: dismissible keyboard grabs for panels
+- `zwwm-decoration-manager-v1`: server-side decoration policy
+- `zwwm-virtual-keyboard-v1`: key injection using the compositor keymap
+- `zwwm-window-manager-v1`: runtime config, window control, policy ownership
+- `zwwm-layout-manager-v1`: external tiling layouts
+- `zwwm-xwayland-shell-v1`: Xwayland window to surface association
 
-Private capture globals are restricted to the compositor-authenticated portal
-client. The canonical `zwlr_screencopy_manager_v1` remains public for direct
-clients such as `grim`.
+`zwlr_screencopy_manager_v1` stays public for tools like `grim`.
 
-Generated sources are build artifacts and are not committed.
+## Virtual keyboard
 
-The layer-shell and companion extension XML are generated from zxml and
-installed in `share/zwwm/protocols/` for clients. The core protocol provides the layer,
-anchor, keyboard-interactivity, error, and
-configure/closed types and requests corresponding to zwlr layer shell, under
-`zwwm_layer_shell_v1` and `zwwm_layer_surface_v1` names. Clients must bind
-`zwwm_layer_shell_v1` and use these types. For existing layer-shell clients,
-zwwm also advertises the `zwlr_layer_shell_v1` registry name (up to version 4)
-as a wire-compatible alias of the same zwwm layer handler. This does not add a
-second layer implementation. The optional `xwlr_layer_shell_v1` extension
-accepts `zwwm_layer_surface_v1` objects.
+`create_keyboard(seat)` sends the current XKB keymap and modifiers, and again
+whenever they change. Send `key(time, evdev_code, pressed)` and a matching
+release; modifiers are ordinary keys. Input is ignored while the session is
+locked. Use a layer surface with keyboard interactivity `none` so tapping the
+keyboard doesn't steal focus.
 
-## Decoration policy
+## External window managers
 
-`zwwm_decoration_manager_v1` announces `default_mode` when bound. Clients
-create a `zwwm_surface_decoration_v1` using `get_decoration(wl_surface)`, then
-receive `configure` with the selected mode. `set_mode` requests a preference;
-zwwm selects `server_side` and clients should stop drawing titlebars, borders,
-and decoration shadows. Both manager and decoration objects support `destroy`.
-Its generated XML is installed in `share/zwwm/protocols/`.
+`zwwm_window_manager_v1` and `zwwm_layout_manager_v1` let a separate process
+supply config, focus policy and layout while zwwm keeps rendering and protocol
+handling.
 
-Existing xdg-decoration negotiation remains available. A small native wire
-adapter advertises `org_kde_kwin_server_decoration_manager` for clients such as
-Ghostty. It shares zwwm's server-side policy without importing another protocol
-implementation or XML specification.
+### Configuration
 
-## Virtual keyboards and touch
+`create_configuration` clones the running config into a draft. Set properties
+and collections, then `commit`; the result reports `applied(revision)` or
+`failed(message)`. A failed or abandoned draft changes nothing. Changes are not
+written to `config.zw`.
 
-Bind `zwwm_virtual_keyboard_manager_v1` and a `wl_seat`, then call
-`create_keyboard(seat)`. The new object sends the compositor's `keymap` and
-`modifiers`; read the supplied fd as an XKB text-v1 keymap and close it afterward.
-The fd's size includes the terminating NUL. Keymap changes are published live.
+Property names follow `config.zw` paths (`animations.duration-ms`,
+`input.focus-mode`, `keyboard.layout`, `overview.layout`, ...) with the same
+ranges as [CONFIG.md](../CONFIG.md). Collections cover bindings, window rules,
+layer rules, output scale/transform and shaders.
 
-Send `key(time, evdev_code, pressed)` followed by a corresponding release.
-Use keycode + 8 for XKB lookups. Shift, Control, and other modifiers are normal
-key presses; clients do not replace the seat's keymap or inject modifier masks.
-Injection follows compositor bindings and keyboard focus. Per-device held keys
-are balanced on destruction, including when another device holds the same key.
-`reset` clears the client's held-key UI when the seat resets or locks. Injection
-is ignored during session lock.
+### Policy (version 2)
 
-An on-screen keyboard can use a zwwm layer surface with keyboard interactivity
-`none` so touching its buttons does not steal the application's keyboard focus.
-The compositor now advertises `wl_touch` support and delivers down, motion, up,
-frame, and cancel events. Each contact stays assigned to its initial surface,
-with canvas transforms applied to the delivered local coordinates. Direct DRM
-touchscreens map to the first connector in name order, respecting that output's
-scale and transform; nested sessions forward parent-compositor touch events.
+- `get_state`: windows, outputs and tags. Window IDs live as long as the surface.
+- `changed`: coalesced change notice; fetch a new snapshot.
+- `window_action`, `assign_window`, `select_tag`, `dispatch`: control, each
+  answered by a `zwwm_window_result_v1`.
 
-The virtual-keyboard XML is installed in `share/zwwm/protocols/`. Its client and
-server bindings are native C++, generated by `zwayland-scanner`; the `.h`
-suffix does not indicate a libwayland C binding. Dedicated implementations live
-in `compositor_server_virtual_keyboard.cpp`, `compositor_server_touch.cpp`, and
-`nested_backend_touch.cpp`.
+`claim_policy` makes one client the focus owner. zwwm stops auto-focusing and
+forwards pointer, touch and gesture input, `external` bindings, and app
+fullscreen/maximize/minimize/move/resize requests as `window_request`. Floating
+dialogs, popups and interactive floating move/resize stay native. Releasing or
+disconnecting restores built-in behavior.
 
-## External configuration interpreters
+### Layout
 
-`zwwm_window_manager_v1` configures runtime policy. It does not parse a source
-language and has no placement requests. A custom interpreter reads
-its own files, resolves variables and imports, and emits these typed requests:
-
-1. Bind the manager; it sends `revision`, including later configuration changes.
-2. Call `create_configuration` to clone the current policy into a draft. The
-   draft sends its `base_revision`.
-3. Set properties and replace the collections the interpreter owns.
-4. Call `commit` and handle the result's `applied(revision)` or `failed(message)`.
-5. Destroy the draft and result. To retry a stale or failed draft, create a new one.
-
-Invalid property names, types, ranges, keymaps, shader roles, and shader
-compilation failures reject the draft. Shader preparation finishes before
-runtime policy is replaced; rendering changes are published as one batch.
-Disconnecting or destroying an uncommitted draft leaves the running config
-unchanged. Updates are not written to `config.zw`, and a subsequent file reload
-can replace them.
-
-### Scalar properties
-
-`set_integer(name, value)` accepts these animation properties:
-
-- `animations.duration-ms`, `open-duration-ms`, `close-duration-ms`,
-  `move-duration-ms`, `fade-duration-ms`, `tag-duration-ms`, and `overview-duration-ms` (each name has
-  the `animations.` prefix): `0..10000`.
-- `animations.open-scale-per-mille`, `animations.close-scale-per-mille`: `500..1000`.
-- `animations.open-offset-px`, `animations.close-offset-px`: `0..4096`.
-- `animations.tag-scale-per-mille`, `animations.tag-parallax-per-mille`,
-  `animations.tag-fade-per-mille`: `0..1000`.
-- `animations.cubic-bezier.x1`, `.y1`, `.x2`, `.y2`: `0..1000`.
-
-`set_boolean(name, value)` uses `0` or `1` and accepts `animations.enabled`,
-`animations.open-window`, `animations.resize`, `animations.close`, and
-`input.reverse-mouse-scrolling`.
-
-`set_string(name, value)` accepts `input.focus-mode` (`by-click` or `hover`),
-`animations.tag-transition-axis` (`horizontal` or `vertical`),
-`keyboard.rules`, `keyboard.model`, `keyboard.layout`, `keyboard.variant`,
-`keyboard.options`, and `shaders.window`, `shaders.border`, `shaders.background`.
-
-`overview.backdrop-image` is an absolute PNG filename or an empty string to use
-the existing desktop background. Integer properties
-`overview.backdrop-blur-radius` (`0..128`, default 0) and
-`overview.backdrop-blur-passes` (`1..8`, default 3) control its blur. Backdrop
-effects are clipped to the area outside scene viewports. Image decoding and
-texture preparation happen before the configuration transaction is applied.
-
-`overview.scene-radius` is an integer from `0..512` logical pixels (default 0).
-It rounds overview scene backgrounds and layer-surface clipping only.
-
-`overview.layout` accepts `vertical-strip` (default) or `stack-master`.
-`stack-master` has the eight non-active scenes in a vertical stack on the left
-and the active scene as master on the right. `overview.master-ratio` accepts
-`10..90` (default 60), specifying the master's share of available width.
-Both arrangements preserve scene aspect ratio, layers, rounding, and backdrop
-effects; master/stack presents all nine scenes without strip scrolling.
-
-### Collections
-
-- `clear_bindings` / `add_binding`: four literal strings with the same action
-  vocabulary as the existing binding system.
-- `clear_window_rules` / `add_window_rule`: app-id/title globs, optional floating
-  and opacity policy, and shader names. `-1` leaves floating or opacity unspecified.
-- `clear_layer_rules` / `add_layer_rule`: namespace globs, blur radius `0..64`,
-  opacity percentage, and ignored-alpha percentage.
-- `clear_outputs` / `set_output`: connector-specific live scale `250..8000` and
-  transform `0..3`; an empty connector changes output defaults. Modes and
-  monitor placement are not part of this request.
-- `clear_shaders` / `define_shader`: named window/border/background programs
-  with absolute source filenames. Set their values using `shader_integer`,
-  `shader_boolean`, `shader_color`, `shader_colors`, or `shader_vector`.
-  A scalar color is `0xRRGGBBAA`; a color array contains RGBA bytes for one to
-  twenty colors; a vector array contains two to four signed 32-bit integers.
-
-Its generated XML is installed in `share/zwwm/protocols/`. The dedicated implementation is
-`zwwm/src/window_manager_protocol.cpp`. This protocol preserves the current
-layout configuration; external placement belongs to `zwwm-layout-manager-v1`.
-
-## Writing an external window manager
-
-Bind `zwwm_window_manager_v1` at **version 2**. Version 1 clients retain the
-configuration interface. Version 2 adds:
-
-- `get_state`: all native and associated Xwayland windows, including native
-  toplevels before mapping, plus output geometry and active tags. Window IDs
-  are stable for their surface lifetime. The snapshot includes app-id, title,
-  transient parent ID, goal frame rectangle, size hints, and state flags.
-- `changed(serial, changes)`: coalesced window/output/tag/config/camera/keyboard
-  and session changes. Fetch a new snapshot instead of retaining stale IDs.
-- `window_action`: focus, close, raise, set floating, set fullscreen, or set
-  hidden. `enabled` is 0/1 for state setters. Hidden windows remain in state
-  snapshots but are excluded from layout requests. Focusing window ID zero
-  clears focus. Raising controls the window's complete surface tree.
-- `assign_window`: assign a window to an output ID and tag `1..9`.
-- `select_tag`: select a tag on an explicit output.
-- `dispatch`: invoke a compositor action, including shell commands.
-
-Each control operation creates a `zwwm_window_result_v1` and reports `done` or
-`failed`. Destroy the result after handling it.
-
-### Own the policy
-
-`claim_policy` permits one manager object to own automatic focus policy and
-input observation. While claimed, zwwm stops automatically focusing newly mapped
-applications, hover targets, or clicked managed windows. The owner chooses focus
-and tiled stacking through window actions. zwwm retains automatic floating-dialog
-classification, floating geometry and stacking, popup positioning/grabs, and
-interactive move/resize. Floating windows stay above tiles; dialogs can acquire
-focus on map and restore focus to their transient parent when closed.
-Other version-2 clients cannot issue window controls
-while another client owns policy. Configuration transactions remain available.
-
-The owner receives global-logical `pointer_motion`, `pointer_button`, and touch
-events. Touch state is 1 for down, 2 for motion, 0 for up, and 3 for cancellation
-(ID -1 cancels all contacts). Direct DRM sessions also forward swipe/pinch/hold
-`gesture` events with kind/phase values matching the native plugin gesture API.
-Gestures report output-logical deltas, scale, rotation, cancellation, device, and
-output. Input observation stops during session lock, and snapshots report the
-locked state so the manager can cancel its own interactions.
-
-Register policy bindings through configuration transactions using action
-`external` and a chosen binding name as the argument. Keyboard and mouse
-bindings then generate `binding(name, time, state, code)` events to the owner,
-including release. The captured press/release is not delivered to the application.
-Mouse names include `lm`, `rm`, and `wheel` (middle-button hold), as well as
-`left`, `right`, and `middle`. Without a policy owner, external bindings are
-ignored and the input passes through normally.
-
-Application fullscreen, maximize, and minimize requests become `window_request`
-events. The owner decides whether to accept
-them, using window controls and the layout protocol. The request kind is 0 for
-fullscreen, 1 for maximize, 2 for minimize, 3 for move, and 4 for resize; resize
-includes an xdg resize-edge bitfield. A minimized window can be hidden and later
-restored using the hidden action. Fullscreen remains an explicit window state
-with output-sized geometry enforced by the compositor. Interactive move/resize
-is handled directly by zwwm for floating windows after validating the application's
-grab serial. With external layout/policy ownership, tiled resize requests use
-kind 4 and keep the window tiled. Super+right-drag starts the same tiled resize
-with serial 0. The owner uses pointer motion and button release to update its
-layout with `commit(..., 0)` during resizing. Moving windows into floating mode
-and resizing existing floating dialogs remain native operations.
-
-`release_policy`, destruction, or disconnect releases ownership and restores
-built-in focus behavior. zwwm retains responsibility for protocol lifecycles,
-buffer/render ownership, lock-screen behavior, and input delivery.
-
-The `dispatch` action `overview` accepts an empty argument to toggle, `on` to
-open, or `off` to close the native tag overview. It presents a scrollable
-vertical strip with live window previews, including inactive tags. Mouse-wheel
-scrolling and Up/Down browse the strip; a click selects a window/tag, keys 1–9
-select a tag, and Escape closes it. Overview input is consumed instead of sent
-to applications, and session locking closes the overview. Application geometry
-and external layout membership are preserved.
-
-Overview renders each tag's existing scene with one shared scale/translation,
-preserving relative window placement and floating stacking. Scene dimensions
-are fixed to the output viewport. Backgrounds and layers are clipped to scene
-bounds, while window previews may extend outside them and remain selectable. Output
-layer surfaces are rendered in each tag scene in their original stacking
-order. The scene uses the configured desktop background and appearance rather
-than an additional overview card theme. Open/close and
-strip scrolling animate from their current values, including interrupted
-toggles. `animations.overview-duration-ms` controls these transitions (default
-280 ms); `animations.enabled = false` or a zero overview duration snaps them.
-
-### Own the layout
-
-Bind `zwwm_layout_manager_v1` and create a provider. One provider owns geometry
-for tiled windows on all outputs and active tags. Floating windows and popups
-are excluded from placement batches and remain managed by zwwm. Built-in tiling and
-canvas placement are bypassed while the provider is active. Work areas already
-account for layer-shell reservations.
-
-For each `request(serial, output, tag, work_area, count)`:
-
-1. Collect its `window` events until `done(serial)`.
-2. Compute your own rectangles in global logical coordinates. Size hints refer
-   to client content; placement rectangles refer to outer frames.
-3. Send one `place` for every participant, even fullscreen participants whose
-   normal layout slot is preserved while their fullscreen geometry is displayed.
-4. Send `commit(serial, animate)`: 1 for reflows, 0 for direct drag/resize updates.
-5. Handle `applied` or `failed`. A newer request for that output/tag invalidates
-   older serials. Duplicate, missing, unknown, invalid-sized, or stale placements
-   fail without replacing the accepted batch.
-
-Rectangles may overlap or lie outside the work area, enabling stacks and
-scrollable layouts. Width and height must be `1..32768`, and coordinate addition
-must fit signed 32-bit values. `request_layout` asks for fresh serials when your
-own settings, drag state, or gesture viewport changes without a window-set change.
-Keep provisional placements unchanged until a complete replacement is ready.
-On provider loss, built-in layout behavior resumes.
-
-### Typical daemon flow
+Create a provider to place tiled windows on every output. For each `request`:
+collect `window` events until `done`, send one `place` per window in global
+logical coordinates, then `commit(serial, animate)`. Incomplete or stale batches
+fail and leave the previous layout. `request_layout` asks for a new pass. When
+the provider goes away, built-in tiling returns.
 
 ```text
 bind window manager v2 and layout manager v1
-claim window policy
-apply your parsed config through a configuration transaction
-create your layout provider
+claim policy, commit config, create layout provider
 
-changed -> request state snapshot -> choose focus/window policy
-binding or input -> update your policy/drag/gesture state -> request_layout
-layout done -> calculate placements -> place every participant -> commit
-window_request -> accept/reject using window actions and your own placement policy
+changed        -> get_state -> window actions
+binding/input  -> update state -> request_layout
+layout done    -> place every window -> commit
+window_request -> accept or ignore
 ```
-
-These clients can be separate processes or one daemon. They can use any language
-with Wayland bindings generated from the installed XML. Rendering and native
-protocol handling stay in zwwm; configuration parsing, window policy, and layout
-algorithms can live entirely in user-provided programs.

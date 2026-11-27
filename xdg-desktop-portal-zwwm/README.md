@@ -1,70 +1,32 @@
 # xdg-desktop-portal-zwwm
 
-`xdg-desktop-portal-zwwm` is the compositor-spawned portal backend for zwwm. It
-implements Screenshot, ScreenCast, Access, FileChooser, and Settings while GTK
-handles unrelated portal interfaces.
+Portal backend for zwwm: Screenshot, ScreenCast, Access, FileChooser and
+Settings. GTK handles the rest.
 
-The process is intentionally not D-Bus activated. zwwm starts one child and
-authenticates its private Wayland client through an inherited capability socket
-and kernel credentials. Child loss, socket loss, or client destruction revokes
-capture authority. The private connection uses `libzwayland-client` and typed
-generated protocol bindings rather than libwayland.
-
-After acquiring its backend D-Bus name, the helper publishes the session's
-desktop and portal paths through the standard D-Bus activation environment.
-When a systemd user manager is available, it also asynchronously restarts
-`xdg-desktop-portal.service` once so an already-running frontend picks up the
-new selection. Neither step requires systemd to start the compositor or helper.
+zwwm spawns it directly (no D-Bus activation) and authenticates it through an
+inherited socket; capture rights end when the process or connection goes away.
 
 ## Screenshot
 
-- Noninteractive full-output capture to a private temporary file
-- Interactive output, window, and region selection with Qt Widgets
-- Decorated toplevel inventory and one-shot capture
-- PNG, BMP, TGA, JPEG, and PPM output
-- Cancellable request objects with one terminal response
+- Full-output, window or region capture, interactive or not
+- PNG, BMP, TGA, JPEG and PPM output
 
-The private screencopy path uses client-owned Wayland SHM buffers. zwwm also
-publishes the canonical public screencopy protocol for direct tools such as
-`grim`; that path is separate from portal authorization.
+Public screencopy for tools like `grim` is separate from the portal.
 
 ## ScreenCast
 
-ScreenCast version 5 supports one monitor or managed toplevel source per
-session. The chooser receives live native Wayland and Xwayland toplevel metadata
-through the compositor's capability-restricted toplevel protocol. Toplevel
-streams render only the selected client surface tree at its client-logical
-size. They exclude compositor borders, rounding, shadows, blur, glass, opacity
-rules, animations, other windows, and output transforms. Embedded cursor is the
-only optional compositor overlay.
+One monitor or window per session, BGRx up to 60 fps, DMA-BUF or MemFd.
+Window streams contain only the client's surfaces, without borders or effects.
+The cursor can be hidden or embedded.
 
-The PipeWire node advertises raw BGRx at the captured physical size, a `1..60
-fps` range with 60 fps preferred, and a bounded 2-8 buffer pool with four
-buffers preferred. Modifier-aware consumers receive linear GBM DMA-BUFs;
-plain-format consumers retain the MemFd path. Capture is paced by compositor
-presentation and released PipeWire capacity, with at most one request in flight.
-
-Hidden cursor mode is always available. When embedded cursor capture is
-available, the chooser provides an explicit `Include mouse cursor` option for
-both monitor and toplevel sources. Metadata cursor, multiple simultaneous
-sources, virtual outputs, persistence, and dynamic resize are not currently
-implemented.
+Not implemented: metadata cursor, multiple sources, virtual outputs,
+persistence, resize.
 
 ## Settings
 
-Settings is answered by the backend itself and is not configurable. It serves
-one key, `org.freedesktop.appearance` `color-scheme`, fixed to prefer dark;
-every other key is reported as not found and `SettingChanged` is never emitted.
+Only `org.freedesktop.appearance` `color-scheme`, fixed to dark.
 
-## Installation
+## Dependencies
 
-CMake installs:
-
-- `bin/xdg-desktop-portal-zwwm`
-- `share/xdg-desktop-portal/portals/zwwm.portal`
-- `share/xdg-desktop-portal/portals/zwwm-gtk.portal`
-- `share/xdg-desktop-portal/zwwm-portals.conf`
-
-The backend links Qt 6 Core, DBus, Gui, and Widgets, `libzwayland-client`,
-PipeWire, and SPA. Image encoding uses the vendored `stb_image_write.h`; its
-revision and license are recorded in `vendor/README.md`.
+Qt 6 (Core, DBus, Gui, Widgets), `libzwayland-client`, PipeWire. Images are
+written with the vendored `stb_image_write.h` (see `vendor/README.md`).

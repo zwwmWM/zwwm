@@ -1,33 +1,16 @@
 # zwwm-renderer
 
-`zwwm-renderer` owns backend-neutral scene ordering, damage planning, and
-Vulkan drawing. It has no wlroots dependency.
+Scene ordering, damage planning and Vulkan drawing.
 
-`Scene` stores visible surfaces and compositor decorations.
-`VulkanRenderer::build_frame()` converts damaged scene nodes into ordered draw
-calls, and `render()` records them with dynamic rendering. Work between
-`begin()` and `submit()` becomes one GPU submission; `render()` and `copy()`
-outside a recording submit on their own.
+`Scene` holds surfaces and decorations. `VulkanRenderer::build_frame()` turns
+damaged nodes into draw calls and `render()` records them; everything between
+`begin()` and `submit()` is one GPU submission.
 
-The renderer supports:
+- shm and DMA-BUF textures, premultiplied alpha
+- Antialiased rounded clipping and borders
+- Dual-Kawase blur and glass
+- Implicit sync with DMA-BUF producers and KMS
 
-- Uploaded shm textures, imported DMA-BUFs, and solid compositor geometry
-- Premultiplied-alpha blending
-- Antialiased rounded clipping
-- Decoration borders composed from ordered scene nodes
-- Offscreen scene rendering, dual-Kawase backdrop blur, and glass
-- Implicit synchronization with DMA-BUF producers and KMS
-
-All shaders are Vulkan GLSL 4.50 against `shaders/zwwm.glsl`, compiled to
-SPIR-V with glslang when shaders load:
-
-- One `ZwwmDraw` std140 block per draw, written to a ring buffer and bound with
-  a dynamic offset; a single vertex shader builds every quad from it.
-- A bindless `sampler2D zwwm_textures[]` table written once per frame; draws
-  carry texture indices.
-- An optional per-program config block (set 1) filled once from `config.zw`.
-- Specialization constants select Kawase pass modes and glass sample counts.
-- Native top-left coordinates; snapshots are plain top-down image copies.
-
-Textures are `std::shared_ptr<vlk::Image>`; submissions keep everything they
-reference alive until the GPU retires them.
+Shaders are Vulkan GLSL 4.50 built on `shaders/zwwm.glsl`: one std140
+`ZwwmDraw` block per draw, a bindless `zwwm_textures[]` table, and an optional
+per-shader config block (set 1) filled from `config.zw`.
