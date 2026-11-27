@@ -2,7 +2,7 @@
 
 zxml is a C++-flavoured source format for Wayland protocols. It describes the
 same model as Wayland XML, and `zwayland-scanner` reads both. Project protocols
-in `protocols/` are written in zxml; the vendored upstream snapshots stay XML.
+in `protocols/` and the upstream snapshots in `protocols/upstream/` are zxml.
 
 ```sh
 zwayland-scanner zwayland-server-header foo.zxml foo-server.h
@@ -80,9 +80,15 @@ or hexadecimal. Trailing commas are allowed in enums and argument lists.
 the summary; everything after the first blank `///` line is the description
 body. A body with no summary starts with a blank `///` line.
 
-`///<` gives a one-line summary to the preceding argument, entry or message,
-before or after its comma. `//` and `/* */` are ordinary comments and are
-dropped.
+`///<` gives a summary to the preceding argument, entry or message, before or
+after its comma. A long summary wraps onto following `///<` lines, which join
+with a space. Trailing spaces in doc comments are dropped. `//` and `/* */` are
+ordinary comments and are dropped.
+
+```
+invalid_wl_buffer = 7,  ///< invalid wl_buffer resulted from importing dmabufs via the
+                        ///< create_immed request on given buffer_params
+```
 
 Keywords are contextual, so arguments may be named `interface`, `version`,
 `object` and so on.

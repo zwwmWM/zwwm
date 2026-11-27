@@ -1,0 +1,334 @@
+protocol text_input_unstable_v1;
+
+copyright R"(
+Copyright © 2012, 2013 Intel Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including the next
+paragraph) shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+)";
+
+/// text input
+///
+/// An object used for text input. Adds support for text input and input
+/// methods to applications. A text_input object is created from a
+/// wl_text_input_manager and corresponds typically to a text entry in an
+/// application.
+///
+/// Requests are used to activate/deactivate the text_input object and set
+/// state information like surrounding and selected text or the content type.
+/// The information about entered text is sent to the text_input object via
+/// the pre-edit and commit events. Using this interface removes the need
+/// for applications to directly process hardware key events and compose text
+/// out of them.
+///
+/// Text is generally UTF-8 encoded, indices and lengths are in bytes.
+///
+/// Serials are used to synchronize the state between the text input and
+/// an input method. New serials are sent by the text input in the
+/// commit_state request and are used by the input method to indicate
+/// the known text input state in events like preedit_string, commit_string,
+/// and keysym. The text input can then ignore events from the input method
+/// which are based on an outdated state (for example after a reset).
+///
+/// Warning! The protocol described in this file is experimental and
+/// backward incompatible changes may be made. Backward compatible changes
+/// may be added together with the corresponding interface version bump.
+/// Backward incompatible changes are done by bumping the version number in
+/// the protocol and interface names and resetting the interface version.
+/// Once the protocol is to be declared stable, the 'z' prefix and the
+/// version number in the protocol and interface names are removed and the
+/// interface version number is reset.
+interface zwp_text_input_v1 version 1 {
+  /// content hint
+  ///
+  /// Content hint is a bitmask to allow to modify the behavior of the text
+  /// input.
+  [[bitfield]] enum content_hint {
+    none = 0x0,                 ///< no special behaviour
+    default = 0x7,              ///< auto completion, correction and capitalization
+    password = 0xc0,            ///< hidden and sensitive text
+    auto_completion = 0x1,      ///< suggest word completions
+    auto_correction = 0x2,      ///< suggest word corrections
+    auto_capitalization = 0x4,  ///< switch to uppercase letters at the start of a sentence
+    lowercase = 0x8,            ///< prefer lowercase letters
+    uppercase = 0x10,           ///< prefer uppercase letters
+    titlecase = 0x20,           ///< prefer casing for titles and headings (can be language
+                                ///< dependent)
+    hidden_text = 0x40,         ///< characters should be hidden
+    sensitive_data = 0x80,      ///< typed text should not be stored
+    latin = 0x100,              ///< just latin characters should be entered
+    multiline = 0x200,          ///< the text input is multiline
+  }
+
+  /// content purpose
+  ///
+  /// The content purpose allows to specify the primary purpose of a text
+  /// input.
+  ///
+  /// This allows an input method to show special purpose input panels with
+  /// extra characters or to disallow some characters.
+  enum content_purpose {
+    normal = 0,     ///< default input, allowing all characters
+    alpha = 1,      ///< allow only alphabetic characters
+    digits = 2,     ///< allow only digits
+    number = 3,     ///< input a number (including decimal separator and sign)
+    phone = 4,      ///< input a phone number
+    url = 5,        ///< input an URL
+    email = 6,      ///< input an email address
+    name = 7,       ///< input a name of a person
+    password = 8,   ///< input a password (combine with password or sensitive_data hint)
+    date = 9,       ///< input a date
+    time = 10,      ///< input a time
+    datetime = 11,  ///< input a date and time
+    terminal = 12,  ///< input for a terminal
+  }
+
+  enum preedit_style {
+    default = 0,    ///< default style for composing text
+    none = 1,       ///< style should be the same as in non-composing text
+    active = 2,
+    inactive = 3,
+    highlight = 4,
+    underline = 5,
+    selection = 6,
+    incorrect = 7,
+  }
+
+  enum text_direction {
+    auto = 0,  ///< automatic text direction based on text and language
+    ltr = 1,   ///< left-to-right
+    rtl = 2,   ///< right-to-left
+  }
+
+  /// request activation
+  ///
+  /// Requests the text_input object to be activated (typically when the
+  /// text entry gets focus).
+  ///
+  /// The seat argument is a wl_seat which maintains the focus for this
+  /// activation. The surface argument is a wl_surface assigned to the
+  /// text_input object and tracked for focus lost. The enter event
+  /// is emitted on successful activation.
+  request activate(object<wl_seat> seat, object<wl_surface> surface);
+
+  /// request deactivation
+  ///
+  /// Requests the text_input object to be deactivated (typically when the
+  /// text entry lost focus). The seat argument is a wl_seat which was used
+  /// for activation.
+  request deactivate(object<wl_seat> seat);
+
+  /// show input panels
+  ///
+  /// Requests input panels (virtual keyboard) to show.
+  request show_input_panel();
+
+  /// hide input panels
+  ///
+  /// Requests input panels (virtual keyboard) to hide.
+  request hide_input_panel();
+
+  /// reset
+  ///
+  /// Should be called by an editor widget when the input state should be
+  /// reset, for example after the text was changed outside of the normal
+  /// input method flow.
+  request reset();
+
+  /// sets the surrounding text
+  ///
+  /// Sets the plain surrounding text around the input position. Text is
+  /// UTF-8 encoded. Cursor is the byte offset within the
+  /// surrounding text. Anchor is the byte offset of the
+  /// selection anchor within the surrounding text. If there is no selected
+  /// text anchor, then it is the same as cursor.
+  request set_surrounding_text(string text, uint cursor, uint anchor);
+
+  /// set content purpose and hint
+  ///
+  /// Sets the content purpose and content hint. While the purpose is the
+  /// basic purpose of an input field, the hint flags allow to modify some
+  /// of the behavior.
+  ///
+  /// When no content type is explicitly set, a normal content purpose with
+  /// default hints (auto completion, auto correction, auto capitalization)
+  /// should be assumed.
+  request set_content_type(uint<content_hint> hint, uint<content_purpose> purpose);
+
+  request set_cursor_rectangle(int x, int y, int width, int height);
+
+  /// sets preferred language
+  ///
+  /// Sets a specific language. This allows for example a virtual keyboard to
+  /// show a language specific layout. The "language" argument is an RFC-3066
+  /// format language tag.
+  ///
+  /// It could be used for example in a word processor to indicate the
+  /// language of the currently edited document or in an instant message
+  /// application which tracks languages of contacts.
+  request set_preferred_language(string language);
+
+  request commit_state(
+    uint serial  ///< used to identify the known state
+  );
+  request invoke_action(uint button, uint index);
+
+  /// enter event
+  ///
+  /// Notify the text_input object when it received focus. Typically in
+  /// response to an activate request.
+  event enter(object<wl_surface> surface);
+
+  /// leave event
+  ///
+  /// Notify the text_input object when it lost focus. Either in response
+  /// to a deactivate request or when the assigned surface lost focus or was
+  /// destroyed.
+  event leave();
+
+  /// modifiers map
+  ///
+  /// Transfer an array of 0-terminated modifier names. The position in
+  /// the array is the index of the modifier as used in the modifiers
+  /// bitmask in the keysym event.
+  event modifiers_map(array map);
+
+  /// state of the input panel
+  ///
+  /// Notify when the visibility state of the input panel changed.
+  event input_panel_state(uint state);
+
+  /// pre-edit
+  ///
+  /// Notify when a new composing text (pre-edit) should be set around the
+  /// current cursor position. Any previously set composing text should
+  /// be removed.
+  ///
+  /// The commit text can be used to replace the preedit text on reset
+  /// (for example on unfocus).
+  ///
+  /// The text input should also handle all preedit_style and preedit_cursor
+  /// events occurring directly before preedit_string.
+  event preedit_string(
+    uint serial,   ///< serial of the latest known text input state
+    string text,
+    string commit
+  );
+
+  /// pre-edit styling
+  ///
+  /// Sets styling information on composing text. The style is applied for
+  /// length bytes from index relative to the beginning of the composing
+  /// text (as byte offset). Multiple styles can
+  /// be applied to a composing text by sending multiple preedit_styling
+  /// events.
+  ///
+  /// This event is handled as part of a following preedit_string event.
+  event preedit_styling(uint index, uint length, uint<preedit_style> style);
+
+  /// pre-edit cursor
+  ///
+  /// Sets the cursor position inside the composing text (as byte
+  /// offset) relative to the start of the composing text. When index is a
+  /// negative number no cursor is shown.
+  ///
+  /// This event is handled as part of a following preedit_string event.
+  event preedit_cursor(int index);
+
+  /// commit
+  ///
+  /// Notify when text should be inserted into the editor widget. The text to
+  /// commit could be either just a single character after a key press or the
+  /// result of some composing (pre-edit). It could also be an empty text
+  /// when some text should be removed (see delete_surrounding_text) or when
+  /// the input cursor should be moved (see cursor_position).
+  ///
+  /// Any previously set composing text should be removed.
+  event commit_string(
+    uint serial,  ///< serial of the latest known text input state
+    string text
+  );
+
+  /// set cursor to new position
+  ///
+  /// Notify when the cursor or anchor position should be modified.
+  ///
+  /// This event should be handled as part of a following commit_string
+  /// event.
+  event cursor_position(int index, int anchor);
+
+  /// delete surrounding text
+  ///
+  /// Notify when the text around the current cursor position should be
+  /// deleted.
+  ///
+  /// Index is relative to the current cursor (in bytes).
+  /// Length is the length of deleted text (in bytes).
+  ///
+  /// This event should be handled as part of a following commit_string
+  /// event.
+  event delete_surrounding_text(int index, uint length);
+
+  /// keysym
+  ///
+  /// Notify when a key event was sent. Key events should not be used
+  /// for normal text input operations, which should be done with
+  /// commit_string, delete_surrounding_text, etc. The key event follows
+  /// the wl_keyboard key event convention. Sym is an XKB keysym, state a
+  /// wl_keyboard key_state. Modifiers are a mask for effective modifiers
+  /// (where the modifier indices are set by the modifiers_map event)
+  event keysym(
+    uint serial,    ///< serial of the latest known text input state
+    uint time,
+    uint sym,
+    uint state,
+    uint modifiers
+  );
+
+  /// language
+  ///
+  /// Sets the language of the input text. The "language" argument is an
+  /// RFC-3066 format language tag.
+  event language(
+    uint serial,     ///< serial of the latest known text input state
+    string language
+  );
+
+  /// text direction
+  ///
+  /// Sets the text direction of input text.
+  ///
+  /// It is mainly needed for showing an input cursor on the correct side of
+  /// the editor when there is no input done yet and making sure neutral
+  /// direction text is laid out properly.
+  event text_direction(
+    uint serial,                    ///< serial of the latest known text input state
+    uint<text_direction> direction
+  );
+}
+
+/// text input manager
+///
+/// A factory for text_input objects. This object is a global singleton.
+interface zwp_text_input_manager_v1 version 1 {
+  /// create text input
+  ///
+  /// Creates a new text_input object.
+  request create_text_input(new<zwp_text_input_v1> id);
+}

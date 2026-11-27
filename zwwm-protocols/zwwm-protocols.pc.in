@@ -2,5 +2,5 @@ prefix=@prefix@
 pkgdatadir=${prefix}/share/zwwm-protocols
 
 Name: zwwm-protocols
-Description: zwwm and upstream Wayland protocol XML
+Description: zwwm and upstream Wayland protocols (zxml and XML)
 Version: @version@

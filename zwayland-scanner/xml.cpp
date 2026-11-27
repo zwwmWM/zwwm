@@ -213,9 +213,19 @@ class Builder {
       fail(node, "invalid numeric attribute " + std::string(key) + "=\"" + value + "\"");
     return result;
   }
-  static Doc doc(const Node& node) { return {text(node, "summary"), normalize_text(node.text)}; }
+  // Summaries are one line: wrapped or padded attribute values collapse to single spaces.
+  static std::string summary(const Node& node) {
+    std::string result;
+    for (const char character : text(node, "summary")) {
+      if (!std::string_view(" \t\r\n").contains(character)) result += character;
+      else if (!result.empty() && result.back() != ' ') result += ' ';
+    }
+    if (!result.empty() && result.back() == ' ') result.pop_back();
+    return result;
+  }
+  static Doc doc(const Node& node) { return {summary(node), normalize_text(node.text)}; }
   static Doc child_doc(const Node& node) {
-    Doc result{text(node, "summary"), {}};
+    Doc result{summary(node), {}};
     for (const auto& child : node.children) if (child->name == "description") {
       const Doc described = doc(*child);
       if (result.summary.empty()) result.summary = described.summary;

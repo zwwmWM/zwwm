@@ -13,7 +13,7 @@ stdenv.mkDerivation {
   nativeBuildInputs = [ cmake ninja zwayland-scanner ];
   cmakeFlags = [
     "-DBUILD_SHARED_LIBS=ON"
-    "-DZWAYLAND_CORE_XML=${zwwm-protocols}/share/zwwm-protocols/upstream/wayland/wayland.xml"
+    "-DZWAYLAND_CORE_XML=${zwwm-protocols}/share/zwwm-protocols/upstream/wayland/wayland.zxml"
   ];
 
   meta = {

@@ -26,11 +26,11 @@ foreach(stage vert frag)
   list(APPEND headers "${spirv_header}")
 endforeach()
 set(specs
-  "xdg-shell|upstream/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
-  "linux-dmabuf|upstream/wayland-protocols/stable/linux-dmabuf/linux-dmabuf-v1.xml"
-  "viewporter|upstream/wayland-protocols/stable/viewporter/viewporter.xml"
-  "fractional-scale|upstream/wayland-protocols/staging/fractional-scale/fractional-scale-v1.xml"
-  "cursor-shape|upstream/wayland-protocols/staging/cursor-shape/cursor-shape-v1.xml"
+  "xdg-shell|upstream/wayland-protocols/stable/xdg-shell/xdg-shell.zxml"
+  "linux-dmabuf|upstream/wayland-protocols/stable/linux-dmabuf/linux-dmabuf-v1.zxml"
+  "viewporter|upstream/wayland-protocols/stable/viewporter/viewporter.zxml"
+  "fractional-scale|upstream/wayland-protocols/staging/fractional-scale/fractional-scale-v1.zxml"
+  "cursor-shape|upstream/wayland-protocols/staging/cursor-shape/cursor-shape-v1.zxml"
   "ext-zwwm-manager-v1|ext-zwwm-manager-v1.zxml"
   "zwwm-client-connection-v1|zwwm-client-connection-v1.zxml")
 foreach(spec IN LISTS specs)

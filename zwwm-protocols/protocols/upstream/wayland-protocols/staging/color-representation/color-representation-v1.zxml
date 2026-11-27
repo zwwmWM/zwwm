@@ -1,0 +1,387 @@
+/// color representation protocol extension
+///
+/// This protocol extension delivers the metadata required to define alpha mode,
+/// the color model, sub-sampling and quantization range used when interpreting
+/// buffer contents. The main use case is defining how the YCbCr family of pixel
+/// formats convert to RGB.
+///
+/// Note that this protocol does not define the colorimetry of the resulting RGB
+/// channels / tristimulus values. Without the help of other extensions the
+/// resulting colorimetry is therefore implementation defined.
+///
+/// If this extension is not used, the color representation used is compositor
+/// implementation defined.
+///
+/// Recommendation ITU-T H.273
+/// "Coding-independent code points for video signal type identification"
+/// shall be referred to as simply H.273 here.
+protocol color_representation_v1;
+
+copyright R"(
+Copyright 2022 Simon Ser
+Copyright 2022 Red Hat, Inc.
+Copyright 2022 Collabora, Ltd.
+Copyright 2022-2025 Red Hat, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including the next
+paragraph) shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+)";
+
+/// color representation manager singleton
+///
+/// A singleton global interface used for getting color representation
+/// extensions for wl_surface. The extension interfaces allow setting the
+/// color representation of surfaces.
+///
+/// Compositors should never remove this global.
+interface wp_color_representation_manager_v1 version 1 {
+  /// protocol errors
+  enum error {
+    surface_exists = 1,  ///< color representation surface exists already
+  }
+
+  /// destroy the manager
+  ///
+  /// Destroy the wp_color_representation_manager_v1 object. This does not
+  /// affect any other objects in any way.
+  request ~destroy();
+
+  /// create a color representation interface for a wl_surface
+  ///
+  /// If a wp_color_representation_surface_v1 object already exists for the
+  /// given wl_surface, the protocol error surface_exists is raised.
+  ///
+  /// This creates a new color wp_color_representation_surface_v1 object for
+  /// the given wl_surface.
+  ///
+  /// See the wp_color_representation_surface_v1 interface for more details.
+  request get_surface(new<wp_color_representation_surface_v1> id, object<wl_surface> surface);
+
+  /// supported alpha modes
+  ///
+  /// When this object is created, it shall immediately send this event once
+  /// for each alpha mode the compositor supports.
+  ///
+  /// For the definition of the supported values, see the
+  /// wp_color_representation_surface_v1::alpha_mode enum.
+  event supported_alpha_mode(
+    uint<wp_color_representation_surface_v1.alpha_mode> alpha_mode  ///< supported alpha mode
+  );
+
+  /// supported matrix coefficients and ranges
+  ///
+  /// When this object is created, it shall immediately send this event once
+  /// for each matrix coefficient and color range combination the compositor
+  /// supports.
+  ///
+  /// For the definition of the supported values, see the
+  /// wp_color_representation_surface_v1::coefficients and
+  /// wp_color_representation_surface_v1::range enums.
+  event supported_coefficients_and_ranges(
+    uint<wp_color_representation_surface_v1.coefficients> coefficients,  ///< supported matrix coefficients
+    uint<wp_color_representation_surface_v1.range> range                 ///< full range flag
+  );
+
+  /// all features have been sent
+  ///
+  /// This event is sent when all supported features have been sent.
+  event done();
+}
+
+/// color representation extension to a surface
+///
+/// A wp_color_representation_surface_v1 allows the client to set the color
+/// representation metadata of a surface.
+///
+/// By default, a surface does not have any color representation metadata set.
+/// The reconstruction of R, G, B signals on such surfaces is compositor
+/// implementation defined. The alpha mode is assumed to be
+/// premultiplied_electrical when the alpha mode is unset.
+///
+/// If the wl_surface associated with the wp_color_representation_surface_v1
+/// is destroyed, the wp_color_representation_surface_v1 object becomes inert.
+interface wp_color_representation_surface_v1 version 1 {
+  /// protocol errors
+  enum error {
+    alpha_mode = 1,       ///< unsupported alpha mode
+    coefficients = 2,     ///< unsupported coefficients
+    pixel_format = 3,     ///< the pixel format and a set value are incompatible
+    inert = 4,            ///< forbidden request on inert object
+    chroma_location = 5,  ///< invalid chroma location
+  }
+
+  /// alpha mode
+  ///
+  /// Specifies how the alpha channel affects the color channels.
+  enum alpha_mode {
+    /// premultiplied alpha in electrical values
+    ///
+    /// Electrical color channel values (after transfer function encoding)
+    /// are already multiplied with the alpha channel value.
+    premultiplied_electrical = 0,
+    /// premultiplied alpha in optical values
+    ///
+    /// Optical color channel values (before transfer function encoding)
+    /// are already multiplied with the alpha channel value.
+    premultiplied_optical = 1,
+    /// straight alpha
+    ///
+    /// Alpha channel has not been pre-multiplied into color channels.
+    straight = 2,
+  }
+
+  /// named coefficients
+  ///
+  /// Named matrix coefficients used to encode well-known sets of
+  /// coefficients. H.273 is the authority, when it comes to the exact values
+  /// of coefficients and authoritative specifications, where an equivalent
+  /// code point exists.
+  ///
+  /// A value of 0 is invalid and will never be present in the list of enums.
+  ///
+  /// Descriptions do list the specifications for convenience.
+  enum coefficients {
+    /// The identity matrix
+    ///
+    /// Coefficients as defined by
+    /// - IEC 61966-2-1 sRGB
+    /// - SMPTE ST 428-1 (2019)
+    ///
+    /// Equivalent to H.273 MatrixCoefficients code point 0.
+    /// Compatible with pixel formats of the RGB family.
+    identity = 1,
+    /// BT.709 matrix coefficients
+    ///
+    /// Coefficients as defined by
+    /// - Rec. ITU-R BT.709-6
+    /// - Rec. ITU-R BT.1361-0 conventional colour gamut system (historical)
+    /// - Rec. ITU-R BT.1361-0 conventional colour gamut system and extended
+    ///   colour gamut system (historical)
+    /// - IEC 61966-2-4 xvYCC709
+    /// - SMPTE RP 177 (1993) Annex B
+    ///
+    /// Equivalent to H.273 MatrixCoefficients code point 1.
+    /// Compatible with pixel formats of the YCbCr family.
+    bt709 = 2,
+    /// FCC matrix coefficients
+    ///
+    /// Coefficients as defined by
+    /// - United States Federal Communications Commission (2003) Title 47
+    ///   Code of Federal Regulations 73.682 (a) (20)
+    ///
+    /// Equivalent to H.273 MatrixCoefficients code point 4.
+    /// Compatible with pixel formats of the YCbCr family.
+    fcc = 3,
+    /// BT.601-7 matrix coefficients
+    ///
+    /// Coefficients as defined by
+    /// - Rec. ITU-R BT.470-6 System B, G (historical)
+    /// - Rec. ITU-R BT.601-7 625
+    /// - Rec. ITU-R BT.601-7 525
+    /// - Rec. ITU-R BT.1358-0 625 (historical)
+    /// - Rec. ITU-R BT.1358-1 525 or 625 (historical)
+    /// - Rec. ITU-R BT.1700-0 625 PAL and 625 SECAM
+    /// - Rec. ITU-R BT.1700-0 NTSC
+    /// - IEC 61966-2-1 sYCC
+    /// - IEC 61966-2-4 xvYCC601
+    /// - SMPTE ST 170 (2004)
+    ///
+    /// Equivalent to H.273 MatrixCoefficients code point 5, 6.
+    /// Compatible with pixel formats of the YCbCr family.
+    bt601 = 4,
+    /// SMPTE ST 240 matrix coefficients
+    ///
+    /// Coefficients as defined by
+    /// - SMPTE ST 240 (1999)
+    ///
+    /// Equivalent to H.273 MatrixCoefficients code point 7.
+    /// Compatible with pixel formats of the YCbCr family.
+    smpte240 = 5,
+    /// BT.2020 and BT.2100 YCbCr matrix coefficients
+    ///
+    /// Coefficients as defined by
+    /// - Rec. ITU-R BT.2020-2 (non-constant luminance)
+    /// - Rec. ITU-R BT.2100-2 Y′CbCr
+    ///
+    /// Equivalent to H.273 MatrixCoefficients code point 9.
+    /// Compatible with pixel formats of the YCbCr family.
+    bt2020 = 6,
+    /// BT.2020 matrix coefficients for constant luminance
+    ///
+    /// Coefficients as defined by
+    /// - Rec. ITU-R BT.2020-2 (constant luminance)
+    ///
+    /// Equivalent to H.273 MatrixCoefficients code point 10.
+    /// Compatible with pixel formats of the YCbCr family.
+    bt2020_cl = 7,
+    /// BT.2100 ICtCp matrix coefficients
+    ///
+    /// Coefficients as defined by
+    /// - Rec. ITU-R BT.2100-2 ICTCP
+    ///
+    /// Equivalent to H.273 MatrixCoefficients code point 14.
+    /// Compatible with pixel formats of the YCbCr family.
+    ictcp = 8,
+  }
+
+  /// Color range values
+  ///
+  /// Possible color range values.
+  ///
+  /// A value of 0 is invalid and will never be present in the list of enums.
+  enum range {
+    full = 1,     ///< Full color range
+    limited = 2,  ///< Limited color range
+  }
+
+  /// Chroma sample location for 4:2:0 YCbCr
+  ///
+  /// Chroma sample location as defined by H.273 Chroma420SampleLocType.
+  ///
+  /// A value of 0 is invalid and will never be present in the list of enums.
+  ///
+  /// The descriptions list the matching Vulkan VkChromaLocation combinations
+  /// for convenience.
+  enum chroma_location {
+    /// Horizontal offset of 0, vertical offset of 0.5
+    ///
+    /// Corresponding to VkChromaLocations:
+    /// - xChromaOffset: VK_CHROMA_LOCATION_COSITED_EVEN
+    /// - yChromaOffset: VK_CHROMA_LOCATION_MIDPOINT
+    ///
+    /// Equivalent to H.273 Chroma420SampleLocType 0.
+    type_0 = 1,
+    /// Horizontal offset of 0.5, vertical offset of 0.5
+    ///
+    /// Corresponding to VkChromaLocations:
+    /// - xChromaOffset: VK_CHROMA_LOCATION_MIDPOINT
+    /// - yChromaOffset: VK_CHROMA_LOCATION_MIDPOINT
+    ///
+    /// Equivalent to H.273 Chroma420SampleLocType 1.
+    type_1 = 2,
+    /// Horizontal offset of 0, vertical offset of 0
+    ///
+    /// Corresponding to VkChromaLocations:
+    /// - xChromaOffset: VK_CHROMA_LOCATION_COSITED_EVEN
+    /// - yChromaOffset: VK_CHROMA_LOCATION_COSITED_EVEN
+    ///
+    /// Equivalent to H.273 Chroma420SampleLocType 2.
+    type_2 = 3,
+    /// Horizontal offset of 0.5, vertical offset of 0
+    ///
+    /// Corresponding to VkChromaLocations:
+    /// - xChromaOffset: VK_CHROMA_LOCATION_MIDPOINT
+    /// - yChromaOffset: VK_CHROMA_LOCATION_COSITED_EVEN
+    ///
+    /// Equivalent to H.273 Chroma420SampleLocType 3.
+    type_3 = 4,
+    /// Horizontal offset of 0, vertical offset of 1
+    ///
+    /// Equivalent to H.273 Chroma420SampleLocType 4.
+    type_4 = 5,
+    /// Horizontal offset of 0.5, vertical offset of 1
+    ///
+    /// Equivalent to H.273 Chroma420SampleLocType 5.
+    type_5 = 6,
+  }
+
+  /// destroy the color representation
+  ///
+  /// Destroy the wp_color_representation_surface_v1 object.
+  ///
+  /// Destroying this object unsets all the color representation metadata from
+  /// the surface. See the wp_color_representation_surface_v1 interface
+  /// description for how a compositor handles a surface without color
+  /// representation metadata. Unsetting is double-buffered state, see
+  /// wl_surface.commit.
+  request ~destroy();
+
+  /// set the surface alpha mode
+  ///
+  /// If this protocol object is inert, the protocol error inert is raised.
+  ///
+  /// Assuming an alpha channel exists, it is always linear. The alpha mode
+  /// determines whether and how the color channels include pre-multiplied
+  /// alpha. Using straight alpha might have performance benefits.
+  ///
+  /// Only alpha modes advertised by the compositor are allowed to be used as
+  /// argument for this request. The "alpha_mode" protocol error is raised
+  /// otherwise.
+  ///
+  /// Alpha mode is double buffered, see wl_surface.commit.
+  request set_alpha_mode(
+    uint<alpha_mode> alpha_mode  ///< alpha mode
+  );
+
+  /// set the matrix coefficients and range
+  ///
+  /// If this protocol object is inert, the protocol error inert is raised.
+  ///
+  /// Set the matrix coefficients and video range which defines the formula
+  /// and the related constants used to derive red, green and blue signals.
+  /// Usually coefficients correspond to MatrixCoefficients code points in
+  /// H.273.
+  ///
+  /// Only combinations advertised by the compositor are allowed to be used as
+  /// argument for this request. The "coefficients" protocol error is raised
+  /// otherwise.
+  ///
+  /// A call to wl_surface.commit verifies that the pixel format and the
+  /// coefficients-range combination in the committed surface contents are
+  /// compatible, if contents exist. The "pixel_format" protocol error is
+  /// raised otherwise.
+  ///
+  /// A pixel format is compatible with the coefficients-range combination if
+  /// the related equations and conventions as defined in H.273 can produce
+  /// the color channels (RGB or YCbCr) of the pixel format.
+  ///
+  /// For the definition of the supported combination, see the
+  /// wp_color_representation_surface_v1::coefficients and
+  /// wp_color_representation_surface_v1::range enums.
+  ///
+  /// The coefficients-range combination is double-buffered, see
+  /// wl_surface.commit.
+  request set_coefficients_and_range(
+    uint<coefficients> coefficients,  ///< matrix coefficients
+    uint<range> range                 ///< range
+  );
+
+  /// set the chroma location
+  ///
+  /// If this protocol object is inert, the protocol error inert is raised.
+  ///
+  /// Set the chroma location type which defines the position of downsampled
+  /// chroma samples, corresponding to Chroma420SampleLocType code points in
+  /// H.273.
+  ///
+  /// An invalid chroma location enum value raises the "chroma_location"
+  /// protocol error.
+  ///
+  /// A call to wl_surface.commit verifies that the pixel format and chroma
+  /// location type in the committed surface contents are compatible, if
+  /// contents exist. The "pixel_format" protocol error is raised otherwise.
+  ///
+  /// For the definition of the supported chroma location types, see the
+  /// wp_color_representation_surface_v1::chroma_location enum.
+  ///
+  /// The chroma location type is double-buffered, see wl_surface.commit.
+  request set_chroma_location(
+    uint<chroma_location> chroma_location  ///< chroma sample location
+  );
+}

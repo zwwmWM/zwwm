@@ -21,8 +21,8 @@ stdenvNoCC.mkDerivation {
     mkdir -p "$out/share/zwwm-protocols" "$out/share/pkgconfig" "$out/share/doc/zwwm-protocols"
     cp -r zwwm-protocols/protocols/. "$out/share/zwwm-protocols/"
     # zxml sources also ship as Wayland XML for third-party generators.
-    for zxml in zwwm-protocols/protocols/*.zxml; do
-      zwayland-scanner xml "$zxml" "$out/share/zwwm-protocols/$(basename "$zxml" .zxml).xml"
+    (cd zwwm-protocols/protocols && find . -name '*.zxml') | while read -r zxml; do
+      zwayland-scanner xml "zwwm-protocols/protocols/$zxml" "$out/share/zwwm-protocols/''${zxml%.zxml}.xml"
     done
     cp LICENSE THIRD_PARTY.md "$out/share/doc/zwwm-protocols/"
     substitute zwwm-protocols/zwwm-protocols.pc.in "$out/share/pkgconfig/zwwm-protocols.pc" \

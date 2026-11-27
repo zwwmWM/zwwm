@@ -22,8 +22,8 @@ endif()
 # migration from libwayland onto these libraries is tracked separately.
 
 set(ZWAYLAND_CORE_XML
-    "${CMAKE_CURRENT_SOURCE_DIR}/../zwwm-protocols/protocols/upstream/wayland/wayland.xml"
-    CACHE FILEPATH "Wayland core protocol XML used by zwayland-scanner")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../zwwm-protocols/protocols/upstream/wayland/wayland.zxml"
+    CACHE FILEPATH "Wayland core protocol (zxml or XML) used by zwayland-scanner")
 set(ZWAYLAND_CORE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(ZWAYLAND_CORE_SERVER_HEADER "${ZWAYLAND_CORE_GENERATED_DIR}/wayland-zwayland-server.h")
 set(ZWAYLAND_CORE_CLIENT_HEADER "${ZWAYLAND_CORE_GENERATED_DIR}/wayland-zwayland-client.h")

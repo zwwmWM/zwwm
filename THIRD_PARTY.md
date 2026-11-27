@@ -6,9 +6,9 @@ also contains the following third-party material under its upstream terms.
 ## Wayland Protocol Data
 
 `zwwm-protocols/protocols/upstream/wayland/` contains the Wayland 1.26.0 core
-protocol data. `zwwm-protocols/protocols/upstream/wayland-protocols/` contains
-the wayland-protocols 1.49 protocol XML snapshot. Copyright and permission
-notices are retained in the individual XML and data files.
+protocol. `zwwm-protocols/protocols/upstream/wayland-protocols/` contains
+wayland-protocols 1.49. Both are converted from upstream XML to zxml with their
+copyright and permission notices kept in each file.
 
 ## stb_image_write
 

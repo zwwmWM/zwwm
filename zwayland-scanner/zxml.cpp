@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <initializer_list>
 #include <optional>
 #include <ostream>
 #include <sstream>
@@ -34,6 +35,12 @@ class Lexer {
         token.kind = TokenKind::trailing_doc;
         advance(4);
         token.text = doc_line();
+        // A wrapped summary continues on following `///<` lines.
+        while (next_line_starts("///<")) {
+          advance(4);
+          const auto more = doc_line();
+          if (!more.empty()) token.text += (token.text.empty() ? "" : " ") + more;
+        }
       } else if (starts("///") && peek(3) != '/') {
         token.kind = TokenKind::doc;
         token.text = doc_lines();
@@ -100,21 +107,26 @@ class Lexer {
     while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r')) line.pop_back();
     return line;
   }
+  // Moves to the next line's `prefix` when that line starts with it (after indentation).
+  bool next_line_starts(std::string_view prefix, std::initializer_list<std::string_view> excluded = {}) {
+    std::size_t ahead = position_;
+    while (ahead < source_.size() && (source_[ahead] == ' ' || source_[ahead] == '\t' || source_[ahead] == '\r')) ++ahead;
+    if (ahead >= source_.size() || source_[ahead] != '\n') return false;
+    ++ahead;
+    while (ahead < source_.size() && (source_[ahead] == ' ' || source_[ahead] == '\t')) ++ahead;
+    const auto rest = source_.substr(ahead);
+    if (!rest.starts_with(prefix)) return false;
+    for (const auto other : excluded) if (rest.starts_with(other)) return false;
+    while (position_ < ahead) next();
+    return true;
+  }
   // Joins consecutive `///` lines; a blank line or any other token ends the block.
   std::string doc_lines() {
     std::string text;
-    while (true) {
+    do {
       advance(3);
       text += doc_line() + '\n';
-      std::size_t ahead = position_;
-      while (ahead < source_.size() && (source_[ahead] == ' ' || source_[ahead] == '\t' || source_[ahead] == '\r')) ++ahead;
-      if (ahead >= source_.size() || source_[ahead] != '\n') break;
-      ++ahead;
-      while (ahead < source_.size() && (source_[ahead] == ' ' || source_[ahead] == '\t')) ++ahead;
-      const auto rest = source_.substr(ahead);
-      if (!rest.starts_with("///") || rest.starts_with("////") || rest.starts_with("///<")) break;
-      while (position_ < ahead) next();
-    }
+    } while (next_line_starts("///", {"////", "///<"}));
     text.pop_back();
     return text;
   }
@@ -398,9 +410,27 @@ class Parser {
   std::string_view path_;
 };
 
+constexpr std::size_t line_limit = 100;
+
+// Breaks a summary at spaces into lines of at most `width` characters where possible.
+std::vector<std::string> wrap(std::string_view text, std::size_t width) {
+  std::vector<std::string> lines;
+  while (text.size() > width) {
+    auto cut = text.rfind(' ', width);
+    if (cut == std::string_view::npos || cut == 0) cut = text.find(' ', width);
+    if (cut == std::string_view::npos) break;
+    lines.emplace_back(text.substr(0, cut));
+    text.remove_prefix(cut + 1);
+  }
+  lines.emplace_back(text);
+  return lines;
+}
+
 void write_doc(std::ostream& out, const Doc& doc, const std::string& indent) {
   if (doc.empty()) return;
-  out << indent << "///" << (doc.summary.empty() ? "" : " " + doc.summary) << '\n';
+  if (doc.summary.empty()) out << indent << "///\n";
+  else for (const auto& line : wrap(doc.summary, std::max<std::size_t>(40, line_limit - indent.size() - 4)))
+    out << indent << "/// " << line << '\n';
   if (doc.body.empty()) return;
   if (!doc.summary.empty()) out << indent << "///\n";
   std::istringstream lines(doc.body);
@@ -436,7 +466,13 @@ void write_items(std::ostream& out, const std::vector<std::pair<std::string, con
     const auto& [text, doc] = items[index];
     if (!doc->body.empty()) write_doc(out, *doc, indent);
     std::string line = text + (trailing_comma || index + 1 < items.size() ? "," : "");
-    if (doc->body.empty() && !doc->summary.empty()) line += std::string(width - line.size() + 2, ' ') + "///< " + doc->summary;
+    if (doc->body.empty() && !doc->summary.empty()) {
+      const std::size_t column = indent.size() + width + 2;
+      const auto summary = wrap(doc->summary, std::max<std::size_t>(40, line_limit - std::min(line_limit, column + 5)));
+      line += std::string(width - line.size() + 2, ' ') + "///< " + summary.front();
+      for (std::size_t part = 1; part < summary.size(); ++part)
+        line += "\n" + indent + std::string(width + 2, ' ') + "///< " + summary[part];
+    }
     out << indent << line << '\n';
   }
 }
