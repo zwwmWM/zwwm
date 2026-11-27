@@ -2,7 +2,7 @@
 
 All notable changes to zwwm are documented here.
 
-## Unreleased
+## 1.1.0 - 2026-11-27
 
 ### Highlights
 
@@ -77,6 +77,22 @@ Same Wayland wire protocol and public API; the internals are reworked.
   the validator.
 - CI now checks the default configuration, the fixtures in `checks/config`, and
   the `zw` snippets in the documentation on every push.
+
+### Protocols
+
+- New zxml protocol format: a C++-like source the scanner reads and writes next
+  to Wayland XML. All project and upstream protocols are zxml now; XML is still
+  generated and installed for other toolkits. libxml2 is no longer needed.
+- Own `zwwm-xwayland-shell-v1` text, and project protocols list binarylinuxx as
+  owner.
+- Generated handlers reject null or wrong-type objects and bad new_ids, so
+  protocol code no longer repeats those checks.
+
+### Outputs
+
+- Any monitor setting change in the config, including the refresh rate,
+  re-applies the mode; it waits for pending page flips, so layer surfaces no
+  longer vanish during the switch.
 
 ### Portal
 
